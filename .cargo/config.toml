@@ -1,0 +1,4 @@
+# Nessy's debug constructors materialize large PPU buffers on the stack.
+# Cargo's test threads otherwise default to only 2 MiB.
+[env]
+RUST_MIN_STACK = "16777216"

@@ -1,0 +1,173 @@
+// BLOOM & LOGIC — an original Nonogram garden.
+// Arrow keys move; A fills; B marks; Select undoes; Start changes puzzle.
+cartridge "Bloom & Logic" {
+    mapper = nrom;
+    region = ntsc;
+    mirroring = vertical;
+    chr = "assets/bloom.chr";
+    palette = "assets/bloom.pal";
+    screen = "assets/bloom.map";
+}
+const PUZZLES: [u8; 512] = asset("assets/bloom.puzzles.bin");
+const CLUES: [u8; 512] = asset("assets/bloom.clues.bin");
+const MELODY: [u16; 32] = [
+    213, 169, 142, 169, 189, 159, 126, 159, 213, 169, 142, 112, 126, 142, 169, 0,
+    253, 213, 169, 213, 225, 189, 159, 189, 284, 225, 189, 142, 159, 189, 213, 0,
+];
+const BASS: [u16; 32] = [
+    427, 338, 284, 338, 380, 319, 253, 319, 427, 338, 284, 225, 253, 284, 338, 0,
+    507, 427, 338, 427, 452, 380, 319, 380, 570, 452, 380, 284, 319, 380, 427, 0,
+];
+var cells: [u8; 64] = [0; 64];
+var level: u8 = 0;
+var cursor_x: u8 = 0;
+var cursor_y: u8 = 0;
+var last_cell: u8 = 0;
+var last_value: u8 = 0;
+var can_undo: bool = false;
+var solved: bool = false;
+var frame: u8 = 0;
+var move_delay: u8 = 0;
+var music_clock: u8 = 0;
+var music_step: u8 = 0;
+var effect_timer: u8 = 0;
+
+fn draw_cell(index: u8) {
+    let state: u8 = cells[raw index];
+    var tile_id: u8 = 128;
+    if state == 1 { tile_id = 132; }
+    if state == 2 { tile_id = 136; }
+    let x: u8 = 8 + ((index & 7) << 1);
+    let y: u8 = 8 + ((index >> 3) << 1);
+    tile(x, y, tile_id);
+    tile(x + 1, y, tile_id + 1);
+    tile(x, y + 1, tile_id + 2);
+    tile(x + 1, y + 1, tile_id + 3);
+}
+
+fn title() {
+    if level == 0 { text(8, 24, "1: LITTLE MUSHROOM"); }
+    if level == 1 { text(8, 24, "2: KIND HEART    "); }
+    if level == 2 { text(8, 24, "3: NIGHT CAT     "); }
+    if level == 3 { text(8, 24, "4: PAPER ROCKET  "); }
+    if level == 4 { text(8, 24, "5: WILDFLOWER    "); }
+    if level == 5 { text(8, 24, "6: GARDEN SPIRIT "); }
+    if level == 6 { text(8, 24, "7: BUTTERFLY     "); }
+    if level == 7 { text(8, 24, "8: LANTERN LIGHT "); }
+}
+
+fn new_puzzle() {
+    render(false);
+    solved = false;
+    can_undo = false;
+    cursor_x = 0;
+    cursor_y = 0;
+    for i in 0..64 { cells[i] = 0; draw_cell(i); }
+    for row in 0..8 {
+        for column in 0..4 {
+            let c: u8 = CLUES[raw (u16(level) << 6) + (u16(row) << 2) + u16(column)];
+            var ch: u8 = 32;
+            if c != 0 { ch = c + 48; }
+            tile(4 + column, 8 + (row << 1), ch);
+        }
+    }
+    for col in 0..8 {
+        for slot in 0..4 {
+            let clue: u8 = CLUES[raw (u16(level) << 6) + 32 + (u16(col) << 2) + u16(slot)];
+            var glyph: u8 = 32;
+            if clue != 0 { glyph = clue + 48; }
+            tile(8 + (col << 1), 4 + slot, glyph);
+        }
+    }
+    title();
+    text(3, 25, "A FILL  B MARK  SELECT UNDO");
+    text(5, 27, "START: NEXT LITTLE GARDEN");
+    render(true);
+}
+
+fn complete() -> bool {
+    for i in 0..64 {
+        let expected: u8 = PUZZLES[raw (u16(level) << 6) + u16(i)];
+        if expected == 1 && cells[i] != 1 { return false; }
+        if expected == 0 && cells[i] == 1 { return false; }
+    }
+    return true;
+}
+
+fn music() {
+    music_clock += 1;
+    if music_clock == 12 {
+        music_clock = 0;
+        let note: u8 = music_step & 31;
+        let pitch: u16 = MELODY[note];
+        if pitch != 0 { tone(0, pitch, 5); } else { silence(0); }
+        if (music_step & 1) == 0 { tone(2, BASS[note], 8); }
+        if (music_step & 7) == 0 { noise(5, 2); }
+        music_step += 1;
+    }
+    if music_clock == 3 { silence(3); }
+    if effect_timer != 0 {
+        effect_timer -= 1;
+        if effect_timer == 0 { silence(1); }
+    }
+}
+
+fn init() {
+    new_puzzle();
+}
+
+fn update() {
+    frame += 1;
+    music();
+    let edge: u8 = pressed();
+    let held: u8 = buttons();
+    if (edge & 8) != 0 {
+        level = (level + 1) & 7;
+        new_puzzle();
+    }
+    if move_delay != 0 { move_delay -= 1; }
+    if move_delay == 0 || (edge & 240) != 0 {
+        if (held & 128) != 0 && cursor_x < 7 { cursor_x += 1; move_delay = 7; }
+        if (held & 64) != 0 && cursor_x > 0 { cursor_x -= 1; move_delay = 7; }
+        if (held & 32) != 0 && cursor_y < 7 { cursor_y += 1; move_delay = 7; }
+        if (held & 16) != 0 && cursor_y > 0 { cursor_y -= 1; move_delay = 7; }
+    }
+    let cell: u8 = ((cursor_y << 3) | cursor_x) & 63;
+    if !solved {
+        if (edge & 3) != 0 {
+            last_cell = cell;
+            last_value = cells[cell];
+            can_undo = true;
+            if (edge & 1) != 0 {
+                if cells[cell] == 1 { cells[cell] = 0; } else { cells[cell] = 1; }
+            } else {
+                if cells[cell] == 2 { cells[cell] = 0; } else { cells[cell] = 2; }
+            }
+            draw_cell(cell);
+            tone(1, 210 + (u16(cursor_x) << 3), 4);
+            effect_timer = 5;
+            if complete() {
+                solved = true;
+                text(3, 25, "SOLVED! YOUR GARDEN IS ALIVE");
+                tone(1, 106, 8);
+                effect_timer = 30;
+            }
+        }
+        if (edge & 4) != 0 && can_undo {
+            cells[raw last_cell] = last_value;
+            draw_cell(last_cell);
+            can_undo = false;
+        }
+    }
+    let x: u8 = 64 + (cursor_x << 4);
+    let y: u8 = 64 + (cursor_y << 4);
+    sprite(0, x, y, 140, 0);
+    sprite(1, x + 8, y, 141, 0);
+    sprite(2, x, y + 8, 142, 0);
+    sprite(3, x + 8, y + 8, 143, 0);
+    let flutter: u8 = (frame >> 3) & 3;
+    sprite(4, 208, 144 + flutter, 240, 1);
+    sprite(5, 216, 144 + flutter, 241, 1);
+    sprite(6, 208, 152 + flutter, 242, 1);
+    sprite(7, 216, 152 + flutter, 243, 1);
+}

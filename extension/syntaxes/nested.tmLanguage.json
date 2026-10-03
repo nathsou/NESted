@@ -1,0 +1,21 @@
+{
+  "name": "NESted",
+  "scopeName": "source.nested",
+  "patterns": [
+    { "include": "#comments" }, { "include": "#strings" },
+    { "name": "meta.function.nested", "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z_0-9]*)", "captures": { "1": { "name": "keyword.declaration.function.nested" }, "2": { "name": "entity.name.function.nested" } } },
+    { "name": "storage.type.nested", "match": "\\b(u8|i8|u16|i16|bool|void)\\b" },
+    { "name": "keyword.control.nested", "match": "\\b(if|else|while|for|in|loop|return|break|continue|raw)\\b" },
+    { "name": "storage.modifier.nested", "match": "\\b(let|var|const|cartridge|asm)\\b" },
+    { "name": "constant.language.nested", "match": "\\b(true|false)\\b" },
+    { "name": "entity.other.attribute-name.nested", "match": "@[A-Za-z_][A-Za-z_0-9]*" },
+    { "name": "support.function.nested", "match": "\\b(buttons|pressed|tile|text|sprite|hide_sprites|palette|render|screen|screen_bank|tone|noise|silence|rand|peek|poke|bank|bank_peek|asset)\\b" },
+    { "name": "keyword.other.assembly.nested", "match": "\\b(?i:adc|and|asl|bcc|bcs|beq|bit|bmi|bne|bpl|brk|bvc|bvs|clc|cld|cli|clv|cmp|cpx|cpy|dec|dex|dey|eor|inc|inx|iny|jmp|jsr|lda|ldx|ldy|lsr|nop|ora|pha|php|pla|plp|rol|ror|rti|rts|sbc|sec|sed|sei|sta|stx|sty|tax|tay|tsx|txa|txs|tya)\\b" },
+    { "name": "constant.numeric.nested", "match": "\\b(0x[0-9A-Fa-f_]+|0b[01_]+|[0-9][0-9_]*)\\b|\\$[0-9A-Fa-f]+" },
+    { "name": "keyword.operator.nested", "match": "->|\\.\\.|<<=?|>>=?|[+*/%&|^~!=<>-]=?|#" }
+  ],
+  "repository": {
+    "comments": { "patterns": [{ "name": "comment.line.double-slash.nested", "begin": "//", "end": "$" }, { "name": "comment.block.nested", "begin": "/\\*", "end": "\\*/", "patterns": [{ "include": "#comments" }] }] },
+    "strings": { "patterns": [{ "name": "string.quoted.double.nested", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.nested", "match": "\\\\." }] }, { "name": "string.quoted.single.nested", "begin": "'", "end": "'", "patterns": [{ "name": "constant.character.escape.nested", "match": "\\\\." }] }] }
+  }
+}

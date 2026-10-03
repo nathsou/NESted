@@ -1,0 +1,27 @@
+{
+  "generator": "scripts/generate-assets.py",
+  "art": "Original hand-authored NES 2-bpp pixel patterns",
+  "music": "Four original 32-step compositions with distinct pulse and triangle arrangements",
+  "spriteTiles": {
+    "cursor": 140,
+    "flower": 144,
+    "hero": 148,
+    "run": 152,
+    "gem": 160,
+    "slime": 164,
+    "bat": 168,
+    "chest": 172,
+    "gate": 176,
+    "spikes": 180,
+    "terrain": 184,
+    "note": 192,
+    "hold": 196,
+    "dash": 208,
+    "lantern": 212,
+    "stairs": 216,
+    "floor": 220,
+    "moss": 224,
+    "heart": 232,
+    "butterfly": 240
+  }
+}
