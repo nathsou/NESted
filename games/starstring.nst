@@ -74,9 +74,16 @@ fn print_score() {
     hud_dirty = false;
 }
 
+fn draw_tempo() {
+    if difficulty == 0 { text(5, 4, "MOONLIGHT CIRCUIT /  90 BPM"); }
+    if difficulty == 1 { text(5, 4, "MOONLIGHT CIRCUIT / 112 BPM"); }
+    if difficulty == 2 { text(5, 4, "MOONLIGHT CIRCUIT / 180 BPM"); }
+}
+
 fn menu() {
     render(false);
     screen("assets/starstring.map");
+    draw_tempo();
     text(7, 13, "PRESS START TO PLAY");
     text(6, 15, "TAPS CHORDS AND HOLDS");
     text(6, 17, "SELECT: DIFFICULTY");
@@ -89,6 +96,7 @@ fn menu() {
 fn start_song() {
     render(false);
     screen("assets/starstring.map");
+    draw_tempo();
     if difficulty == 0 { tempo = 20; fall_speed = 2; hit_window = 12; music_delay = 80; }
     if difficulty == 1 { tempo = 16; fall_speed = 2; hit_window = 8; music_delay = 80; }
     if difficulty == 2 { tempo = 10; fall_speed = 4; hit_window = 8; music_delay = 40; }

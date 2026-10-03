@@ -1,9 +1,18 @@
 //! The small, explicit standard runtime. Main and NMI communicate through a
 //! one-byte publication marker. NMI never touches runtime scratch before a
 //! completed frame is published. DMC playback is disabled by this runtime.
-use crate::{codegen::Mapper,frontend::Program};
-pub fn runtime(mapper:Mapper,p:&Program,initializers:&str,reset:Option<&str>,nmi:Option<&str>,irq:Option<&str>,has_init:bool)->String{
- let mut s=String::from(r#"
+use crate::{codegen::Mapper, frontend::Program};
+pub fn runtime(
+    mapper: Mapper,
+    p: &Program,
+    initializers: &str,
+    reset: Option<&str>,
+    nmi: Option<&str>,
+    irq: Option<&str>,
+    has_init: bool,
+) -> String {
+    let mut s = String::from(
+        r#"
 __reset:
  sei
  cld
@@ -38,14 +47,59 @@ __warmup1:
 __warmup2:
  bit $2002
  bpl __warmup2
-"#);
- let vertical=p.config.get("mirroring").is_none_or(|s|s=="vertical");
- match mapper{
- Mapper::Mmc1=>s.push_str(&format!("lda #128\nsta $8000\nlda #{}\nldx #5\n__mmc1_init:\nsta $8000\nlsr a\ndex\nbne __mmc1_init\nlda #0\nsta $04\njsr __rt_bank\n",if vertical{14}else{15})),
- Mapper::Mmc3=>{s.push_str("lda #0\nsta $e000\nlda #0\nsta $8000\nlda #0\nsta $8001\nlda #1\nsta $8000\nlda #2\nsta $8001\n");for i in 2..6{s.push_str(&format!("lda #{i}\nsta $8000\nlda #{}\nsta $8001\n",i+2));}s.push_str(&format!("lda #{}\nsta $a000\nlda #128\nsta $a001\n",u8::from(!vertical)));},
- Mapper::Uxrom=>s.push_str("lda #0\nsta $04\njsr __rt_bank\n"),_=>{}
- }
- if mapper==Mapper::Uxrom{s.push_str(r#"
+"#,
+    );
+    let vertical = p.config.get("mirroring").is_none_or(|s| s == "vertical");
+    match mapper {
+        Mapper::Mmc1 => {
+            let control = if vertical { 14 } else { 15 };
+            s.push_str(&format!(
+                r#"lda #128
+sta $8000
+lda #{control}
+ldx #5
+__mmc1_init:
+sta $8000
+lsr a
+dex
+bne __mmc1_init
+lda #0
+sta $04
+jsr __rt_bank
+"#
+            ));
+        }
+        Mapper::Mmc3 => {
+            s.push_str(
+                r#"lda #0
+sta $e000
+lda #0
+sta $8000
+lda #0
+sta $8001
+lda #1
+sta $8000
+lda #2
+sta $8001
+"#,
+            );
+            for register in 2..6 {
+                let chr_bank = register + 2;
+                s.push_str(&format!(
+                    "lda #{register}\nsta $8000\nlda #{chr_bank}\nsta $8001\n"
+                ));
+            }
+            let mirroring = u8::from(!vertical);
+            s.push_str(&format!(
+                "lda #{mirroring}\nsta $a000\nlda #128\nsta $a001\n"
+            ));
+        }
+        Mapper::Uxrom => s.push_str("lda #0\nsta $04\njsr __rt_bank\n"),
+        Mapper::Nrom => {}
+    }
+    if mapper == Mapper::Uxrom {
+        s.push_str(
+            r#"
  bit $2002
  lda #0
  sta $2006
@@ -63,15 +117,27 @@ __load_chr_ram:
  inc $0b
  dex
  bne __load_chr_ram
-"#);}
- s.push_str(initializers);
- if p.config.contains_key("screen"){s.push_str("lda #<__initial_screen\nsta $04\nlda #>__initial_screen\nsta $05\njsr __rt_screen\n");}
- if p.config.contains_key("palette"){s.push_str("bit $2002\nlda #63\nsta $2006\nlda #0\nsta $2006\nldx #0\n__load_palette:\nlda __initial_palette,x\nsta $2007\ninx\ncpx #32\nbne __load_palette\n");}
- s.push_str("jsr __rt_hide_sprites\nlda #15\nsta $4015\nlda #8\nsta $4001\nsta $4005\n");
- if let Some(reset)=reset{s.push_str(&format!("jsr __fn_{reset}\n__halt:\njmp __halt\n"));}
- else{
-   if has_init{s.push_str("jsr __fn_init\n");}
-   s.push_str(r#"
+"#,
+        );
+    }
+    s.push_str(initializers);
+    if p.config.contains_key("screen") {
+        s.push_str(
+            "lda #<__initial_screen\nsta $04\nlda #>__initial_screen\nsta $05\njsr __rt_screen\n",
+        );
+    }
+    if p.config.contains_key("palette") {
+        s.push_str("bit $2002\nlda #63\nsta $2006\nlda #0\nsta $2006\nldx #0\n__load_palette:\nlda __initial_palette,x\nsta $2007\ninx\ncpx #32\nbne __load_palette\n");
+    }
+    s.push_str("jsr __rt_hide_sprites\nlda #15\nsta $4015\nlda #8\nsta $4001\nsta $4005\n");
+    if let Some(reset) = reset {
+        s.push_str(&format!("jsr __fn_{reset}\n__halt:\njmp __halt\n"));
+    } else {
+        if has_init {
+            s.push_str("jsr __fn_init\n");
+        }
+        s.push_str(
+            r#"
  bit $2002
  lda #0
  sta $2005
@@ -91,9 +157,11 @@ __await_publication:
  lda $00
  bne __await_publication
  jmp __main
-"#);
- }
- s.push_str(r#"
+"#,
+        );
+    }
+    s.push_str(
+        r#"
 __nmi:
  pha
  txa
@@ -101,8 +169,11 @@ __nmi:
  tya
  pha
  inc $037e
-"#);
- if reset.is_none(){s.push_str(r#"
+"#,
+    );
+    if reset.is_none() {
+        s.push_str(
+            r#"
  lda $00
  beq __nmi_done
  bit $2002
@@ -131,10 +202,17 @@ __flush_done:
  sta $2005
  lda #128
  sta $2000
-"#);}
- if let Some(name)=nmi{s.push_str(&format!("jsr __fn_{name}\n"));}
- if reset.is_none(){s.push_str("lda #0\nsta $00\n");}
- s.push_str(r#"
+"#,
+        );
+    }
+    if let Some(name) = nmi {
+        s.push_str(&format!("jsr __fn_{name}\n"));
+    }
+    if reset.is_none() {
+        s.push_str("lda #0\nsta $00\n");
+    }
+    s.push_str(
+        r#"
 __nmi_done:
  pla
  tay
@@ -143,9 +221,15 @@ __nmi_done:
  pla
  rti
 __irq:
-"#);
- if let Some(name)=irq{s.push_str(&format!("pha\ntxa\npha\ntya\npha\njsr __fn_{name}\npla\ntay\npla\ntax\npla\n"));}
- s.push_str(r#"
+"#,
+    );
+    if let Some(name) = irq {
+        s.push_str(&format!(
+            "pha\ntxa\npha\ntya\npha\njsr __fn_{name}\npla\ntay\npla\ntax\npla\n"
+        ));
+    }
+    s.push_str(
+        r#"
  rti
 
 __rt_poll:
@@ -541,13 +625,14 @@ __div_skip:
  lda $17
  ldx $18
  rts
-"#);
- match mapper{
+"#,
+    );
+    match mapper{
  Mapper::Nrom=>s.push_str("__rt_bank:\nrts\n"),
  Mapper::Uxrom=>s.push_str("__rt_bank:\nlda $04\nsta $1e\ntax\nsta __bank_bus_values,x\nrts\n__bank_bus_values:\n.byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"),
  Mapper::Mmc1=>s.push_str("__rt_bank:\nlda $04\nsta $1e\nldx #5\n__bank_serial:\nsta $e000\nlsr a\ndex\nbne __bank_serial\nrts\n"),
  Mapper::Mmc3=>s.push_str("__rt_bank:\nlda #6\nsta $8000\nlda $04\nsta $1e\nsta $8001\nrts\n"),
  }
- s.push_str("__rt_screen_bank:\njsr __rt_bank\nlda $05\nsta $04\nlda $06\nclc\nadc #128\nsta $05\njsr __rt_screen\nrts\n__rt_bank_peek:\njsr __rt_bank\nlda $05\nsta $0a\nlda $06\nclc\nadc #128\nsta $0b\nldy #0\nlda ($0a),y\nrts\n");
- s
+    s.push_str("__rt_screen_bank:\njsr __rt_bank\nlda $05\nsta $04\nlda $06\nclc\nadc #128\nsta $05\njsr __rt_screen\nrts\n__rt_bank_peek:\njsr __rt_bank\nlda $05\nsta $0a\nlda $06\nclc\nadc #128\nsta $0b\nldy #0\nlda ($0a),y\nrts\n");
+    s
 }

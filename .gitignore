@@ -11,3 +11,7 @@
 *.nes
 *.ppm
 /artifacts/
+
+/extension/bin/
+.nested/
+core

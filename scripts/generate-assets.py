@@ -59,18 +59,18 @@ FONT = {
 ' ': ['00000']*7,
 }
 PALETTES = {
-'bloom': [0x0f,0x30,0x1c,0x28, 0x0f,0x30,0x2c,0x16, 0x0f,0x09,0x29,0x37, 0x0f,0x15,0x26,0x36,
-          0x0f,0x0c,0x28,0x30, 0x0f,0x09,0x2a,0x36, 0x0f,0x15,0x26,0x30, 0x0f,0x02,0x2c,0x30],
+'bloom': [0x3b,0x0c,0x21,0x30, 0x3b,0x37,0x1c,0x2c, 0x3b,0x0c,0x2c,0x37, 0x3b,0x09,0x19,0x37,
+          0x3b,0x0c,0x16,0x30, 0x3b,0x0c,0x29,0x37, 0x3b,0x09,0x19,0x37, 0x3b,0x0c,0x2c,0x30],
 'starstring': [0x0f,0x30,0x12,0x2c, 0x0f,0x02,0x12,0x2c, 0x0f,0x04,0x14,0x34, 0x0f,0x06,0x16,0x28,
                0x0f,0x02,0x2c,0x30, 0x0f,0x04,0x34,0x30, 0x0f,0x06,0x28,0x30, 0x0f,0x05,0x26,0x30],
-'skythread': [0x0f,0x30,0x12,0x2c, 0x0f,0x03,0x13,0x2c, 0x0f,0x01,0x11,0x21, 0x0f,0x06,0x16,0x30,
+'skythread': [0x0f,0x30,0x12,0x2c, 0x0f,0x01,0x11,0x31, 0x0f,0x01,0x11,0x21, 0x0f,0x06,0x16,0x30,
              0x0f,0x0c,0x2c,0x30, 0x0f,0x06,0x16,0x28, 0x0f,0x01,0x21,0x30, 0x0f,0x04,0x34,0x30],
-'emberkeep': [0x0f,0x30,0x07,0x28, 0x0f,0x07,0x17,0x27, 0x0f,0x09,0x19,0x29, 0x0f,0x05,0x16,0x26,
-             0x0f,0x07,0x28,0x30, 0x0f,0x09,0x29,0x30, 0x0f,0x05,0x26,0x30, 0x0f,0x01,0x21,0x30],
+'emberkeep': [0x0f,0x30,0x08,0x28, 0x0f,0x08,0x18,0x28, 0x0f,0x09,0x19,0x29, 0x0f,0x05,0x16,0x26,
+             0x0f,0x0c,0x27,0x37, 0x0f,0x09,0x19,0x37, 0x0f,0x05,0x26,0x30, 0x0f,0x01,0x21,0x30],
 }
 def blank(n=8): return [[0]*n for _ in range(n)]
 def pattern(rows):
-    table={'.':0,' ':0,'1':1,'2':2,'3':3,'#':1,'+':2,'@':3}
+    table={'0':0,'.':0,' ':0,'1':1,'2':2,'3':3,'#':1,'+':2,'@':3}
     return [[table[c] for c in row] for row in rows]
 def split_sprite(tiles, index, img):
     for dy in range(2):
@@ -91,7 +91,7 @@ def common_tiles(game):
         tile=blank()
         for y,row in enumerate(rows):
             for x,v in enumerate(row):
-                if v=='1' and x+2<8 and y+1<8:tile[y+1][x+2]=2
+                if game!='bloom' and v=='1' and x+2<8 and y+1<8:tile[y+1][x+2]=2
         for y,row in enumerate(rows):
             for x,v in enumerate(row):
                 if v=='1':tile[y][x+1]=1
@@ -107,7 +107,7 @@ def common_tiles(game):
     tiles[18]=pattern(['22222222','11111111','11111111','11111111','21112111','11111111','11111111','11111111'])
     tiles[19]=pattern(['........','........','...3....','..323...','.32223..','3222223.','22222223','11111111'])
     if game=='skythread':
-        tiles[17]=[[1 if (x+y)%11 else 2 for x in range(8)] for y in range(8)]
+        tiles[17]=[[1 for x in range(8)] for y in range(8)]
     tiles[20]=pattern(['....22..','....232.','....22..','....2...','..222...','.2332...','.222....','........'])
     # Puzzle cells: crisp rounded corners, subtle highlights and crossed marks.
     for index,kind in [(128,0),(132,1),(136,2)]:
@@ -211,11 +211,42 @@ def common_tiles(game):
     split_sprite(tiles,244,tail)
     crown=pattern(['................','................','..3....3....3...','..23..323..32...','..22332223322...','..22222222222...','...222222222....','...333333333....','...222222222....','................','................','................','................','................','................','................'])
     split_sprite(tiles,248,crown)
+    generated=json.loads((ROOT/'games/art/sprites.json').read_text())
+    for name,index in [('mushroom',96),('flower',144),('hero',148),('run1',152),('run2',156),('gem',160),('slime',164),('bat',168),('chest',172),('gate',176),('terrain',184),('note',192),('lantern',212),('butterfly',240),('spirit',248)]:
+        split_sprite(tiles,index,pattern(generated[name]))
+    if game=='emberkeep':split_sprite(tiles,148,pattern(generated['explorer']))
+    dash=pattern(generated['hero'])
+    for row in dash:
+        for x,value in enumerate(row):
+            if value==2:row[x]=3
+    split_sprite(tiles,208,dash)
+    # A filled garden cell is a muted teal patch; empty cells are paper cream.
+    if game=='bloom':
+        for index,kind in [(128,0),(132,1),(136,2)]:
+            cell=blank(16)
+            for y in range(1,15):
+                for x in range(1,15):cell[y][x]=2 if kind==1 else 1
+            for x in range(2,14):cell[1][x]=3 if kind==1 else 1
+            if kind==2:
+                for k in range(5,11):cell[k][k]=2;cell[k][15-k]=2
+            split_sprite(tiles,index,cell)
+        tiles[9]=[[3]*8 for _ in range(8)]
+        tiles[10]=pattern(['........','........','........','........','........','..2...2.','.232.232','22222222'])
+    if game=='bloom':
+        decor=json.loads((ROOT/'games/art/decor.json').read_text())
+        for name,index in [('mushroom',96),('flower',112)]:
+            img=pattern(decor[name])
+            for dy in range(4):
+                for dx in range(4):tiles[index+dy*4+dx]=[row[dx*8:dx*8+8] for row in img[dy*8:dy*8+8]]
     return tiles
 class Screen:
     def __init__(self):self.data=[0]*960;self.pals=[0]*960
     def tile(self,x,y,t,pal=0):
-        if 0<=x<32 and 0<=y<30:self.data[y*32+x]=t;self.pals[y*32+x]=pal
+        if 0<=x<32 and 0<=y<30:
+            self.data[y*32+x]=t
+            # One NES attribute quadrant covers 2x2 tiles, never one tile.
+            for yy in range(y&~1,min(30,(y&~1)+2)):
+                for xx in range(x&~1,(x&~1)+2):self.pals[yy*32+xx]=pal
     def text(self,x,y,text,pal=0):
         for i,c in enumerate(text.upper()):self.tile(x+i,y,ord(c),pal)
     def meta(self,x,y,index,pal=0):
@@ -238,12 +269,20 @@ class Screen:
         return bytes(self.data+attrs)
 
 def garden():
-    s=Screen();s.box(1,1,30,28);s.text(6,2,'BLOOM & LOGIC');s.text(7,3,'A NONOGRAM GARDEN');s.text(3,25,'A FILL  B MARK  SELECT UNDO');s.text(5,27,'START: NEXT LITTLE GARDEN')
-    for x in (2,4,26,28):s.meta(x,20,144,2 if x%4 else 3)
+    s=Screen()
+    # Quiet sky-blue field, paper title/footer and spacious 8x8 board.
+    for y in [0,1,26,27,28,29]:
+        for x in range(32):s.tile(x,y,9,2)
+    s.text(9,1,'BLOOM & LOGIC',2)
+    s.text(7,3,'A LITTLE PUZZLE GARDEN')
     for y in range(8,24):
         for x in range(8,24):s.tile(x,y,0,1)
-    for y in range(8,24):
-        for x in range(2,8):s.tile(x,y,32)
+    for x,y,art in [(0,8,112),(0,17,96),(26,7,96),(26,19,112)]:
+        for dy in range(4):
+            for dx in range(4):s.tile(x+dx,y+dy,art+dy*4+dx,3)
+    for x in range(32):s.tile(x,29,10,3)
+    s.text(3,25,'A FILL  B MARK  SELECT UNDO')
+    s.text(5,27,'START: NEXT LITTLE GARDEN',2)
     return s
 
 def rhythm():
@@ -282,7 +321,7 @@ def mountain(room,index):
     return s
 
 def dungeon():
-    s=Screen();s.box(0,0,32,30);s.text(2,1,'EMBERKEEP');s.text(18,1,'LAST LANTERN');s.text(2,2,'FLOOR 1');s.text(13,2,'HP 08');s.text(23,2,'GOLD 000');s.text(2,28,'ARROWS MOVE / BUMP TO ATTACK');s.text(2,29,'A WAIT  B POTION  START NEW');
+    s=Screen();s.box(0,0,32,30);s.text(2,1,'EMBERKEEP');s.text(18,1,'LAST LANTERN');s.text(2,2,'FL 1 P2 HP 08 K - G 000');s.text(2,28,'ARROWS MOVE / BUMP TO ATTACK');s.text(2,29,'A WAIT  B POTION  START NEW');
     for y in range(4,28):
         for x in range(32):s.tile(x,y,0,1)
     return s
@@ -323,7 +362,29 @@ def png(path,w,h,rgb):
     raw=b''.join(b'\0'+rgb[y*w*3:(y+1)*w*3] for y in range(h))
     path.write_bytes(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw,9))+chunk(b'IEND',b''))
 
+def validate_puzzles():
+    # An independent line-candidate solver verifies that every clue set is unique.
+    patterns=[format(i,'08b') for i in range(256)]
+    for number,puzzle in enumerate(PUZZLES):
+        rows=[[p for p in patterns if clues(p)==clues(row)]for row in puzzle]
+        columns=[[p for p in patterns if clues(p)==clues(''.join(row[x]for row in puzzle))]for x in range(8)]
+        solutions=[]
+        def search(board,candidates):
+            y=len(board)
+            if y==8:solutions.append(board);return
+            for row in rows[y]:
+                remaining=[[p for p in candidates[x]if p[y]==row[x]]for x in range(8)]
+                if all(remaining):search(board+[row],remaining)
+                if len(solutions)>=2:return
+        search([],columns)
+        assert len(solutions)==1 and solutions[0]==puzzle,f'Puzzle {number+1} must have a unique solution'
+
 def generate():
+    validate_puzzles()
+    # All background/sprite transparent entries share the same universal backdrop.
+    for game,palette in PALETTES.items():
+        if game=='skythread':
+            for i in range(0,32,4):palette[i]=0x0c
     for game in PALETTES:
         tiles=common_tiles(game);chr_data=b''.join(encode_tile(t) for t in tiles)
         (OUT/f'{game}.chr').write_bytes(chr_data*2)
@@ -355,8 +416,13 @@ def generate():
         if bar>=8 and beat in (0,4):mask|=1<<((lane+2)%4)
         if bar%4==3 and beat==0:mask|=128
         chart.append(mask)
+    # Sustains last 24 frames; at expert tempo the next two events overlap.
+    # Never require a fresh tap on a lane the player must keep held.
+    for step,event in enumerate(chart):
+        if event & 128:
+            for future in range(step+1,min(step+3,len(chart))):chart[future] &= ~(event & 15)
     (OUT/'starstring.chart.bin').write_bytes(bytes(chart))
-    manifest={'generator':'scripts/generate-assets.py','art':'Original hand-authored NES 2-bpp pixel patterns','music':'Four original 32-step compositions with distinct pulse and triangle arrangements','spriteTiles':{'cursor':140,'flower':144,'hero':148,'run':152,'gem':160,'slime':164,'bat':168,'chest':172,'gate':176,'spikes':180,'terrain':184,'note':192,'hold':196,'dash':208,'lantern':212,'stairs':216,'floor':220,'moss':224,'heart':232,'butterfly':240}}
+    manifest={'generator':'scripts/generate-assets.py','art':'Generated sprite atlas converted to three-color NES patterns, with authored tiles and layouts','music':'Four original 32-step compositions with distinct pulse and triangle arrangements','spriteTiles':{'cursor':140,'flower':144,'hero':148,'run':152,'gem':160,'slime':164,'bat':168,'chest':172,'gate':176,'spikes':180,'terrain':184,'note':192,'hold':196,'dash':208,'lantern':212,'stairs':216,'floor':220,'moss':224,'heart':232,'butterfly':240}}
     (OUT/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     # Source-art contact sheet, distinct from the executing-ROM screenshots.
     colors=[(12,16,27),(32,42,59),(64,216,198),(255,235,180)]

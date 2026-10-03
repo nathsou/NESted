@@ -1,28 +1,35 @@
 # NESted
 
-**Small code. Real cartridges.** A NES-only language with a dependency-free Rust
-compiler, a shared native/WASM language server, a VS Code extension, and a browser
-workbench for source, compiler passes, 6502 assembly, and playable ROMs.
+**Small code. Real cartridges.** A NES-only programming language with an
+embeddable Rust compiler, native/WASM LSP, VS Code extension, and browser
+workbench. Every game runs from an actual compiled iNES ROM.
 
-![NESted browser workbench running a compiled Nonogram cartridge](docs/screenshots/workbench.png)
+**[Open the playground →](https://nathsou.github.io/NESted/)** ·
+[Language guide](docs/language.md) · [Design decisions](docs/design.md) ·
+[Embed the compiler](crates/compiler/README.md) · [VS Code](extension/README.md)
 
-## Current milestone
+![NESted workbench: source, a solved Nonogram ROM and generated 6502 assembly](docs/screenshots/workbench.png)
 
-The compiler and browser workbench execute **Bloom & Logic**, an original
-Nonogram with eight puzzles, undo, pixel-art sprites, and a pulse/triangle
-soundtrack. Starstring, Skythread, Emberkeep, and the VS Code packaging are in
-progress. This status will be updated with each runnable milestone.
+## Four original cartridges
 
-Compiler features already exercised in emulator tests include fixed-width
-wrapping arithmetic, signed division, wide array indices, functions, loops,
-inline assembly, static frame allocation, branch relaxation, and mapper-aware
-NROM/MMC1/UxROM/MMC3 ROM generation. The language service provides diagnostics,
-completion, hover, definitions, references, rename, formatting, and semantic
-information using the same Rust code natively and in a browser worker.
+| Bloom & Logic · NROM | Starstring · MMC3 |
+|:---:|:---:|
+| ![Bloom Nonogram garden](docs/screenshots/bloom.png) | ![Starstring rhythm game](docs/screenshots/starstring.png) |
+| Eight uniquely solvable 8×8 puzzles, pencil marks, undo, animated butterfly and a garden soundtrack. | Four lanes, taps/chords/sustains, three difficulties, combo scoring, ranks and an original chart/song. |
 
-## Build
+| Skythread · MMC1 | Emberkeep · UxROM |
+|:---:|:---:|
+| ![Skythread precision platformer](docs/screenshots/skythread.png) | ![Emberkeep lantern dungeon](docs/screenshots/emberkeep.png) |
+| Six authored rooms, jump buffering, coyote time, variable jumps, wall jumps, eight-way dashes and collectible crystals. | Six connected generated floors, persistent exploration fog, keys, potions, bump combat and telegraphed enemies. |
 
-Requires stable Rust, the `wasm32-unknown-unknown` target, Node 24+, and Python 3.
+Arrows move or hit lanes. **Z = A**, **X = B**, **Shift = Select**,
+**Enter = Start**. Click the canvas for keyboard input, use the on-screen
+controller, or connect a gamepad. Sound starts with **Enable sound**.
+
+## Build and use
+
+Requires stable Rust, Node 24+ and Python 3. TypeScript uses the native
+**TypeScript 7 preview**, pinned in the lockfile.
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -31,32 +38,93 @@ npm run build
 npm run dev
 ```
 
-Open the Vite URL. Click the game screen to use arrows, Z/A, X/B, Shift/Select,
-and Enter/Start. Sound starts after pressing **Enable sound**. Each game runs
-from an actual compiled iNES ROM in the pinned
-[Nessy](https://github.com/nathsou/nessy) Rust emulator.
+The production bundle is `playground/dist/`. GitHub Actions verifies the Rust
+compiler, compiled cartridges, WASM/native parity, LSP and production browser
+before deploying that bundle to GitHub Pages.
 
 ```sh
 cargo run --release -p nested-cli -- build games/bloom.nst --emit artifacts/bloom
 cargo run --release -p nested-cli -- run games/bloom.nes 120
-cargo test --workspace --locked
-npm run typecheck
+cargo run -p nested-compiler --example embed
+npm run package:extension
 ```
 
-The compiler, assembler, JSON-RPC implementation, language services, and raw WASM
-ABI have no external Rust dependencies. The emulator and its upstream
-transitive dependencies are the only Rust dependency. Vite and the TypeScript 7
-native preview are the only direct npm dependencies.
+The last command creates a VSIX with the current host's native language server.
+Install it with VS Code's **Extensions: Install from VSIX** command. CI also
+provides a Linux x64 VSIX, compiler binary and ROMs as workflow artifacts.
 
-## Original assets
+## Compiler and tooling
 
-![Original pixel-art sprite source contact sheet](docs/screenshots/original-sprites.png)
+Fixed-width modular arithmetic, explicit narrowing, fixed arrays, static frames,
+proven indexing with a visible raw escape, inline 6502 assembly, byte-shared
+interrupt storage and mapper-aware placement. NROM, MMC1, UxROM and MMC3 emit
+real board layouts and bank-selection sequences. UxROM boots CHR RAM and uses
+bus-conflict-safe writes.
 
-`scripts/generate-assets.py` reproducibly builds hand-authored NES 2-bpp sprites,
-backgrounds, puzzle data, and four original compositions. Screenshots above
-come from executing the compiled cartridge; the contact sheet shows asset source.
+The custom backend folds constants, simplifies algebra, inlines small pure
+functions, eliminates constant branches/dead code, unrolls short loops, selects
+immediates and shift/add multipliers, allocates zero-page storage, overlays
+static frames, optimizes machine branches/loads, and relaxes long 6502 branches.
+Seven inspectable passes include typed IR, optimized IR, machine lowering,
+placement and final assembly. Listings retain source spans and instruction
+costs. `@budget` verifies acyclic unstalled instruction bounds; DMA, interrupt
+latency and PPU phase remain separate hardware contracts.
 
-Read the [architecture](docs/architecture.md) for the compiler/runtime boundaries.
-Cycle ranges in assembly are instruction costs; verified `@budget` contracts
-cover acyclic unstalled instruction execution and explicitly exclude DMA,
-interrupt latency, and PPU phase.
+The shared LSP supplies diagnostics, completion, hover, definition, references,
+rename, formatting, signatures, semantic tokens and type hints. The playground
+uses the Rust service in a worker, with Ctrl+Space completion, F12 definition,
+F2 rename and Shift+Alt+F formatting. Its emulator runs in another worker and
+outputs actual NES APU audio. Assembly, intermediate passes and live RAM are
+available alongside the editable source.
+
+`nested-compiler` has **no third-party dependencies and no I/O**. Other projects
+supply source and asset bytes and receive a ROM plus diagnostics and reports:
+
+```rust
+use nested_compiler::{compile, Assets, Options};
+let cartridge = compile(
+    "var ticks:u8=0; fn update(){ ticks += 1; }",
+    &Assets::new(), Options::default(),
+)?;
+// cartridge.rom is a complete iNES image.
+```
+
+The emulator is the pinned [Nessy](https://github.com/nathsou/nessy) reusable Rust
+crate, with its upstream dependencies. Vite and TypeScript 7 are the only direct
+npm dependencies. The VS Code client uses built-in APIs without an LSP client
+package; the WASM adapter uses a plain ABI without bindgen.
+
+## Art, music and verification
+
+![NES sprite contact sheet](docs/screenshots/original-sprites.png)
+
+The new [generated atlas](games/art/generated-atlas.png) is converted into
+three-color NES pixel patterns for the characters, flowers, butterflies,
+monsters, terrain, crystals and props. Larger garden decorations are retained
+at 32 pixels. `scripts/import-atlas.py` performs the import with ImageMagick;
+normal builds use checked-in pattern data and need only Python's standard
+library. `scripts/generate-assets.py` reproducibly encodes CHR, palettes,
+nametables, puzzle clues, charts and four original chiptune compositions.
+Screenshots show executing ROMs, not mocked game canvases.
+
+```sh
+cargo fmt --all -- --check
+cargo test --release --workspace --locked
+npm test
+npm run test:browser
+npm run screenshots                 # with npm run dev running
+```
+
+Tests execute compiler arithmetic against a modular reference, verify optimized
+and unoptimized behavior, exercise mapper banks and assembly, solve a Nonogram
+through controller input, complete the rhythm chart on all three difficulties
+without misses, complete all six platformer rooms through controller routes,
+and win all six dungeon floors through navigation, combat and potions. WASM
+tests require byte-for-byte native ROM parity and non-silent APU output. Browser tests cover all four
+cartridges, LSP, diagnostics, rebuilding and audio activation.
+
+v0.1 intentionally uses NTSC, fixed code banks and static scalar functions. It
+has no heap, recursion, structs, references, module imports, banked functions,
+PAL timing or battery saves yet. Queue capacity is 40 video writes per prepared
+frame. The [language guide](docs/language.md) documents these contracts and the
+[design notes](docs/design.md) explain their benefits and tradeoffs.

@@ -1,32 +1,91 @@
 {
   "name": "nested-language",
-  "displayName": "NESted — NES language",
+  "displayName": "NESted \u2014 NES language",
   "description": "Syntax highlighting and dependency-free native LSP integration for the NES-only NESted language.",
   "version": "0.1.0",
   "publisher": "nathsou",
-  "engines": { "vscode": "^1.90.0" },
-  "categories": ["Programming Languages"],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/nathsou/NESted" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nathsou/NESted"
+  },
   "main": "./extension.cjs",
-  "activationEvents": ["onLanguage:nested"],
+  "activationEvents": [
+    "onLanguage:nested"
+  ],
   "contributes": {
-    "languages": [{ "id": "nested", "aliases": ["NESted", "nested"], "extensions": [".nst"], "configuration": "./language-configuration.json" }],
-    "grammars": [{ "language": "nested", "scopeName": "source.nested", "path": "./syntaxes/nested.tmLanguage.json" }],
-    "snippets": [{ "language": "nested", "path": "./snippets/nested.json" }],
+    "languages": [
+      {
+        "id": "nested",
+        "aliases": [
+          "NESted",
+          "nested"
+        ],
+        "extensions": [
+          ".nst"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nested",
+        "scopeName": "source.nested",
+        "path": "./syntaxes/nested.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "nested",
+        "path": "./snippets/nested.json"
+      }
+    ],
     "commands": [
-      { "command": "nested.buildROM", "title": "NESted: Build NES ROM" },
-      { "command": "nested.check", "title": "NESted: Check Cartridge" },
-      { "command": "nested.openPlayground", "title": "NESted: Open Playground" },
-      { "command": "nested.restartServer", "title": "NESted: Restart Language Server" }
+      {
+        "command": "nested.buildROM",
+        "title": "NESted: Build NES ROM"
+      },
+      {
+        "command": "nested.check",
+        "title": "NESted: Check Cartridge"
+      },
+      {
+        "command": "nested.openPlayground",
+        "title": "NESted: Open Playground"
+      },
+      {
+        "command": "nested.restartServer",
+        "title": "NESted: Restart Language Server"
+      }
     ],
     "configuration": {
       "title": "NESted",
       "properties": {
-        "nested.serverPath": { "type": "string", "default": "", "description": "Path to the native nested binary. Empty uses a bundled binary, then PATH." },
-        "nested.playgroundUrl": { "type": "string", "default": "http://localhost:5173", "description": "Browser playground URL opened by the NESted command." }
+        "nested.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the native nested binary. Empty uses a bundled binary, then PATH."
+        },
+        "nested.playgroundUrl": {
+          "type": "string",
+          "default": "https://nathsou.github.io/NESted/",
+          "description": "Browser playground URL opened by the NESted command."
+        }
       }
     },
-    "keybindings": [{ "command": "nested.buildROM", "key": "ctrl+enter", "mac": "cmd+enter", "when": "editorLangId == nested" }]
+    "keybindings": [
+      {
+        "command": "nested.buildROM",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorLangId == nested"
+      }
+    ]
   }
 }

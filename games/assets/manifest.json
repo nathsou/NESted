@@ -1,6 +1,6 @@
 {
   "generator": "scripts/generate-assets.py",
-  "art": "Original hand-authored NES 2-bpp pixel patterns",
+  "art": "Generated sprite atlas converted to three-color NES patterns, with authored tiles and layouts",
   "music": "Four original 32-step compositions with distinct pulse and triangle arrangements",
   "spriteTiles": {
     "cursor": 140,

@@ -18,7 +18,7 @@ class LspTransport {
     }
   }
   write(message){if(this.process.stdin.destroyed)throw new Error('Language server is not running');const body=Buffer.from(JSON.stringify({jsonrpc:'2.0',...message}));this.process.stdin.write(`Content-Length: ${body.length}\r\n\r\n`);this.process.stdin.write(body);}
-  notify(method,params){this.write({method,params});}
+  notify(method,params){try{this.write({method,params});}catch(error){this.onLog(String(error));}}
   request(method,params){const id=this.sequence++;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error(`LSP request timed out: ${method}`));},15000);timer.unref();this.pending.set(id,{resolve,reject,timer});try{this.write({id,method,params});}catch(error){clearTimeout(timer);this.pending.delete(id);reject(error);}});}
   fail(error){for(const item of this.pending.values()){clearTimeout(item.timer);item.reject(error);}this.pending.clear();}
   async close(){try{await this.request('shutdown',null);this.notify('exit',null);}catch{}this.process.stdin.end();const timer=setTimeout(()=>this.process.kill(),1000);timer.unref();}

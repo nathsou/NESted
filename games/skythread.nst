@@ -164,10 +164,11 @@ fn graphics() {
     var attr: u8 = 0;
     if facing_left { attr = 64; }
     if death_timer != 0 { attr = 1; }
-    sprite(0, player_x, player_y, tile_id, attr);
-    sprite(1, player_x + 8, player_y, tile_id + 1, attr);
-    sprite(2, player_x, player_y + 8, tile_id + 2, attr);
-    sprite(3, player_x + 8, player_y + 8, tile_id + 3, attr);
+    let flip: u8 = (attr >> 6) & 1;
+    sprite(0, player_x, player_y, tile_id + flip, attr);
+    sprite(1, player_x + 8, player_y, tile_id + (flip ^ 1), attr);
+    sprite(2, player_x, player_y + 8, tile_id + 2 + flip, attr);
+    sprite(3, player_x + 8, player_y + 8, tile_id + 2 + (flip ^ 1), attr);
     if !finished && (gem_mask & (1 << room)) == 0 {
         let gx: u8 = GEM_X[raw room];
         let gy: u8 = GEM_Y[raw room] + ((frame >> 4) & 1);

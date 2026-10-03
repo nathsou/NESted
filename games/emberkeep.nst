@@ -109,14 +109,14 @@ fn draw_cell(cell: u8) {
 }
 
 fn draw_hud() {
-    tile(8, 2, 49 + floor);
-    tile(16, 2, 48 + health / 10);
-    tile(17, 2, 48 + health % 10);
-    tile(27, 2, 48 + u8((gold / 100) % 10));
-    tile(28, 2, 48 + u8((gold / 10) % 10));
-    tile(29, 2, 48 + u8(gold % 10));
-    tile(11, 2, 48 + potions);
-    if key_found { tile(21, 2, 43); } else { tile(21, 2, 45); }
+    tile(5, 2, 49 + floor);
+    tile(13, 2, 48 + health / 10);
+    tile(14, 2, 48 + health % 10);
+    tile(22, 2, 48 + u8((gold / 100) % 10));
+    tile(23, 2, 48 + u8((gold / 10) % 10));
+    tile(24, 2, 48 + u8(gold % 10));
+    tile(8, 2, 48 + potions);
+    if key_found { tile(18, 2, 43); } else { tile(18, 2, 45); }
     hud_dirty = false;
 }
 
@@ -162,7 +162,6 @@ fn new_floor() {
     turn = 0;
     reveal();
     for map_cell in 0..192 { draw_cell(map_cell); }
-    text(10, 2, "P"); text(20, 2, "K");
     draw_hud();
     render(true);
 }
@@ -294,10 +293,11 @@ fn graphics() {
     let px: u8 = player_x << 4;
     let py: u8 = 32 + (player_y << 4);
     if hurt_timer == 0 || (frame & 2) == 0 {
-        sprite(0, px, py, 148, facing);
-        sprite(1, px + 8, py, 149, facing);
-        sprite(2, px, py + 8, 150, facing);
-        sprite(3, px + 8, py + 8, 151, facing);
+        let flip: u8 = facing >> 6;
+        sprite(0, px, py, 148 + flip, facing);
+        sprite(1, px + 8, py, 148 + (flip ^ 1), facing);
+        sprite(2, px, py + 8, 150 + flip, facing);
+        sprite(3, px + 8, py + 8, 150 + (flip ^ 1), facing);
         sprite(4, px + 11, py + 4, 214, 0);
     }
     for e in 0..6 {

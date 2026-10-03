@@ -9,7 +9,9 @@
     "build:web": "vite build playground",
     "typecheck": "tsgo -p playground/tsconfig.json",
     "test": "node scripts/test-wasm.mjs",
-    "screenshots": "node scripts/capture.mjs"
+    "screenshots": "node scripts/capture.mjs",
+    "package:extension": "node scripts/package-extension.mjs",
+    "test:browser": "node scripts/test-browser.mjs"
   },
   "devDependencies": {
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
