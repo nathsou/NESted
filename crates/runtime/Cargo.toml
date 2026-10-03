@@ -1,0 +1,9 @@
+[package]
+name = "nested-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nessy.workspace = true
+

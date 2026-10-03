@@ -1,0 +1,13 @@
+[package]
+name = "nested-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nested-compiler.workspace = true
+nested-runtime.workspace = true
+

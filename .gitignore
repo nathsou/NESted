@@ -1,0 +1,13 @@
+/target/
+/dist/
+/node_modules/
+/playground/node_modules/
+/playground/dist/
+/playground/public/nested.wasm
+/playground/public/examples/
+/playground/public/assets/
+/extension/dist/
+*.vsix
+*.nes
+*.ppm
+/artifacts/
