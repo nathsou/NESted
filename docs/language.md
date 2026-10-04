@@ -56,6 +56,47 @@ guard. Loop mutation, helper calls and wrapping arithmetic invalidate unsafe
 facts. Use `table[raw index]` for a programmer-owned indexing contract. A known
 constant out-of-bounds index is an error even with `raw`.
 
+## Match
+
+A selector is evaluated exactly once. Value arms return one common scalar type;
+block arms perform statements, with arm-local bindings and ordinary `return`,
+`break` and `continue` behavior. Do not mix value and block arms.
+
+```nested
+fn direction(pad: u8) -> u8 {
+    return match pad {
+        16 | 32 => 1,
+        64 | 128 => 2,
+        _ => 0,
+    };
+}
+
+fn update() {
+    match buttons() & 3 {
+        1 => { tone(0, 213, 5); }
+        2 => { silence(0); }
+        _ => {}
+    }
+}
+```
+
+Patterns are typed compile-time scalar constants, alternatives separated by
+`|`, or inclusive ranges such as `0..=7`. Negative signed limits are valid,
+including `-128` and `-32768`. Patterns must not overlap. Every match must cover
+the selector's entire integer/bool domain or end with `_`. Boolean matches
+can cover `false` and `true` without a wildcard. Guards and pattern bindings
+are not supported. A range arm also supplies a bounds proof for that selector
+inside its block. Side effects retain their usual bounds-invalidation rules.
+
+## Formatting
+
+`nested fmt game.nst` formats files with four-space indentation and readable
+blocks, operators and array lists. `nested fmt --check games/*.nst` checks them
+without writing. VS Code and the playground use the same Rust formatter through
+LSP; editor tab/space preferences are respected. Strings retain their spelling,
+comments retain their content, and assembly is indented without rewriting its
+instructions. Unterminated lexical input is left unchanged.
+
 ## Inline assembly
 
 ```nested

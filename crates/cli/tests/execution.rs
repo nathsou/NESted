@@ -63,6 +63,7 @@ fn init(){
     named=asm{ // lda x: JSR init
         lda a};
 }
+
 fn update(){}
 "#;
     for optimize in [false, true] {
@@ -144,7 +145,10 @@ fn interrupt_contexts_and_bounds_are_checked() {
     }
     let source="@shared var x:u8=0; fn update(){x+=1;} @nmi fn v(){let a:u8=x+1; x=a;} @irq fn i(){let b:u8=x+2; x=b;}";
     let c = compile(source, &Assets::new(), Options::default()).unwrap();
-    assert_ne!(c.assembly.symbols["__v_v_a"], c.assembly.symbols["__v_i_b"]);
+    assert_ne!(
+        c.assembly.symbols["__l_1_v_1_a"],
+        c.assembly.symbols["__l_1_i_1_b"]
+    );
 }
 #[test]
 fn optimized_arithmetic_matches_modular_reference() {
@@ -200,8 +204,8 @@ fn assembly_calls_allocate_callee_frames() {
     let (c, mut n) = run(source, true, 12);
     assert_eq!(read(&c, &mut n, "result") & 255, 115);
     assert_ne!(
-        c.assembly.symbols["__v_init_keep"],
-        c.assembly.symbols["__v_helper_scratch"]
+        c.assembly.symbols["__l_4_init_4_keep"],
+        c.assembly.symbols["__l_6_helper_7_scratch"]
     );
 }
 #[test]
@@ -223,4 +227,105 @@ fn deep_previsited_call_graph_is_rejected() {
     }
     source.push_str("fn update(){f69();}");
     assert!(compile(&source, &Assets::new(), Options::default()).is_err());
+}
+
+#[test]
+fn match_values_statements_ranges_and_side_effects_execute() {
+    let source = r#"
+var calls:u8=0;var result:[u8;256]=[0;256];var word:u16=0;var signed:u8=0;var branches:u8=0;
+fn next()->u8{calls+=1;return 7;}
+fn choose(x:u8)->u8{return match x {0|2=>11,3..=7=>22,_=>33};}
+fn init(){
+ for i in 0..256{result[i]=choose(u8(i));}
+ word=match u16(65535){0..=32767=>u16(1),32768..=65535=>u16(54321)};
+ signed=match i8(255){-128..=-2=>1,-1=>2,0..=127=>3};
+ match next(){0=>{branches=1;},7=>{var local:u8=3;branches=local+4;},_=>{branches=9;}}
+}
+fn update(){}
+"#;
+    for optimize in [false, true] {
+        let (c, mut n) = run(source, optimize, 90);
+        let address = c.assembly.symbols["__v_result"];
+        for i in 0..256 {
+            assert_eq!(
+                n.read_ram(address + i),
+                if i == 0 || i == 2 {
+                    11
+                } else if (3..=7).contains(&i) {
+                    22
+                } else {
+                    33
+                }
+            );
+        }
+        assert_eq!(read(&c, &mut n, "calls") & 255, 1);
+        assert_eq!(read(&c, &mut n, "branches") & 255, 7);
+        assert_eq!(read(&c, &mut n, "word"), 54321);
+        assert_eq!(read(&c, &mut n, "signed") & 255, 2);
+    }
+}
+#[test]
+fn match_checks_exhaustiveness_overlap_types_and_bounds() {
+    let invalid = [
+        "fn update(){match text(0,0,\"X\"){0=>{}}}",
+        "fn update(){match \"text\"{0=>{}}}",
+        "var match:u8=0;fn update(){}",
+        "fn update(){let x:u8=match buttons(){0=>1};}",
+        "fn update(){match buttons(){0..=3=>{},3|4=>{},_=>{}}}",
+        "fn update(){match buttons(){_=>{},1=>{}}}",
+        "var x:u8=0;fn update(){match buttons(){x=>{},_=>{}}}",
+        "fn update(){let x:u8=match buttons(){0=>u16(2),_=>1};}",
+        "fn update(){match buttons(){9..=2=>{},_=>{}}}",
+        "var a:[u8;4]=[0;4];fn update(){var x:u8=buttons();match x{0..=4=>{a[x]=1;},_=>{}}}",
+        "var a:[u8;4]=[0;4];fn update(){var x:u8=0;while x<8{match buttons(){_=>{x+=1;}}a[x]=1;}}",
+    ];
+    for source in invalid {
+        assert!(
+            compile(source, &Assets::new(), Options::default()).is_err(),
+            "{source}"
+        );
+    }
+    let source =
+        "var a:[u8;4]=[0;4];fn update(){let x:u8=buttons();match x{0..=3=>{a[x]=1;},_=>{}}}";
+    assert!(compile(source, &Assets::new(), Options::default()).is_ok());
+    let source="fn f(x:bool)->u8{match x{false=>{return 2;},true=>{return 3;}}}var r:u8=0;fn update(){r=f(true);}";
+    let (c, mut n) = run(source, true, 8);
+    assert_eq!(read(&c, &mut n, "r") & 255, 3);
+}
+
+#[test]
+fn internal_symbol_names_cannot_alias_user_storage_or_functions() {
+    let source="var paint_state:u8=99;var answer:u8=0;fn paint(state:u8){let tmp:u8=state+1;answer=tmp*7+state;}fn a_b(c:u8)->u8{return c+1;}fn a(b_c:u8)->u8{return b_c+2;}fn init_end(){answer+=3;}fn init(){var tmp:u8=13;paint(5);init_end();answer+=tmp;answer+=a_b(1)+a(1);}fn update(){}";
+    for optimize in [false, true] {
+        let (c, mut n) = run(source, optimize, 10);
+        assert_eq!(read(&c, &mut n, "paint_state") & 255, 99);
+        assert_eq!(read(&c, &mut n, "answer") & 255, 68);
+    }
+}
+
+#[test]
+fn formatting_preserves_rom_bytes_and_assembly_comments() {
+    use nested_compiler::formatter::{format_source, FormatOptions};
+    let source = r#"var result:u8=0;fn rotate(x:u8)->u8{return asm(a=x){
+    asl a ; } Unicode comment → stays opaque
+    adc #$00
+};}fn init(){let n:u8=3;result=match n{0=>1,1..=4=>rotate(n+(2*3)),_=>0};}fn update(){}"#;
+    let formatted = format_source(source, FormatOptions::default());
+    assert!(formatted.contains("n + (2 * 3)"));
+    assert!(formatted.contains("; } Unicode comment → stays opaque"));
+    assert_eq!(
+        format_source(&formatted, FormatOptions::default()),
+        formatted
+    );
+    for optimize in [false, true] {
+        let options = Options { optimize };
+        let original = compile(source, &Assets::new(), options).unwrap();
+        let rewritten = compile(&formatted, &Assets::new(), options).unwrap();
+        assert_eq!(original.rom, rewritten.rom);
+    }
+    assert!(
+        nested_compiler::assembler::assemble("x = 1\nx = 2\nlda x", 0xc000)
+            .unwrap_err()
+            .contains("Duplicate")
+    );
 }

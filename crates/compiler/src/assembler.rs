@@ -470,6 +470,14 @@ fn lines(source: &str) -> Result<Vec<Line>, String> {
 pub fn assemble(source: &str, base: u16) -> Result<Assembly, String> {
     let codes = opcodes();
     let mut lines = lines(source)?;
+    let mut declarations = std::collections::BTreeSet::new();
+    for line in &lines {
+        if let Item::Label(name) | Item::Equ(name, _) = &line.item {
+            if !declarations.insert(name.clone()) {
+                return Err(format!("Duplicate assembly symbol '{name}'"));
+            }
+        }
+    }
     let mut symbols = BTreeMap::new();
     for _ in 0..16 {
         let mut changed = false;

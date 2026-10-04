@@ -30,6 +30,29 @@ impl Game {
     fn frames(&mut self, input: u8, count: usize) {
         for _ in 0..count {
             self.n.frame(input).unwrap();
+            assert_eq!(self.n.read_ram(0x37f), 0, "VRAM queue overflow");
+            let mut rows = [0u8; 240];
+            for slot in 0..64 {
+                let y = self.n.read_ram(0x200 + slot * 4);
+                if y < 239 {
+                    for row in rows.iter_mut().skip(y as usize + 1).take(8) {
+                        *row += 1;
+                    }
+                }
+            }
+            assert!(
+                self.n.read_ram(0x0c) == 0 || rows.iter().all(|n| *n <= 8),
+                "NES sprite scanline limit exceeded: {}",
+                rows.iter().max().unwrap()
+            );
+            if let Some(address) = self.c.assembly.symbols.get("__v_cells").copied() {
+                for i in 0..64 {
+                    assert!(
+                        self.n.read_ram(address + i) <= 2,
+                        "Nonogram cell storage corrupted"
+                    );
+                }
+            }
         }
         assert_eq!(self.n.read_ram(0x37f), 0, "VRAM queue overflow");
     }
@@ -321,4 +344,69 @@ fn platformer_authored_rooms_have_controller_routes() {
         );
     }
     assert_eq!(g.byte("finished"), 1);
+}
+
+#[test]
+fn rhythm_and_dungeon_pause_freeze_gameplay_and_resume() {
+    let mut rhythm = Game::load("starstring");
+    rhythm.tap(8);
+    rhythm.frames(0, 90);
+    rhythm.tap(8);
+    assert_eq!(rhythm.byte("mode"), 3);
+    let notes: Vec<_> = (0..12).map(|i| rhythm.at("note_y", i)).collect();
+    let step = rhythm.byte("chart_step");
+    rhythm.frames(0xf3, 80);
+    assert_eq!(rhythm.byte("chart_step"), step);
+    assert_eq!(
+        (0..12).map(|i| rhythm.at("note_y", i)).collect::<Vec<_>>(),
+        notes
+    );
+    rhythm.tap(8);
+    assert_eq!(rhythm.byte("mode"), 1);
+    let mut dungeon = Game::load("emberkeep");
+    dungeon.tap(8);
+    assert_eq!(dungeon.byte("paused"), 1);
+    let position = (dungeon.byte("player_x"), dungeon.byte("player_y"));
+    let health = dungeon.byte("health");
+    dungeon.frames(128 | 1 | 2, 60);
+    assert_eq!(
+        (dungeon.byte("player_x"), dungeon.byte("player_y")),
+        position
+    );
+    assert_eq!(dungeon.byte("health"), health);
+    dungeon.tap(8);
+    assert_eq!(dungeon.byte("paused"), 0);
+}
+
+#[test]
+fn every_nonogram_puzzle_completes_and_navigation_wraps() {
+    let mut game = Game::load("bloom");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../games/assets/bloom.puzzles.bin");
+    let solutions = fs::read(path).unwrap();
+    assert_eq!(solutions.len(), 16 * 64);
+    for level in 0..16 {
+        assert_eq!(game.byte("level"), level as u8);
+        for y in 0..8 {
+            for step in 0..8 {
+                let x = if y % 2 == 0 { step } else { 7 - step };
+                if solutions[level * 64 + y * 8 + x] != 0 {
+                    game.tap(1);
+                }
+                if step < 7 {
+                    game.tap(if y % 2 == 0 { 128 } else { 64 });
+                }
+            }
+            if y < 7 {
+                game.tap(32);
+            }
+        }
+        assert_eq!(game.byte("solved"), 1, "Puzzle {}", level + 1);
+        assert_eq!(game.byte("errors"), 0);
+        game.tap(8);
+        game.frames(0, 20); // Allow bulk scene upload and controller release sampling.
+    }
+    assert_eq!(game.byte("level"), 0);
+    game.tap(4 | 8);
+    assert_eq!(game.byte("level"), 15);
 }

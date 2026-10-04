@@ -26,7 +26,7 @@ nested-compiler = { git = "https://github.com/nathsou/NESted", package = "nested
 
 Pin `rev` to a commit for reproducible builds. The public entry points are
 `compile`, `asset_paths`, `Assets`, `Options`, `Compilation`, and
-`lsp::LanguageServer`. `frontend::analyze` supplies editor analysis without
+`lsp::LanguageServer`, `formatter::format_source` and `formatter::FormatOptions`. `frontend::analyze` supplies editor analysis without
 assets or linking. The internal frontend/backend modules remain experimental.
 
 Assets are a caller-owned `BTreeMap<String, Vec<u8>>`. Keys match source literals,

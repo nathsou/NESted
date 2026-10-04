@@ -1,7 +1,9 @@
 // SKYTHREAD — precision climbing, authored rooms and an original score.
 // Jump buffering, coyote time, variable jump height, wall jumps and 8-way dash.
 cartridge "Skythread" {
-    mapper = mmc1; region = ntsc; mirroring = vertical;
+    mapper = mmc1;
+    region = ntsc;
+    mirroring = vertical;
     chr = "assets/skythread.chr";
     palette = "assets/skythread.pal";
     screen = "assets/skythread-0.map";
@@ -11,12 +13,16 @@ cartridge "Skythread" {
 const GEM_X: [u8; 6] = [128, 176, 96, 144, 64, 144];
 const GEM_Y: [u8; 6] = [80, 112, 96, 64, 96, 64];
 const MELODY: [u16; 32] = [
-    253, 213, 169, 126, 142, 169, 213, 253, 284, 225, 189, 142, 159, 189, 225, 284,
-    319, 253, 213, 159, 169, 213, 253, 319, 338, 284, 225, 169, 189, 225, 284, 0,
+    253, 213, 169, 126, 142, 169, 213, 253,
+    284, 225, 189, 142, 159, 189, 225, 284,
+    319, 253, 213, 159, 169, 213, 253, 319,
+    338, 284, 225, 169, 189, 225, 284, 0,
 ];
 const BASS: [u16; 32] = [
-    507, 427, 338, 253, 284, 338, 427, 507, 570, 452, 380, 284, 319, 380, 452, 570,
-    640, 507, 427, 319, 338, 427, 507, 640, 678, 570, 452, 338, 380, 452, 570, 0,
+    507, 427, 338, 253, 284, 338, 427, 507,
+    570, 452, 380, 284, 319, 380, 452, 570,
+    640, 507, 427, 319, 338, 427, 507, 640,
+    678, 570, 452, 338, 380, 452, 570, 0,
 ];
 var player_x: u8 = 32;
 var player_y: u8 = 184;
@@ -47,12 +53,16 @@ var old_x: u8 = 32;
 var old_y: u8 = 184;
 
 fn cell_at(x: u8, y: u8) -> u8 {
-    if y >= 240 { return 1; }
+    if y >= 240 {
+        return 1;
+    }
     let index: u16 = room_offset + (u16(y >> 4) << 4) + u16(x >> 4);
     return COLLISION[raw index];
 }
 
-fn solid(x: u8, y: u8) -> bool { return cell_at(x, y) == 1; }
+fn solid(x: u8, y: u8) -> bool {
+    return cell_at(x, y) == 1;
+}
 
 fn draw_deaths() {
     tile(27, 2, 48 + u8((deaths / 100) % 10));
@@ -62,6 +72,7 @@ fn draw_deaths() {
 
 fn load_room() {
     render(false);
+    hide_sprites();
     screen_bank(0, u16(room) << 10);
     room_offset = (u16(room) << 8) - (u16(room) << 4);
     player_x = 32;
@@ -76,12 +87,15 @@ fn load_room() {
     coyote = 0;
     jump_buffer = 0;
     wall_lock = 0;
+    gravity_clock = 0;
     draw_deaths();
     render(true);
 }
 
 fn die() {
-    if death_timer != 0 { return; }
+    if death_timer != 0 {
+        return;
+    }
     deaths += 1;
     death_timer = 12;
     dash_time = 0;
@@ -94,7 +108,12 @@ fn die() {
 fn ending() {
     finished = true;
     render(false);
-    for y in 8..20 { for x in 3..29 { tile(x, y, 0); } }
+    hide_sprites();
+    for y in 8..20 {
+        for x in 3..29 {
+            tile(x, y, 0);
+        }
+    }
     text(7, 10, "YOU FOUND THE SKY");
     text(6, 13, "EVERY FALL WAS A STEP");
     text(8, 16, "START: CLIMB AGAIN");
@@ -105,18 +124,32 @@ fn ending() {
 
 fn move_horizontal(amount: i8) {
     var steps: u8 = u8(amount);
-    if amount < 0 { steps = u8(-amount); }
+    if amount < 0 {
+        steps = u8(-amount);
+    }
     for step in 0..6 {
-        if step >= steps { break; }
+        if step >= steps {
+            break;
+        }
         var next_x: u8 = player_x;
         if amount < 0 {
-            if next_x == 0 { break; }
+            if next_x == 0 {
+                break;
+            }
             next_x -= 1;
-            if solid(next_x + 3, player_y + 3) || solid(next_x + 3, player_y + 14) { velocity_x = 0; break; }
+            if solid(next_x + 3, player_y + 3) || solid(next_x + 3, player_y + 14) {
+                velocity_x = 0;
+                break;
+            }
         } else {
-            if next_x >= 240 { break; }
+            if next_x >= 240 {
+                break;
+            }
             next_x += 1;
-            if solid(next_x + 12, player_y + 3) || solid(next_x + 12, player_y + 14) { velocity_x = 0; break; }
+            if solid(next_x + 12, player_y + 3) || solid(next_x + 12, player_y + 14) {
+                velocity_x = 0;
+                break;
+            }
         }
         player_x = next_x;
     }
@@ -124,18 +157,34 @@ fn move_horizontal(amount: i8) {
 
 fn move_vertical(amount: i8) {
     var steps: u8 = u8(amount);
-    if amount < 0 { steps = u8(-amount); }
+    if amount < 0 {
+        steps = u8(-amount);
+    }
     for step in 0..6 {
-        if step >= steps { break; }
+        if step >= steps {
+            break;
+        }
         var next_y: u8 = player_y;
         if amount < 0 {
-            if next_y == 0 { velocity_y = 0; break; }
+            if next_y == 0 {
+                velocity_y = 0;
+                break;
+            }
             next_y -= 1;
-            if solid(player_x + 4, next_y + 2) || solid(player_x + 11, next_y + 2) { velocity_y = 0; break; }
+            if solid(player_x + 4, next_y + 2) || solid(player_x + 11, next_y + 2) {
+                velocity_y = 0;
+                break;
+            }
         } else {
-            if next_y >= 223 { die(); break; }
+            if next_y >= 223 {
+                die();
+                break;
+            }
             next_y += 1;
-            if solid(player_x + 4, next_y + 15) || solid(player_x + 11, next_y + 15) { velocity_y = 0; break; }
+            if solid(player_x + 4, next_y + 15) || solid(player_x + 11, next_y + 15) {
+                velocity_y = 0;
+                break;
+            }
         }
         player_y = next_y;
     }
@@ -147,23 +196,49 @@ fn music() {
         music_clock = 0;
         let index: u8 = music_step & 31;
         let note: u16 = MELODY[index];
-        if note != 0 { tone(0, note, 4); } else { silence(0); }
-        if (music_step & 1) == 0 { tone(2, BASS[index], 8); }
-        if (music_step & 7) == 4 { noise(7, 2); }
+        if note != 0 {
+            tone(0, note, 4);
+        } else {
+            silence(0);
+        }
+        if (music_step & 1) == 0 {
+            tone(2, BASS[index], 8);
+        }
+        if (music_step & 7) == 4 {
+            noise(7, 2);
+        }
         music_step += 1;
     }
-    if music_clock == 2 { silence(3); }
-    if effect_timer != 0 { effect_timer -= 1; if effect_timer == 0 { silence(1); } }
+    if music_clock == 2 {
+        silence(3);
+    }
+    if effect_timer != 0 {
+        effect_timer -= 1;
+        if effect_timer == 0 {
+            silence(1);
+        }
+    }
 }
 
 fn graphics() {
     hide_sprites();
+    if finished {
+        return;
+    }
     var tile_id: u8 = 148;
-    if grounded && velocity_x != 0 { tile_id = 152 + ((frame >> 2) & 1) * 4; }
-    if dash_time != 0 { tile_id = 208; }
+    if grounded && velocity_x != 0 {
+        tile_id = 152 + ((frame >> 3) & 1) * 4;
+    }
+    if dash_time != 0 {
+        tile_id = 208;
+    }
     var attr: u8 = 0;
-    if facing_left { attr = 64; }
-    if death_timer != 0 { attr = 1; }
+    if facing_left {
+        attr = 64;
+    }
+    if death_timer != 0 {
+        attr = 1;
+    }
     let flip: u8 = (attr >> 6) & 1;
     sprite(0, player_x, player_y, tile_id + flip, attr);
     sprite(1, player_x + 8, player_y, tile_id + (flip ^ 1), attr);
@@ -183,13 +258,16 @@ fn graphics() {
         sprite(10, old_x, old_y + 8, 210, 2);
         sprite(11, old_x + 8, old_y + 8, 211, 2);
     }
-    sprite(12, frame, 104, 46, 2);
-    sprite(13, frame + 80, 136, 46, 2);
-    sprite(14, frame + 160, 88, 46, 2);
-    if can_dash { sprite(15, 120, 8, 160, 0); }
+    if can_dash {
+        tile(16, 2, 43);
+    } else {
+        tile(16, 2, 45);
+    }
 }
 
-fn init() { load_room(); }
+fn init() {
+    load_room();
+}
 
 fn update() {
     frame += 1;
@@ -205,30 +283,55 @@ fn update() {
         finished = false;
         load_room();
     }
-    if finished { graphics(); return; }
+    if finished {
+        graphics();
+        return;
+    }
     if death_timer != 0 {
         death_timer -= 1;
-        if death_timer == 0 { load_room(); }
+        if death_timer == 0 {
+            load_room();
+        }
         graphics();
         return;
     }
     elapsed += 1;
     grounded = solid(player_x + 4, player_y + 16) || solid(player_x + 11, player_y + 16);
-    if grounded { coyote = 6; can_dash = true; }
-    else if coyote != 0 { coyote -= 1; }
-    if (edge & 1) != 0 { jump_buffer = 6; }
-    else if jump_buffer != 0 { jump_buffer -= 1; }
+    if grounded {
+        coyote = 6;
+        can_dash = true;
+    } else if coyote != 0 {
+        coyote -= 1;
+    }
+    if (edge & 1) != 0 {
+        jump_buffer = 6;
+    } else if jump_buffer != 0 {
+        jump_buffer -= 1;
+    }
     if dash_time == 0 {
-        if wall_lock != 0 { wall_lock -= 1; }
-        else {
+        if wall_lock != 0 {
+            wall_lock -= 1;
+        } else {
             velocity_x = 0;
-            if (held & 64) != 0 { velocity_x = -2; facing_left = true; }
-            if (held & 128) != 0 { velocity_x = 2; facing_left = false; }
+            if (held & 64) != 0 {
+                velocity_x = -2;
+                facing_left = true;
+            }
+            if (held & 128) != 0 {
+                velocity_x = 2;
+                facing_left = false;
+            }
         }
         var wall: bool = false;
-        if (held & 64) != 0 && player_x > 0 { wall = solid(player_x + 2, player_y + 8); }
-        if (held & 128) != 0 && player_x < 240 { wall = solid(player_x + 13, player_y + 8); }
-        if wall && !grounded && velocity_y > 1 { velocity_y = 1; }
+        if (held & 64) != 0 && player_x > 0 {
+            wall = solid(player_x + 2, player_y + 8);
+        }
+        if (held & 128) != 0 && player_x < 240 {
+            wall = solid(player_x + 13, player_y + 8);
+        }
+        if wall && !grounded && velocity_y > 1 {
+            velocity_y = 1;
+        }
         if jump_buffer != 0 && coyote != 0 {
             velocity_y = -6;
             jump_buffer = 0;
@@ -237,25 +340,58 @@ fn update() {
             effect_timer = 5;
         } else if jump_buffer != 0 && wall {
             velocity_y = -6;
-            if facing_left { velocity_x = 4; } else { velocity_x = -4; }
+            if facing_left {
+                velocity_x = 4;
+            } else {
+                velocity_x = -4;
+            }
             wall_lock = 8;
             jump_buffer = 0;
             can_dash = true;
         }
-        if (held & 1) == 0 && velocity_y < -2 { velocity_y = -2; }
+        if (held & 1) == 0 && velocity_y < -2 {
+            velocity_y = -2;
+        }
         gravity_clock += 1;
-        if gravity_clock == 3 { gravity_clock = 0; if velocity_y < 5 { velocity_y += 1; } }
+        if gravity_clock == 3 {
+            gravity_clock = 0;
+            if velocity_y < 5 {
+                velocity_y += 1;
+            }
+        }
         if (edge & 2) != 0 && can_dash {
             dash_x = 0;
             dash_y = 0;
-            if (held & 64) != 0 { dash_x = -6; }
-            if (held & 128) != 0 { dash_x = 6; }
-            if (held & 16) != 0 { dash_y = -6; }
-            if (held & 32) != 0 { dash_y = 6; }
-            if dash_x == 0 && dash_y == 0 { if facing_left { dash_x = -6; } else { dash_x = 6; } }
+            if (held & 64) != 0 {
+                dash_x = -6;
+            }
+            if (held & 128) != 0 {
+                dash_x = 6;
+            }
+            if (held & 16) != 0 {
+                dash_y = -6;
+            }
+            if (held & 32) != 0 {
+                dash_y = 6;
+            }
+            if dash_x == 0 && dash_y == 0 {
+                if facing_left {
+                    dash_x = -6;
+                } else {
+                    dash_x = 6;
+                }
+            }
             if dash_x != 0 && dash_y != 0 {
-                if dash_x < 0 { dash_x = -4; } else { dash_x = 4; }
-                if dash_y < 0 { dash_y = -4; } else { dash_y = 4; }
+                if dash_x < 0 {
+                    dash_x = -4;
+                } else {
+                    dash_x = 4;
+                }
+                if dash_y < 0 {
+                    dash_y = -4;
+                } else {
+                    dash_y = 4;
+                }
             }
             dash_time = 10;
             can_dash = false;
@@ -266,17 +402,25 @@ fn update() {
         }
     }
     if dash_time != 0 {
+        old_x = player_x;
+        old_y = player_y;
         move_horizontal(dash_x);
         move_vertical(dash_y);
         dash_time -= 1;
-        if dash_time == 0 { velocity_x = 0; velocity_y = 0; }
+        if dash_time == 0 {
+            velocity_x = 0;
+            velocity_y = 0;
+        }
     } else {
         move_horizontal(velocity_x);
         move_vertical(velocity_y);
     }
+    grounded = solid(player_x + 4, player_y + 16) || solid(player_x + 11, player_y + 16);
     let middle: u8 = cell_at(player_x + 8, player_y + 8);
     let foot: u8 = cell_at(player_x + 8, player_y + 15);
-    if middle == 2 || foot == 2 { die(); }
+    if middle == 2 || foot == 2 {
+        die();
+    }
     if middle == 4 && (gem_mask & (1 << room)) == 0 {
         gem_mask |= 1 << room;
         can_dash = true;
@@ -285,7 +429,11 @@ fn update() {
     }
     if middle == 3 {
         room += 1;
-        if room == 6 { ending(); } else { load_room(); }
+        if room == 6 {
+            ending();
+        } else {
+            load_room();
+        }
     }
     graphics();
 }

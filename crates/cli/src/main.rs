@@ -16,6 +16,7 @@ const HELP: &str = "NESted — NES-only Rust/WASM toolchain
 
   nested build game.nst [-o game.nes] [--emit dir] [--no-opt]
   nested check game.nst
+  nested fmt [--check] game.nst...
   nested lsp
   nested run game.nes [frames] [screenshot.ppm]
   nested --version";
@@ -26,9 +27,43 @@ fn run() -> Result<(), String> {
         "build" => build(&mut args, true)?,
         "check" => build(&mut args, false)?,
         "lsp" => lsp()?,
+        "fmt" => format_files(&mut args)?,
         "run" => execute_rom(&mut args)?,
         "--version" | "version" => println!("NESted {}", env!("CARGO_PKG_VERSION")),
         _ => println!("{HELP}"),
+    }
+    Ok(())
+}
+
+fn format_files(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let mut check = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        if arg == "--check" {
+            check = true;
+        } else {
+            paths.push(PathBuf::from(arg));
+        }
+    }
+    if paths.is_empty() {
+        return Err("Expected source paths".into());
+    }
+    let mut changed = false;
+    for path in paths {
+        let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let formatted = nested_compiler::formatter::format_source(&source, Default::default());
+        if source != formatted {
+            changed = true;
+            if check {
+                println!("Needs formatting: {}", path.display());
+            } else {
+                fs::write(&path, formatted).map_err(|e| e.to_string())?;
+                println!("Formatted {}", path.display());
+            }
+        }
+    }
+    if check && changed {
+        return Err("Source formatting differs".into());
     }
     Ok(())
 }

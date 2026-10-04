@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 pub mod assembler;
 pub mod codegen;
+pub mod formatter;
 pub mod frontend;
 pub mod json;
 pub mod lsp;
@@ -390,6 +391,15 @@ pub fn asset_paths(source: &str) -> Vec<String> {
                 expr(b, out);
             }
             ExprKind::Unary(_, e) => expr(e, out),
+            ExprKind::Match(value, arms) => {
+                expr(value, out);
+                for arm in arms {
+                    match &arm.body {
+                        MatchBody::Value(result) => expr(result, out),
+                        MatchBody::Block(body) => block(body, out),
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -459,7 +469,11 @@ impl Compilation {
                     self.assembly
                         .symbols
                         .iter()
-                        .filter(|(n, _)| n.starts_with("__v_") || n.starts_with("__fn_"))
+                        .filter(|(n, _)| {
+                            ["__v_", "__fn_", "__l_", "__t_"]
+                                .iter()
+                                .any(|prefix| n.starts_with(prefix))
+                        })
                         .map(|(n, v)| (n.clone(), (*v).into()))
                         .collect(),
                 ),

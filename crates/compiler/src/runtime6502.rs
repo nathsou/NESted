@@ -404,10 +404,19 @@ __rt_render:
  bne __render_on
  lda #0
  sta $2001
+ sta $2000
  sta $0c
+ sta $0d
  rts
 __render_on:
  bit $2002
+__render_wait_vblank:
+ bit $2002
+ bpl __render_wait_vblank
+ lda #0
+ sta $2003
+ lda #2
+ sta $4014
  lda #0
  sta $2005
  sta $2005
@@ -422,6 +431,8 @@ __render_on:
 __rt_screen:
  lda #0
  sta $2001
+ sta $2000
+ sta $0d
  bit $2002
  lda #32
  sta $2006

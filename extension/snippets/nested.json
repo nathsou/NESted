@@ -1,7 +1,69 @@
 {
-  "Game update": { "prefix": "update", "body": ["fn update() {", "    ${1:// Prepare the next published frame.}", "}"], "description": "Standard frame-update entry point" },
-  "Initialization": { "prefix": "init", "body": ["fn init() {", "    $0", "}"], "description": "Runs once while rendering is disabled" },
-  "Inline assembly": { "prefix": "asm", "body": ["asm(a = ${1:value}) {", "    ${2:asl a}", "    ${3:adc #\$00}", "}"], "description": "Opaque assembly with typed A-register input/result" },
-  "ROM array": { "prefix": "romarray", "body": ["const ${1:TABLE}: [u8; ${2:16}] = [${3:0; 16}];"], "description": "Explicit fixed-size read-only storage" },
-  "Instruction budget": { "prefix": "budget", "body": ["@budget(${1:100})", "fn ${2:update}() {", "    $0", "}"], "description": "Verify an acyclic unstalled instruction-cycle bound" }
+  "Game update": {
+    "prefix": "update",
+    "body": [
+      "fn update() {",
+      "    ${1:// Prepare the next published frame.}",
+      "}"
+    ],
+    "description": "Standard frame-update entry point"
+  },
+  "Initialization": {
+    "prefix": "init",
+    "body": [
+      "fn init() {",
+      "    $0",
+      "}"
+    ],
+    "description": "Runs once while rendering is disabled"
+  },
+  "Inline assembly": {
+    "prefix": "asm",
+    "body": [
+      "asm(a = ${1:value}) {",
+      "    ${2:asl a}",
+      "    ${3:adc #\\$00}",
+      "}"
+    ],
+    "description": "Opaque assembly with typed A-register input/result"
+  },
+  "ROM array": {
+    "prefix": "romarray",
+    "body": [
+      "const ${1:TABLE}: [u8; ${2:16}] = [${3:0; 16}];"
+    ],
+    "description": "Explicit fixed-size read-only storage"
+  },
+  "Instruction budget": {
+    "prefix": "budget",
+    "body": [
+      "@budget(${1:100})",
+      "fn ${2:update}() {",
+      "    $0",
+      "}"
+    ],
+    "description": "Verify an acyclic unstalled instruction-cycle bound"
+  },
+  "Match value": {
+    "prefix": "match",
+    "body": [
+      "match ${1:state} {",
+      "    ${2:0} => ${3:value},",
+      "    _ => ${4:default},",
+      "}"
+    ],
+    "description": "Exhaustive scalar match expression"
+  },
+  "Match statement": {
+    "prefix": "matchstmt",
+    "body": [
+      "match ${1:state} {",
+      "    ${2:0} => {",
+      "        $0",
+      "    }",
+      "    _ => {}",
+      "}"
+    ],
+    "description": "State dispatch with block arms"
+  }
 }

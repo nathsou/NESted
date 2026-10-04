@@ -448,6 +448,7 @@ impl LanguageServer {
                     "continue",
                     "asm",
                     "raw",
+                    "match",
                     "cartridge",
                     "u8",
                     "i8",
@@ -734,24 +735,19 @@ impl LanguageServer {
                 ("items", diagnostics(&doc.source, &doc.analysis.diagnostics)),
             ]),
             "textDocument/formatting" => {
-                let mut indent = 0usize;
-                let mut out = String::new();
-                for line in doc.source.lines() {
-                    let trim = line.trim();
-                    if trim.is_empty() {
-                        out.push('\n');
-                        continue;
-                    }
-                    let leading = trim.chars().take_while(|c| *c == '}').count();
-                    let this = indent.saturating_sub(leading);
-                    out.push_str(&"  ".repeat(this));
-                    out.push_str(trim);
-                    out.push('\n');
-                    let tokens = lex(trim).unwrap_or_default();
-                    let opens = tokens.iter().filter(|t| !t.string && t.text == "{").count();
-                    let closes = tokens.iter().filter(|t| !t.string && t.text == "}").count();
-                    indent = (indent + opens).saturating_sub(closes);
-                }
+                let options = params.get("options");
+                let out = crate::formatter::format_source(
+                    &doc.source,
+                    crate::formatter::FormatOptions {
+                        tab_size: if options.get("tabSize").usize() == 0 {
+                            4
+                        } else {
+                            options.get("tabSize").usize()
+                        },
+                        insert_spaces: options.get("insertSpaces") != &Json::Bool(false),
+                        ..crate::formatter::FormatOptions::default()
+                    },
+                );
                 Json::Array(vec![obj([
                     (
                         "range",
@@ -817,6 +813,7 @@ fn reserved(s: &str) -> bool {
         "continue",
         "asm",
         "raw",
+        "match",
         "cartridge",
         "u8",
         "i8",

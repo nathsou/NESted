@@ -40,7 +40,7 @@ windows; changing an iNES mapper number alone is not sufficient support.
 
 ## Games as integration tests
 
-* **Bloom & Logic**: a Nonogram garden with multiple original puzzles.
+* **Nonogram** (`bloom.nst`): sixteen clean, uniquely solvable logic puzzles.
 * **Starstring**: a four-lane rhythm game with an original chiptune chart.
 * **Skythread**: a precision platformer with jumping, dashing, and authored rooms.
 * **Emberkeep**: a turn-based dungeon crawler with generated connected floors.

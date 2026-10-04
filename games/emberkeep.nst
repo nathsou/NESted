@@ -1,18 +1,24 @@
 // EMBERKEEP — an original turn-based lantern dungeon.
 // Connected generated floors, persistent exploration fog, telegraphed enemies.
 cartridge "Emberkeep" {
-    mapper = uxrom; region = ntsc; mirroring = vertical;
+    mapper = uxrom;
+    region = ntsc;
+    mirroring = vertical;
     chr = "assets/emberkeep.chr";
     palette = "assets/emberkeep.pal";
     screen = "assets/emberkeep.map";
 }
 const MELODY: [u16; 32] = [
-    507, 427, 338, 0, 380, 427, 507, 0, 570, 452, 380, 0, 427, 452, 570, 0,
-    640, 507, 427, 0, 452, 507, 640, 0, 678, 570, 452, 0, 507, 570, 678, 0,
+    507, 427, 338, 0, 380, 427, 507, 0,
+    570, 452, 380, 0, 427, 452, 570, 0,
+    640, 507, 427, 0, 452, 507, 640, 0,
+    678, 570, 452, 0, 507, 570, 678, 0,
 ];
 const BASS: [u16; 32] = [
-    1016, 854, 678, 0, 761, 854, 1016, 0, 1140, 905, 761, 0, 854, 905, 1140, 0,
-    1280, 1016, 854, 0, 905, 1016, 1280, 0, 1356, 1140, 905, 0, 1016, 1140, 1356, 0,
+    1016, 854, 678, 0, 761, 854, 1016, 0,
+    1140, 905, 761, 0, 854, 905, 1140, 0,
+    1280, 1016, 854, 0, 905, 1016, 1280, 0,
+    1356, 1140, 905, 0, 1016, 1140, 1356, 0,
 ];
 var dungeon: [u8; 192] = [0; 192];
 var seen: [u8; 192] = [0; 192];
@@ -43,11 +49,23 @@ var facing: u8 = 0;
 var music_clock: u8 = 0;
 var music_step: u8 = 0;
 var effect_timer: u8 = 0;
+var paused: bool = false;
+var damage_taken: bool = false;
+var message: u8 = 0;
+var message_timer: u8 = 0;
+var message_dirty: bool = true;
+var redraw_limit: u8 = 4;
 
-fn index(x: u8, y: u8) -> u8 { return (y << 4) | x; }
+fn index(x: u8, y: u8) -> u8 {
+    return (y << 4) | x;
+}
 
 fn enemy_at(x: u8, y: u8) -> u8 {
-    for e in 0..6 { if enemy_hp[e] != 0 && enemy_x[e] == x && enemy_y[e] == y { return e; } }
+    for e in 0..6 {
+        if enemy_hp[e] != 0 && enemy_x[e] == x && enemy_y[e] == y {
+            return e;
+        }
+    }
     return 255;
 }
 
@@ -63,28 +81,126 @@ fn carve_room(x: u8, y: u8) {
 fn corridor(ax: u8, ay: u8, bx: u8, by: u8) {
     var x: u8 = ax;
     var y: u8 = ay;
-    while x < bx { dungeon[raw index(x, y)] = 1; x += 1; }
-    while x > bx { dungeon[raw index(x, y)] = 1; x -= 1; }
-    while y < by { dungeon[raw index(x, y)] = 1; y += 1; }
-    while y > by { dungeon[raw index(x, y)] = 1; y -= 1; }
+    while x < bx {
+        dungeon[raw index(x, y)] = 1;
+        x += 1;
+    }
+    while x > bx {
+        dungeon[raw index(x, y)] = 1;
+        x -= 1;
+    }
+    while y < by {
+        dungeon[raw index(x, y)] = 1;
+        y += 1;
+    }
+    while y > by {
+        dungeon[raw index(x, y)] = 1;
+        y -= 1;
+    }
     dungeon[raw index(x, y)] = 1;
 }
 
+// A short integer ray makes walls block the lantern, including enemy visibility.
+fn lit(x: u8, y: u8) -> bool {
+    var dx: i8 = i8(x) - i8(player_x);
+    var dy: i8 = i8(y) - i8(player_y);
+    var sx: i8 = 1;
+    var sy: i8 = 1;
+    if dx < 0 {
+        dx = -dx;
+        sx = -1;
+    }
+    if dy < 0 {
+        dy = -dy;
+        sy = -1;
+    }
+    if u8(dx) + u8(dy) > 3 {
+        return false;
+    }
+    dy = -dy;
+    var error: i8 = dx + dy;
+    var ray_x: u8 = player_x;
+    var ray_y: u8 = player_y;
+    for step in 0..7 {
+        if ray_x == x && ray_y == y {
+            return true;
+        }
+        if dungeon[raw index(ray_x, ray_y)] == 0 {
+            return false;
+        }
+        let twice: i8 = error * 2;
+        if twice >= dy {
+            error += dy;
+            ray_x = u8(i8(ray_x) + sx);
+        }
+        if twice <= dx {
+            error += dx;
+            ray_y = u8(i8(ray_y) + sy);
+        }
+    }
+    return false;
+}
+
 fn reveal() {
-    var left: u8 = 0;
-    var top: u8 = 0;
-    if player_x > 2 { left = player_x - 2; }
-    if player_y > 2 { top = player_y - 2; }
-    for dy in 0..5 {
-        for dx in 0..5 {
-            let x: u8 = left + dx;
-            let y: u8 = top + dy;
-            if x < 16 && y < 12 {
+    for dy in 0..7 {
+        for dx in 0..7 {
+            let x: u8 = player_x + dx - 3;
+            let y: u8 = player_y + dy - 3;
+            if x < 16 && y < 12 && lit(x, y) {
                 let cell: u8 = index(x, y);
-                if seen[raw cell] == 0 { seen[raw cell] = 1; dirty[raw cell] = 1; }
+                if seen[raw cell] == 0 {
+                    seen[raw cell] = 1;
+                    dirty[raw cell] = 1;
+                }
             }
         }
     }
+}
+
+fn crowded_row(y: u8, except: u8) -> bool {
+    var count: u8 = 0;
+    for e in 0..6 {
+        if e != except && enemy_hp[e] != 0 && enemy_y[e] == y {
+            count += 1;
+        }
+    }
+    return count >= 3;
+}
+
+fn notify(kind: u8) {
+    message = kind;
+    message_timer = 90;
+    message_dirty = true;
+}
+
+fn draw_message() {
+    match message {
+        1 => {
+            text(8, 3, "KEY FOUND       ");
+        }
+        2 => {
+            text(8, 3, "POTION FOUND    ");
+        }
+        3 => {
+            text(8, 3, "HIT / BUMP AGAIN");
+        }
+        4 => {
+            text(8, 3, "FOE DEFEATED    ");
+        }
+        5 => {
+            text(8, 3, "KEY REQUIRED    ");
+        }
+        6 => {
+            text(8, 3, "DANGER - RETREAT");
+        }
+        7 => {
+            text(8, 3, "HEALTH RESTORED ");
+        }
+        _ => {
+            text(8, 3, "KEY -> STAIRS   ");
+        }
+    }
+    message_dirty = false;
 }
 
 fn draw_cell(cell: u8) {
@@ -92,18 +208,36 @@ fn draw_cell(cell: u8) {
     if seen[raw cell] != 0 {
         let kind: u8 = dungeon[raw cell];
         art = 220;
-        if kind == 0 { art = 224; }
-        if kind == 2 { art = 216; }
-        if kind == 3 { art = 172; }
-        if kind == 4 { art = 212; }
-        if kind == 5 { art = 180; }
+        if kind == 0 {
+            art = 224;
+        }
+        if kind == 2 {
+            art = 216;
+        }
+        if kind == 3 {
+            notify(1);
+            art = 172;
+        }
+        if kind == 4 {
+            notify(2);
+            art = 212;
+        }
+        if kind == 5 {
+            art = 180;
+        }
     }
     let x: u8 = (cell & 15) << 1;
     let y: u8 = 4 + ((cell >> 4) << 1);
     if art == 0 {
-        tile(x, y, 0); tile(x + 1, y, 0); tile(x, y + 1, 0); tile(x + 1, y + 1, 0);
+        tile(x, y, 0);
+        tile(x + 1, y, 0);
+        tile(x, y + 1, 0);
+        tile(x + 1, y + 1, 0);
     } else {
-        tile(x, y, art); tile(x + 1, y, art + 1); tile(x, y + 1, art + 2); tile(x + 1, y + 1, art + 3);
+        tile(x, y, art);
+        tile(x + 1, y, art + 1);
+        tile(x, y + 1, art + 2);
+        tile(x + 1, y + 1, art + 3);
     }
     dirty[raw cell] = 0;
 }
@@ -116,28 +250,64 @@ fn draw_hud() {
     tile(23, 2, 48 + u8((gold / 10) % 10));
     tile(24, 2, 48 + u8(gold % 10));
     tile(8, 2, 48 + potions);
-    if key_found { tile(18, 2, 43); } else { tile(18, 2, 45); }
+    if key_found {
+        tile(18, 2, 43);
+    } else {
+        tile(18, 2, 45);
+    }
     hud_dirty = false;
 }
 
 fn new_floor() {
     render(false);
+    paused = false;
+    message = 0;
+    message_timer = 0;
+    message_dirty = true;
+    damage_taken = false;
     screen("assets/emberkeep.map");
     hide_sprites();
-    for i in 0..192 { dungeon[i] = 0; seen[i] = 0; dirty[i] = 0; }
-    for n in 0..6 { enemy_hp[n] = 0; enemy_phase[n] = 0; }
-    room_x[0] = 2 + (rand() & 1); room_y[0] = 3;
-    room_x[1] = 11 + (rand() & 1); room_y[1] = 3;
-    room_x[2] = 11; room_y[2] = 8 + (rand() & 1);
-    room_x[3] = 3 + (rand() & 1); room_y[3] = 8;
-    for r in 0..4 { carve_room(room_x[r], room_y[r]); }
-    for c in 0..3 { corridor(room_x[c], room_y[c], room_x[c + 1], room_y[c + 1]); }
+    for i in 0..192 {
+        dungeon[i] = 0;
+        seen[i] = 0;
+        dirty[i] = 0;
+    }
+    for n in 0..6 {
+        enemy_hp[n] = 0;
+        enemy_phase[n] = 0;
+    }
+    room_x[0] = 2 + (rand() & 1);
+    room_y[0] = 3;
+    room_x[1] = 11 + (rand() & 1);
+    room_y[1] = 3;
+    room_x[2] = 11;
+    room_y[2] = 8 + (rand() & 1);
+    room_x[3] = 3 + (rand() & 1);
+    room_y[3] = 8;
+    for r in 0..4 {
+        carve_room(room_x[r], room_y[r]);
+    }
+    for c in 0..3 {
+        corridor(room_x[c], room_y[c], room_x[c + 1], room_y[c + 1]);
+    }
     corridor(room_x[3], room_y[3], room_x[0], room_y[0]);
-    if (floor & 1) != 0 { corridor(room_x[0], room_y[0], room_x[2], room_y[2]); }
-    player_x = room_x[0]; player_y = room_y[0];
+    if (floor & 1) != 0 {
+        corridor(room_x[0], room_y[0], room_x[2], room_y[2]);
+    }
+    player_x = room_x[0];
+    player_y = room_y[0];
     dungeon[raw index(room_x[2], room_y[2])] = 2;
     dungeon[raw index(room_x[3], room_y[3])] = 3;
     dungeon[raw index(room_x[1] + 1, room_y[1])] = 4;
+    if floor >= 2 {
+        for trap in 0..floor {
+            let tx: u8 = 1 + (rand() & 15);
+            let ty: u8 = 1 + (rand() & 7);
+            if tx < 15 && dungeon[raw index(tx, ty)] == 1 && tx > player_x + 2 {
+                dungeon[raw index(tx, ty)] = 5;
+            }
+        }
+    }
     for e in 0..6 {
         var tries: u8 = 0;
         while tries < 24 {
@@ -145,9 +315,10 @@ fn new_floor() {
             let ey: u8 = 1 + (rand() & 7);
             if ex < 15 && ey < 11 {
                 let cell: u8 = index(ex, ey);
-                if dungeon[raw cell] == 1 && enemy_at(ex, ey) == 255 {
+                if dungeon[raw cell] == 1 && enemy_at(ex, ey) == 255 && !crowded_row(ey, e) {
                     if ex > player_x + 2 || ey > player_y + 2 {
-                        enemy_x[e] = ex; enemy_y[e] = ey;
+                        enemy_x[e] = ex;
+                        enemy_y[e] = ey;
                         enemy_hp[e] = 2 + floor / 2;
                         enemy_kind[e] = e & 1;
                         break;
@@ -161,8 +332,11 @@ fn new_floor() {
     render_cursor = 0;
     turn = 0;
     reveal();
-    for map_cell in 0..192 { draw_cell(map_cell); }
+    for map_cell in 0..192 {
+        draw_cell(map_cell);
+    }
     draw_hud();
+    draw_message();
     render(true);
 }
 
@@ -170,7 +344,12 @@ fn finish(won: bool) {
     over = true;
     victory = won;
     render(false);
-    for y in 10..20 { for x in 2..30 { tile(x, y, 0); } }
+    hide_sprites();
+    for y in 10..20 {
+        for x in 2..30 {
+            tile(x, y, 0);
+        }
+    }
     if won {
         text(5, 12, "THE KEEP REMEMBERS LIGHT");
         text(7, 15, "SIX FLOORS. ONE FLAME.");
@@ -185,7 +364,14 @@ fn finish(won: bool) {
 }
 
 fn hurt() {
-    if health != 0 { health -= 1; }
+    if damage_taken {
+        return;
+    }
+    damage_taken = true;
+    notify(6);
+    if health != 0 {
+        health -= 1;
+    }
     hurt_timer = 12;
     noise(6, 6);
     tone(1, 500, 4);
@@ -196,42 +382,78 @@ fn hurt() {
 fn walk(dx: i8, dy: i8) -> bool {
     let x: u8 = u8(i8(player_x) + dx);
     let y: u8 = u8(i8(player_y) + dy);
-    if x >= 16 || y >= 12 { return false; }
-    if dx < 0 { facing = 64; } else if dx > 0 { facing = 0; }
+    if x >= 16 || y >= 12 {
+        return false;
+    }
+    if dx < 0 {
+        facing = 64;
+    } else if dx > 0 {
+        facing = 0;
+    }
     let cell: u8 = index(x, y);
     let kind: u8 = dungeon[raw cell];
-    if kind == 0 { return false; }
+    if kind == 0 {
+        return false;
+    }
     let enemy: u8 = enemy_at(x, y);
     if enemy != 255 {
         var power: u8 = 1;
-        if floor >= 3 { power = 2; }
+        if floor >= 3 {
+            power = 2;
+        }
         if enemy_hp[raw enemy] <= power {
             enemy_hp[raw enemy] = 0;
             gold += 2;
+            notify(4);
             tone(1, 140, 5);
         } else {
             enemy_hp[raw enemy] -= power;
+            notify(3);
             tone(1, 300, 4);
         }
         effect_timer = 5;
         hud_dirty = true;
         return true;
     }
-    player_x = x; player_y = y;
+    player_x = x;
+    player_y = y;
     if kind == 3 {
-        gold += 5; key_found = true; dungeon[raw cell] = 1; dirty[raw cell] = 1;
-        tone(1, 106, 5); effect_timer = 12; hud_dirty = true;
+        notify(1);
+        gold += 5;
+        key_found = true;
+        dungeon[raw cell] = 1;
+        dirty[raw cell] = 1;
+        tone(1, 106, 5);
+        effect_timer = 12;
+        hud_dirty = true;
     }
     if kind == 4 {
-        if potions < 9 { potions += 1; }
-        dungeon[raw cell] = 1; dirty[raw cell] = 1; hud_dirty = true;
-        tone(1, 180, 4); effect_timer = 8;
+        notify(2);
+        if potions < 9 {
+            potions += 1;
+        }
+        dungeon[raw cell] = 1;
+        dirty[raw cell] = 1;
+        hud_dirty = true;
+        tone(1, 180, 4);
+        effect_timer = 8;
     }
-    if kind == 5 { hurt(); dungeon[raw cell] = 1; dirty[raw cell] = 1; }
+    if kind == 5 {
+        hurt();
+        dungeon[raw cell] = 1;
+        dirty[raw cell] = 1;
+    }
+    if kind == 2 && !key_found {
+        notify(5);
+    }
     if kind == 2 && key_found {
         floor += 1;
-        if floor == 6 { finish(true); } else {
-            if health < 10 { health += 1; }
+        if floor == 6 {
+            finish(true);
+        } else {
+            if health < 10 {
+                health += 1;
+            }
             new_floor();
         }
         return false;
@@ -241,30 +463,56 @@ fn walk(dx: i8, dy: i8) -> bool {
 }
 
 fn try_enemy_move(e: u8, x: u8, y: u8) {
-    if x >= 16 || y >= 12 { return; }
-    if x == player_x && y == player_y { return; }
-    if dungeon[raw index(x, y)] != 0 && enemy_at(x, y) == 255 { enemy_x[raw e] = x; enemy_y[raw e] = y; }
+    if crowded_row(y, e) {
+        return;
+    }
+    if x >= 16 || y >= 12 {
+        return;
+    }
+    if x == player_x && y == player_y {
+        return;
+    }
+    if dungeon[raw index(x, y)] != 0 && enemy_at(x, y) == 255 {
+        enemy_x[raw e] = x;
+        enemy_y[raw e] = y;
+    }
 }
 
 fn enemies() {
     for e in 0..6 {
         if enemy_hp[e] != 0 {
-            let ex: u8 = enemy_x[e]; let ey: u8 = enemy_y[e];
-            var dx: u8 = ex - player_x; var dy: u8 = ey - player_y;
-            if ex < player_x { dx = player_x - ex; }
-            if ey < player_y { dy = player_y - ey; }
+            let ex: u8 = enemy_x[e];
+            let ey: u8 = enemy_y[e];
+            var dx: u8 = ex - player_x;
+            var dy: u8 = ey - player_y;
+            if ex < player_x {
+                dx = player_x - ex;
+            }
+            if ey < player_y {
+                dy = player_y - ey;
+            }
             if dx + dy == 1 {
-                if enemy_phase[e] == 0 { enemy_phase[e] = 1; }
-                else { enemy_phase[e] = 0; hurt(); }
+                if enemy_phase[e] == 0 {
+                    enemy_phase[e] = 1;
+                } else {
+                    enemy_phase[e] = 0;
+                    hurt();
+                }
             } else {
                 enemy_phase[e] = 0;
                 if dx + dy < 8 && (enemy_kind[e] != 0 || (turn & 1) == 0) {
-                    if ex < player_x { try_enemy_move(e, ex + 1, ey); }
-                    else if ex > player_x { try_enemy_move(e, ex - 1, ey); }
+                    if ex < player_x {
+                        try_enemy_move(e, ex + 1, ey);
+                    } else if ex > player_x {
+                        try_enemy_move(e, ex - 1, ey);
+                    }
                     let now_x: u8 = enemy_x[e];
                     if now_x == ex {
-                        if ey < player_y { try_enemy_move(e, ex, ey + 1); }
-                        else if ey > player_y { try_enemy_move(e, ex, ey - 1); }
+                        if ey < player_y {
+                            try_enemy_move(e, ex, ey + 1);
+                        } else if ey > player_y {
+                            try_enemy_move(e, ex, ey - 1);
+                        }
                     }
                 }
             }
@@ -278,18 +526,35 @@ fn music() {
         music_clock = 0;
         let id: u8 = music_step & 31;
         let pitch: u16 = MELODY[id];
-        if pitch != 0 { tone(0, pitch, 3); } else { silence(0); }
-        if (music_step & 3) == 0 { tone(2, BASS[id], 7); }
-        if (music_step & 7) == 0 { noise(12, 2); }
+        if pitch != 0 {
+            tone(0, pitch, 3);
+        } else {
+            silence(0);
+        }
+        if (music_step & 3) == 0 {
+            tone(2, BASS[id], 7);
+        }
+        if (music_step & 7) == 0 {
+            noise(12, 2);
+        }
         music_step += 1;
     }
-    if music_clock == 2 { silence(3); }
-    if effect_timer != 0 { effect_timer -= 1; if effect_timer == 0 { silence(1); } }
+    if music_clock == 2 {
+        silence(3);
+    }
+    if effect_timer != 0 {
+        effect_timer -= 1;
+        if effect_timer == 0 {
+            silence(1);
+        }
+    }
 }
 
 fn graphics() {
     hide_sprites();
-    if over { return; }
+    if over {
+        return;
+    }
     let px: u8 = player_x << 4;
     let py: u8 = 32 + (player_y << 4);
     if hurt_timer == 0 || (frame & 2) == 0 {
@@ -298,16 +563,20 @@ fn graphics() {
         sprite(1, px + 8, py, 148 + (flip ^ 1), facing);
         sprite(2, px, py + 8, 150 + flip, facing);
         sprite(3, px + 8, py + 8, 150 + (flip ^ 1), facing);
-        sprite(4, px + 11, py + 4, 214, 0);
     }
     for e in 0..6 {
-        if enemy_hp[e] != 0 && seen[raw index(enemy_x[e], enemy_y[e])] != 0 {
+        if enemy_hp[e] != 0 && seen[raw index(enemy_x[e], enemy_y[e])] != 0 && dirty[raw index(enemy_x[e], enemy_y[e])] == 0 && lit(enemy_x[e], enemy_y[e]) {
             let x: u8 = enemy_x[e] << 4;
             let y: u8 = 32 + (enemy_y[e] << 4) + ((frame >> 4) & 1);
             var art: u8 = 164;
             var color: u8 = 1;
-            if enemy_kind[e] != 0 { art = 168; color = 3; }
-            if enemy_phase[e] != 0 { color = 2; }
+            if enemy_kind[e] != 0 {
+                art = 168;
+                color = 3;
+            }
+            if enemy_phase[e] != 0 {
+                color = 2;
+            }
             let slot: u8 = 8 + (e << 2);
             sprite(slot, x, y, art, color);
             sprite(slot + 1, x + 8, y, art + 1, color);
@@ -320,43 +589,150 @@ fn graphics() {
 fn redraw() {
     var count: u8 = 0;
     var visited: u8 = 0;
-    while visited < 48 && count < 4 {
-        if dirty[raw render_cursor] != 0 { draw_cell(render_cursor); count += 1; }
+    let here: u8 = index(player_x, player_y);
+    if dirty[raw here] != 0 {
+        draw_cell(here);
+        count += 1;
+    }
+    for neighbor in 0..4 {
+        var x: u8 = player_x;
+        var y: u8 = player_y;
+        match neighbor {
+            0 => {
+                x -= 1;
+            }
+            1 => {
+                x += 1;
+            }
+            2 => {
+                y -= 1;
+            }
+            _ => {
+                y += 1;
+            }
+        }
+        if x < 16 && y < 12 && count < redraw_limit {
+            let cell: u8 = index(x, y);
+            if dirty[raw cell] != 0 {
+                draw_cell(cell);
+                count += 1;
+            }
+        }
+    }
+    while visited < 48 && count < redraw_limit {
+        if dirty[raw render_cursor] != 0 {
+            draw_cell(render_cursor);
+            count += 1;
+        }
         render_cursor += 1;
-        if render_cursor == 192 { render_cursor = 0; }
+        if render_cursor == 192 {
+            render_cursor = 0;
+        }
         visited += 1;
     }
 }
 
-fn init() { new_floor(); }
+fn init() {
+    new_floor();
+}
 
 fn update() {
-    frame += 1;
-    music();
     let edge: u8 = pressed();
     if (edge & 8) != 0 {
-        health = 8; potions = 2; gold = 0; floor = 0; over = false; victory = false;
-        new_floor();
+        if over {
+            health = 8;
+            potions = 2;
+            gold = 0;
+            floor = 0;
+            over = false;
+            victory = false;
+            new_floor();
+        } else {
+            paused = !paused;
+            if paused {
+                text(8, 3, "PAUSED / START  ");
+                silence(0);
+                silence(1);
+                silence(2);
+                silence(3);
+            } else {
+                message_dirty = true;
+            }
+        }
     }
-    if over { graphics(); return; }
-    if hurt_timer != 0 { hurt_timer -= 1; }
-    if move_delay != 0 { move_delay -= 1; }
+    if paused {
+        graphics();
+        return;
+    }
+    frame += 1;
+    music();
+    if over {
+        graphics();
+        return;
+    }
+    if message_timer != 0 {
+        message_timer -= 1;
+        if message_timer == 0 {
+            message = 0;
+            message_dirty = true;
+        }
+    }
+    if hurt_timer != 0 {
+        hurt_timer -= 1;
+    }
+    if move_delay != 0 {
+        move_delay -= 1;
+    }
     var action: bool = false;
+    damage_taken = false;
     let held: u8 = buttons();
     if move_delay == 0 || (edge & 240) != 0 {
-        if (held & 64) != 0 { action = walk(-1, 0); move_delay = 8; }
-        else if (held & 128) != 0 { action = walk(1, 0); move_delay = 8; }
-        else if (held & 16) != 0 { action = walk(0, -1); move_delay = 8; }
-        else if (held & 32) != 0 { action = walk(0, 1); move_delay = 8; }
+        if (held & 64) != 0 {
+            action = walk(-1, 0);
+            move_delay = 8;
+        } else if (held & 128) != 0 {
+            action = walk(1, 0);
+            move_delay = 8;
+        } else if (held & 16) != 0 {
+            action = walk(0, -1);
+            move_delay = 8;
+        } else if (held & 32) != 0 {
+            action = walk(0, 1);
+            move_delay = 8;
+        }
     }
-    if (edge & 1) != 0 { action = true; }
-    if (edge & 2) != 0 && potions != 0 {
-        potions -= 1; health += 4; if health > 10 { health = 10; }
-        action = true; hud_dirty = true; tone(1, 120, 4); effect_timer = 10;
+    if (edge & 1) != 0 {
+        action = true;
     }
-    if action && !over { turn += 1; enemies(); }
-    if health == 0 && !over { finish(false); }
-    if hud_dirty { draw_hud(); }
-    if !over { redraw(); }
+    if (edge & 2) != 0 && potions != 0 && health < 10 {
+        potions -= 1;
+        health += 4;
+        if health > 10 {
+            health = 10;
+        }
+        action = true;
+        hud_dirty = true;
+        tone(1, 120, 4);
+        effect_timer = 10;
+        notify(7);
+    }
+    if action && !over {
+        turn += 1;
+        enemies();
+    }
+    if health == 0 && !over {
+        finish(false);
+    }
+    redraw_limit = 4;
+    if hud_dirty {
+        draw_hud();
+    }
+    if message_dirty && !over {
+        draw_message();
+        redraw_limit = 2;
+    }
+    if !over {
+        redraw();
+    }
     graphics();
 }

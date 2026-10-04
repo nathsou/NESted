@@ -17,6 +17,12 @@ fn pure(e: &Expr, volatile: &BTreeSet<String>) -> bool {
         ExprKind::Index(..) => false,
         ExprKind::Binary(_, a, b) => pure(a, volatile) && pure(b, volatile),
         ExprKind::Unary(_, a) => pure(a, volatile),
+        ExprKind::Match(value, arms) => {
+            pure(value, volatile)
+                && arms.iter().all(
+                    |arm| matches!(&arm.body,MatchBody::Value(result) if pure(result,volatile)),
+                )
+        }
         ExprKind::Call(n, v) => {
             ["u8", "i8", "u16", "i16", "bool"].contains(&n.as_str())
                 && v.iter().all(|e| pure(e, volatile))
@@ -28,6 +34,16 @@ fn cost(e: &Expr) -> usize {
     match &e.kind {
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b, _) => 1 + cost(a) + cost(b),
         ExprKind::Unary(_, a) => 1 + cost(a),
+        ExprKind::Match(value, arms) => {
+            1 + cost(value)
+                + arms
+                    .iter()
+                    .map(|a| match &a.body {
+                        MatchBody::Value(v) => cost(v),
+                        MatchBody::Block(b) => b.len() * 4,
+                    })
+                    .sum::<usize>()
+        }
         ExprKind::Call(_, v) => 1 + v.iter().map(cost).sum::<usize>(),
         _ => 1,
     }
@@ -45,6 +61,15 @@ fn substitute(e: &mut Expr, args: &BTreeMap<String, Expr>) {
             substitute(b, args);
         }
         ExprKind::Unary(_, a) => substitute(a, args),
+        ExprKind::Match(value, arms) => {
+            substitute(value, args);
+            for arm in arms {
+                match &mut arm.body {
+                    MatchBody::Value(result) => substitute(result, args),
+                    MatchBody::Block(body) => replace_statements(body, args),
+                }
+            }
+        }
         ExprKind::Call(_, v) => {
             for a in v {
                 substitute(a, args);
@@ -66,6 +91,17 @@ fn expression(
             expression(b, constants, inline, stats, volatile);
         }
         ExprKind::Unary(_, a) => expression(a, constants, inline, stats, volatile),
+        ExprKind::Match(value, arms) => {
+            expression(value, constants, inline, stats, volatile);
+            for arm in arms {
+                match &mut arm.body {
+                    MatchBody::Value(result) => {
+                        expression(result, constants, inline, stats, volatile)
+                    }
+                    MatchBody::Block(body) => block(body, constants, inline, stats, volatile),
+                }
+            }
+        }
         ExprKind::Call(_, v) => {
             for a in v {
                 expression(a, constants, inline, stats, volatile);
@@ -143,6 +179,24 @@ fn replace_statements(body: &mut [Stmt], bind: &BTreeMap<String, Expr>) {
             }
             Stmt::Expr(e) => substitute(e, bind),
             Stmt::Local { value, .. } => substitute(value, bind),
+            Stmt::If { condition, yes, no } => {
+                substitute(condition, bind);
+                replace_statements(yes, bind);
+                replace_statements(no, bind);
+            }
+            Stmt::While { condition, body } => {
+                substitute(condition, bind);
+                replace_statements(body, bind);
+            }
+            Stmt::For {
+                start, end, body, ..
+            } => {
+                substitute(start, bind);
+                substitute(end, bind);
+                replace_statements(body, bind);
+            }
+            Stmt::Loop(body) => replace_statements(body, bind),
+            Stmt::Return(Some(value), _) => substitute(value, bind),
             _ => {}
         }
     }
@@ -276,6 +330,15 @@ pub fn calls_expr(e: &Expr, calls: &mut BTreeSet<String>, asm: &mut bool) {
             calls_expr(b, calls, asm);
         }
         ExprKind::Unary(_, e) => calls_expr(e, calls, asm),
+        ExprKind::Match(value, arms) => {
+            calls_expr(value, calls, asm);
+            for arm in arms {
+                match &arm.body {
+                    MatchBody::Value(result) => calls_expr(result, calls, asm),
+                    MatchBody::Block(body) => calls_block(body, calls, asm),
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -393,6 +456,36 @@ fn expr(e: &Expr) -> String {
             format!("{n}({})", v.iter().map(expr).collect::<Vec<_>>().join(", "))
         }
         ExprKind::Asm(_, s) => format!("asm opaque {{ {} }}", s.trim().replace('\n', "; ")),
+        ExprKind::Match(value, arms) => {
+            let mut out = format!("match {} {{\n", expr(value));
+            for arm in arms {
+                let patterns = if arm.patterns.is_empty() {
+                    "_".into()
+                } else {
+                    arm.patterns
+                        .iter()
+                        .map(|(lo, hi)| {
+                            hi.as_ref().map_or_else(
+                                || expr(lo),
+                                |hi| format!("{}..={}", expr(lo), expr(hi)),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                };
+                out.push_str(&format!("  {patterns} => "));
+                match &arm.body {
+                    MatchBody::Value(v) => out.push_str(&format!("{},\n", expr(v))),
+                    MatchBody::Block(body) => {
+                        out.push_str("{\n");
+                        dump_block(body, 2, &mut out);
+                        out.push_str("  }\n");
+                    }
+                }
+            }
+            out.push('}');
+            out
+        }
     }
 }
 fn dump_block(body: &[Stmt], indent: usize, out: &mut String) {

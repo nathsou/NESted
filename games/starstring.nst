@@ -1,19 +1,25 @@
 // STARSTRING — original four-lane rhythm cartridge.
 // Arrow keys are the four lanes. Hold glowing sustained notes.
 cartridge "Starstring" {
-    mapper = mmc3; region = ntsc; mirroring = vertical;
+    mapper = mmc3;
+    region = ntsc;
+    mirroring = vertical;
     chr = "assets/starstring.chr";
     palette = "assets/starstring.pal";
     screen = "assets/starstring.map";
 }
 const CHART: [u8; 192] = asset("assets/starstring.chart.bin");
 const MELODY: [u16; 32] = [
-    338, 284, 225, 169, 189, 225, 284, 338, 380, 301, 253, 189, 201, 253, 301, 380,
-    427, 338, 284, 213, 225, 284, 338, 427, 452, 380, 301, 225, 253, 301, 380, 452,
+    338, 284, 225, 169, 189, 225, 284, 338,
+    380, 301, 253, 189, 201, 253, 301, 380,
+    427, 338, 284, 213, 225, 284, 338, 427,
+    452, 380, 301, 225, 253, 301, 380, 452,
 ];
 const BASS: [u16; 32] = [
-    678, 570, 452, 338, 380, 452, 570, 678, 761, 604, 507, 380, 403, 507, 604, 761,
-    854, 678, 570, 427, 452, 570, 678, 854, 905, 761, 604, 452, 507, 604, 761, 905,
+    678, 570, 452, 338, 380, 452, 570, 678,
+    761, 604, 507, 380, 403, 507, 604, 761,
+    854, 678, 570, 427, 452, 570, 678, 854,
+    905, 761, 604, 452, 507, 604, 761, 905,
 ];
 var note_y: [u8; 12] = [0; 12];
 var note_mask: [u8; 12] = [0; 12];
@@ -31,7 +37,7 @@ var chart_step: u8 = 0;
 var next_slot: u8 = 0;
 var music_clock: u8 = 0;
 var music_step: u8 = 0;
-var music_delay: u8 = 80;
+var music_delay: u8 = 56;
 var score: u16 = 0;
 var combo: u8 = 0;
 var best_combo: u8 = 0;
@@ -43,13 +49,22 @@ var feedback: u8 = 0;
 var feedback_timer: u8 = 0;
 var hud_dirty: bool = true;
 var frame: u8 = 0;
+var unmatched: u8 = 0;
 
 fn lanes(pad: u8) -> u8 {
     var result: u8 = 0;
-    if (pad & 64) != 0 { result |= 1; }
-    if (pad & 32) != 0 { result |= 2; }
-    if (pad & 16) != 0 { result |= 4; }
-    if (pad & 128) != 0 { result |= 8; }
+    if (pad & 64) != 0 {
+        result |= 1;
+    }
+    if (pad & 32) != 0 {
+        result |= 2;
+    }
+    if (pad & 16) != 0 {
+        result |= 4;
+    }
+    if (pad & 128) != 0 {
+        result |= 8;
+    }
     return result;
 }
 
@@ -65,43 +80,87 @@ fn print_score() {
     text(3, 7, "ENERGY");
     for i in 0..10 {
         var glyph: u8 = 45;
-        if i < energy { glyph = 43; }
+        if i < energy {
+            glyph = 43;
+        }
         tile(11 + i, 7, glyph);
     }
-    if feedback == 1 { text(12, 8, "PERFECT"); }
-    if feedback == 2 { text(12, 8, " GOOD! "); }
-    if feedback == 3 { text(12, 8, " MISS! "); }
+    if feedback == 1 {
+        text(12, 8, "PERFECT");
+    }
+    if feedback == 2 {
+        text(12, 8, " GOOD! ");
+    }
+    if feedback == 3 {
+        text(12, 8, " MISS! ");
+    }
     hud_dirty = false;
 }
 
 fn draw_tempo() {
-    if difficulty == 0 { text(5, 4, "MOONLIGHT CIRCUIT /  90 BPM"); }
-    if difficulty == 1 { text(5, 4, "MOONLIGHT CIRCUIT / 112 BPM"); }
-    if difficulty == 2 { text(5, 4, "MOONLIGHT CIRCUIT / 180 BPM"); }
+    if difficulty == 0 {
+        text(5, 4, "MOONLIGHT CIRCUIT /  90 BPM");
+    }
+    if difficulty == 1 {
+        text(5, 4, "MOONLIGHT CIRCUIT / 112 BPM");
+    }
+    if difficulty == 2 {
+        text(5, 4, "MOONLIGHT CIRCUIT / 180 BPM");
+    }
 }
 
 fn menu() {
     render(false);
+    hide_sprites();
     screen("assets/starstring.map");
     draw_tempo();
+    clear_field();
     text(7, 13, "PRESS START TO PLAY");
     text(6, 15, "TAPS CHORDS AND HOLDS");
     text(6, 17, "SELECT: DIFFICULTY");
-    if difficulty == 0 { text(8, 19, "RELAXED / 90 BPM"); }
-    if difficulty == 1 { text(8, 19, "NORMAL / 112 BPM"); }
-    if difficulty == 2 { text(8, 19, "EXPERT / 180 BPM"); }
+    if difficulty == 0 {
+        text(8, 19, "RELAXED / 90 BPM");
+    }
+    if difficulty == 1 {
+        text(8, 19, "NORMAL / 112 BPM");
+    }
+    if difficulty == 2 {
+        text(8, 19, "EXPERT / 180 BPM");
+    }
     render(true);
 }
 
 fn start_song() {
     render(false);
+    hide_sprites();
     screen("assets/starstring.map");
     draw_tempo();
-    if difficulty == 0 { tempo = 20; fall_speed = 2; hit_window = 12; music_delay = 80; }
-    if difficulty == 1 { tempo = 16; fall_speed = 2; hit_window = 8; music_delay = 80; }
-    if difficulty == 2 { tempo = 10; fall_speed = 4; hit_window = 8; music_delay = 40; }
-    for i in 0..12 { note_y[i] = 0; note_mask[i] = 0; sustain[i] = 0; }
-    for f in 0..4 { flash[f] = 0; }
+    if difficulty == 0 {
+        tempo = 20;
+        fall_speed = 2;
+        hit_window = 12;
+        music_delay = 56;
+    }
+    if difficulty == 1 {
+        tempo = 16;
+        fall_speed = 2;
+        hit_window = 8;
+        music_delay = 56;
+    }
+    if difficulty == 2 {
+        tempo = 10;
+        fall_speed = 4;
+        hit_window = 8;
+        music_delay = 28;
+    }
+    for i in 0..12 {
+        note_y[i] = 0;
+        note_mask[i] = 0;
+        sustain[i] = 0;
+    }
+    for f in 0..4 {
+        flash[f] = 0;
+    }
     mode = 1;
     score = 0;
     combo = 0;
@@ -116,17 +175,24 @@ fn start_song() {
     music_clock = tempo - 1;
     feedback = 0;
     print_score();
+    text(12, 8, "READY  ");
     render(true);
 }
 
 fn finish(won: bool) {
     mode = 2;
     render(false);
+    hide_sprites();
+    clear_field();
     if won {
         text(5, 12, "THE NIGHT REMEMBERS YOU");
-        if misses == 0 { text(8, 14, "S RANK / STARLIGHT"); }
-        else if misses < 8 { text(8, 14, "A RANK / MOONBEAM "); }
-        else { text(8, 14, "B RANK / KEEP SHINING"); }
+        if misses == 0 {
+            text(8, 14, "S RANK / STARLIGHT");
+        } else if misses < 8 {
+            text(8, 14, "A RANK / MOONBEAM ");
+        } else {
+            text(8, 14, "B RANK / KEEP SHINING");
+        }
     } else {
         text(6, 12, "A LITTLE MORE PRACTICE");
         text(6, 14, "THE MELODY WAITS FOR YOU");
@@ -140,53 +206,114 @@ fn finish(won: bool) {
 }
 
 fn music() {
-    if mode == 1 && music_delay != 0 { music_delay -= 1; if music_delay != 0 { return; } }
+    if mode == 3 {
+        return;
+    }
+    if mode == 1 && music_delay != 0 {
+        music_delay -= 1;
+        if music_delay != 0 {
+            return;
+        }
+        text(12, 8, "       ");
+    }
     music_clock += 1;
     if music_clock >= tempo {
         music_clock = 0;
         let id: u8 = music_step & 31;
         let melody: u16 = MELODY[id];
-        if melody != 0 { tone(0, melody, 7); } else { silence(0); }
-        if (music_step & 1) == 0 { tone(2, BASS[id], 8); }
-        if (music_step & 3) == 0 { noise(4, 5); }
-        if (music_step & 3) == 2 { noise(8, 3); }
+        if melody != 0 {
+            tone(0, melody, 7);
+        } else {
+            silence(0);
+        }
+        if (music_step & 1) == 0 {
+            tone(2, BASS[id], 8);
+        }
+        if (music_step & 3) == 0 {
+            noise(4, 5);
+        }
+        if (music_step & 3) == 2 {
+            noise(8, 3);
+        }
         music_step += 1;
     }
-    if music_clock == 3 { silence(3); }
+    if music_clock == 3 {
+        silence(3);
+    }
 }
 
 fn draw_head(lane: u8, y: u8, kind: u8) {
-    if draw_slot >= 52 { return; }
-    let x: u8 = 40 + (lane << 5) + (lane << 4);
-    var image: u8 = 192;
-    if kind != 0 { image = 196; }
+    if draw_slot >= 52 {
+        return;
+    }
+    let x: u8 = 48 + (lane << 5) + (lane << 4);
+    let image: u8 = match kind {
+        0 => 192,
+        _ => 196
+    };
     sprite(draw_slot, x, y, image, lane);
-    sprite(draw_slot + 1, x + 8, y, image + 1, lane);
-    draw_slot += 2;
+    draw_slot += 1;
     if kind != 0 && y < 168 {
         sprite(draw_slot, x, y + 8, 244, lane);
-        sprite(draw_slot + 1, x + 8, y + 8, 245, lane);
-        sprite(draw_slot + 2, x, y + 16, 246, lane);
-        sprite(draw_slot + 3, x + 8, y + 16, 247, lane);
-        draw_slot += 4;
+        sprite(draw_slot + 1, x, y + 16, 244, lane);
+        draw_slot += 2;
     }
 }
 
-fn init() { menu(); }
+fn clear_field() {
+    for y in 10..25 {
+        for x in 3..29 {
+            tile(x, y, 0);
+        }
+    }
+}
+
+fn toggle_pause() {
+    if mode == 1 {
+        mode = 3;
+        text(10, 8, "PAUSED / START");
+        silence(0);
+        silence(1);
+        silence(2);
+        silence(3);
+    } else if mode == 3 {
+        mode = 1;
+        text(10, 8, "              ");
+        feedback_timer = 0;
+        feedback = 0;
+    }
+}
+
+fn init() {
+    menu();
+}
 
 fn update() {
     frame += 1;
     hide_sprites();
     music();
     let edge: u8 = pressed();
+    let pause_edge: bool = (edge & 12) != 0 && (mode == 1 || mode == 3);
     if mode == 0 && (edge & 4) != 0 {
         difficulty += 1;
-        if difficulty == 3 { difficulty = 0; }
+        if difficulty == 3 {
+            difficulty = 0;
+        }
         menu();
     }
-    if (edge & 8) != 0 { start_song(); }
-    if mode == 1 {
+    if (edge & 8) != 0 {
+        if mode == 0 || mode == 2 {
+            start_song();
+        } else {
+            toggle_pause();
+        }
+    }
+    if (edge & 4) != 0 && (edge & 8) == 0 && (mode == 1 || mode == 3) {
+        toggle_pause();
+    }
+    if mode == 1 && !pause_edge {
         let tap: u8 = lanes(edge);
+        unmatched = tap;
         let held: u8 = lanes(buttons());
         var active: u8 = 0;
         for n in 0..12 {
@@ -196,13 +323,18 @@ fn update() {
                     sustain[n] = 0;
                     combo = 0;
                     misses += 1;
-                    if energy != 0 { energy -= 1; }
+                    if energy != 0 {
+                        energy -= 1;
+                    }
                     feedback = 3;
                     feedback_timer = 18;
                     hud_dirty = true;
                 } else {
                     sustain[n] -= 1;
-                    if sustain[n] == 0 { score += 80; hud_dirty = true; }
+                    if sustain[n] == 0 {
+                        score += 80;
+                        hud_dirty = true;
+                    }
                 }
             }
             if note_y[n] != 0 {
@@ -213,24 +345,43 @@ fn update() {
                     note_y[n] = 0;
                     combo = 0;
                     misses += 1;
-                    if energy != 0 { energy -= 1; }
+                    if energy != 0 {
+                        energy -= 1;
+                    }
                     feedback = 3;
                     feedback_timer = 18;
                     hud_dirty = true;
                 } else if y >= 192 - hit_window && y <= 192 + hit_window {
                     if (tap & note_mask[n]) != 0 {
                         let hit: u8 = tap & note_mask[n];
-                        for hit_lane in 0..4 { if (hit & (1 << hit_lane)) != 0 { flash[hit_lane] = 7; } }
+                        unmatched &= ~hit;
+                        for hit_lane in 0..4 {
+                            if (hit & (1 << hit_lane)) != 0 {
+                                flash[hit_lane] = 7;
+                            }
+                        }
                         note_mask[n] &= ~hit;
                         if note_mask[n] == 0 {
                             note_y[n] = 0;
                             combo += 1;
-                            if combo > best_combo { best_combo = combo; }
-                            if y >= 190 && y <= 194 { perfect += 1; score += 100; feedback = 1; }
-                            else { score += 60; feedback = 2; }
+                            if combo > best_combo {
+                                best_combo = combo;
+                            }
+                            if y >= 190 && y <= 194 {
+                                perfect += 1;
+                                score += 100;
+                                feedback = 1;
+                            } else {
+                                score += 60;
+                                feedback = 2;
+                            }
                             score += u16(combo & 31) << 1;
-                            if note_kind[n] != 0 { sustain[n] = 24; }
-                            if (combo & 7) == 0 && energy < 10 { energy += 1; }
+                            if note_kind[n] != 0 {
+                                sustain[n] = 24;
+                            }
+                            if (combo & 7) == 0 && energy < 10 {
+                                energy += 1;
+                            }
                             feedback_timer = 18;
                             hud_dirty = true;
                         }
@@ -238,56 +389,87 @@ fn update() {
                 }
             }
         }
+        if unmatched != 0 && music_delay == 0 {
+            combo = 0;
+            misses += 1;
+            if energy != 0 {
+                energy -= 1;
+            }
+            feedback = 3;
+            feedback_timer = 18;
+            hud_dirty = true;
+        }
         if beat_clock == 0 && chart_step < 192 {
             let event: u8 = CHART[raw chart_step];
             if (event & 15) != 0 {
-                note_y[raw next_slot] = 32;
+                note_y[raw next_slot] = 80;
                 note_mask[raw next_slot] = event & 15;
                 sustain_mask[raw next_slot] = event & 15;
                 note_kind[raw next_slot] = event >> 7;
                 next_slot += 1;
-                if next_slot == 12 { next_slot = 0; }
+                if next_slot == 12 {
+                    next_slot = 0;
+                }
+            }
+            if (chart_step & 7) == 0 {
+                tile(4 + (chart_step >> 3), 26, 249);
             }
             chart_step += 1;
         }
         beat_clock += 1;
-        if beat_clock >= tempo { beat_clock = 0; }
-        if energy == 0 { finish(false); }
-        else if chart_step == 192 && active == 0 { finish(true); }
-        if hud_dirty { print_score(); }
+        if beat_clock >= tempo {
+            beat_clock = 0;
+        }
+        if energy == 0 {
+            finish(false);
+        } else if chart_step == 192 && active == 0 {
+            finish(true);
+        }
+        if hud_dirty {
+            print_score();
+        }
         if feedback_timer != 0 {
             feedback_timer -= 1;
-            if feedback_timer == 0 { text(12, 8, "       "); }
+            if feedback_timer == 0 {
+                text(12, 8, "       ");
+            }
         }
     }
     draw_slot = 0;
-    if mode == 1 {
+    if mode == 1 || mode == 3 {
         for i in 0..12 {
             if sustain[i] != 0 {
                 for hold_lane in 0..4 {
-                    if (sustain_mask[i] & (1 << hold_lane)) != 0 { draw_head(hold_lane, 192, 1); }
+                    if (sustain_mask[i] & (1 << hold_lane)) != 0 {
+                        draw_head(hold_lane, 192, 1);
+                    }
                 }
             }
             if note_y[i] != 0 {
                 for lane in 0..4 {
-                    if (note_mask[i] & (1 << lane)) != 0 { draw_head(lane, note_y[i], note_kind[i]); }
+                    if (note_mask[i] & (1 << lane)) != 0 {
+                        draw_head(lane, note_y[i], note_kind[i]);
+                    }
                 }
             }
         }
     }
     for l in 0..4 {
+        var holding: bool = false;
+        for receptor_note in 0..12 {
+            if sustain[receptor_note] != 0 && (sustain_mask[receptor_note] & (1 << l)) != 0 {
+                holding = true;
+            }
+        }
         if flash[l] != 0 {
-            flash[l] -= 1;
-            let x: u8 = 40 + (l << 5) + (l << 4);
-            sprite(56 + (l << 1), x, 192, 200, l);
-            sprite(57 + (l << 1), x + 8, 192, 201, l);
+            if mode == 1 {
+                flash[l] -= 1;
+            }
+            let x: u8 = 48 + (l << 5) + (l << 4);
+            if !holding {
+                sprite(56 + l, x, 192, 200, l);
+            }
         }
     }
-    if mode == 0 {
-        let bob: u8 = (frame >> 4) & 1;
-        sprite(52, 116, 184 + bob, 148, 0);
-        sprite(53, 124, 184 + bob, 149, 0);
-        sprite(54, 116, 192 + bob, 150, 0);
-        sprite(55, 124, 192 + bob, 151, 0);
-    }
+
 }

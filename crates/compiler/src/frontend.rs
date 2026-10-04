@@ -109,12 +109,15 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Vec<Diagnostic>> {
     let mut p = 0;
     let mut out = Vec::new();
     let mut errors = Vec::new();
+    let mut asm_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut pending_asm = Vec::new();
     while p < bytes.len() {
         if bytes[p].is_ascii_whitespace() {
             p += 1;
             continue;
         }
-        if source[p..].starts_with("//") {
+        if source[p..].starts_with("//") || (asm_depth > 0 && bytes[p] == b';') {
             while p < bytes.len() && bytes[p] != b'\n' {
                 p += 1;
             }
@@ -220,8 +223,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Vec<Diagnostic>> {
         } else {
             let mut found = false;
             for op in [
-                "<<=", ">>=", "->", "..", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "+=",
-                "-=", "*=", "/=", "%=", "&=", "|=", "^=",
+                "<<=", ">>=", "..=", "=>", "->", "..", "==", "!=", "<=", ">=", "&&", "||", "<<",
+                ">>", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
             ] {
                 if source[p..].starts_with(op) {
                     p += op.len();
@@ -238,6 +241,26 @@ pub fn lex(source: &str) -> Result<Vec<Token>, Vec<Diagnostic>> {
                         format!("Unexpected character '{c}'"),
                     ));
                 }
+            }
+        }
+        let spelling = &source[start..p];
+        if asm_depth > 0 {
+            if spelling == "{" {
+                asm_depth += 1;
+            }
+            if spelling == "}" {
+                asm_depth -= 1;
+            }
+        } else {
+            match spelling {
+                "asm" => pending_asm.push(paren_depth),
+                "(" => paren_depth += 1,
+                ")" => paren_depth = paren_depth.saturating_sub(1),
+                "{" if pending_asm.last() == Some(&paren_depth) => {
+                    pending_asm.pop();
+                    asm_depth = 1;
+                }
+                _ => {}
             }
         }
         out.push(Token {
@@ -276,6 +299,19 @@ pub enum ExprKind {
     Unary(String, Box<Expr>),
     Binary(String, Box<Expr>, Box<Expr>),
     Asm(Vec<(String, Expr)>, String),
+    Match(Box<Expr>, Vec<MatchArm>),
+}
+#[derive(Clone, Debug)]
+pub struct MatchArm {
+    /// No patterns denotes the wildcard arm.
+    pub patterns: Vec<(Expr, Option<Expr>)>,
+    pub body: MatchBody,
+    pub span: Span,
+}
+#[derive(Clone, Debug)]
+pub enum MatchBody {
+    Value(Expr),
+    Block(Vec<Stmt>),
 }
 #[derive(Clone, Debug)]
 pub enum Stmt {
@@ -401,6 +437,29 @@ impl Parser<'_> {
     }
     fn ident(&mut self) -> PResult<Token> {
         let t = self.current().clone();
+        if [
+            "match",
+            "fn",
+            "var",
+            "let",
+            "const",
+            "if",
+            "else",
+            "for",
+            "in",
+            "while",
+            "loop",
+            "return",
+            "break",
+            "continue",
+            "asm",
+            "raw",
+            "cartridge",
+        ]
+        .contains(&t.text.as_str())
+        {
+            return Err(Diagnostic::error(t.span, "Reserved language keyword"));
+        }
         if !t.string
             && t.text
                 .as_bytes()
@@ -477,18 +536,75 @@ impl Parser<'_> {
         let mut e = if ["-", "!", "~", "+"].iter().any(|s| self.is(s)) {
             self.p += 1;
             let x = self.expression(12)?;
+            let kind = if t.text == "-" && x.ty != Ty::Bool {
+                if let ExprKind::Number(n) = x.kind {
+                    ExprKind::Number(-n)
+                } else {
+                    ExprKind::Unary(t.text, Box::new(x.clone()))
+                }
+            } else {
+                ExprKind::Unary(t.text, Box::new(x.clone()))
+            };
             Expr {
                 span: Span {
                     start,
                     end: x.span.end,
                 },
-                kind: ExprKind::Unary(t.text, Box::new(x)),
+                kind,
                 ty: Ty::Void,
             }
         } else if self.take("(") {
             let e = self.expression(0)?;
             self.need(")")?;
             e
+        } else if self.take("match") {
+            let value = self.expression(0)?;
+            self.need("{")?;
+            let mut arms = Vec::new();
+            while !self.is("}") && !self.is("<eof>") {
+                let span = self.current().span;
+                let mut patterns = Vec::new();
+                if !self.take("_") {
+                    loop {
+                        // Patterns are literal/constant atoms, casts or unary negatives.
+                        // Bitwise OR belongs to the pattern-alternative syntax here.
+                        let first = self.expression(12)?;
+                        let last = if self.take("..=") {
+                            Some(self.expression(12)?)
+                        } else {
+                            None
+                        };
+                        patterns.push((first, last));
+                        if !self.take("|") {
+                            break;
+                        }
+                    }
+                }
+                self.need("=>")?;
+                let body = if self.is("{") {
+                    MatchBody::Block(self.block()?)
+                } else {
+                    MatchBody::Value(self.expression(0)?)
+                };
+                let block = matches!(body, MatchBody::Block(_));
+                arms.push(MatchArm {
+                    patterns,
+                    body,
+                    span,
+                });
+                if !self.take(",") && !block && !self.is("}") {
+                    self.need(",")?;
+                }
+                if arms.len() > 256 {
+                    return Err(Diagnostic::error(span, "At most 256 match arms"));
+                }
+            }
+            let end = self.need("}")?.span.end;
+            Expr {
+                kind: ExprKind::Match(Box::new(value), arms),
+                span: Span { start, end },
+                ty: Ty::Void,
+            }
         } else if self.is("asm") {
             self.p += 1;
             let mut inputs = Vec::new();
@@ -751,7 +867,7 @@ impl Parser<'_> {
             self.need(";")?;
             Ok(Stmt::Assign { target, op, value })
         } else {
-            if !matches!(target.kind, ExprKind::Asm(..)) {
+            if !matches!(target.kind, ExprKind::Asm(..) | ExprKind::Match(..)) {
                 self.need(";")?;
             } else {
                 self.take(";");
@@ -1194,6 +1310,11 @@ impl Checker {
                         _ => None,
                     })
             }
+            ExprKind::Binary(op, _, _)
+                if ["==", "!=", "<", ">", "<=", ">=", "&&", "||"].contains(&op.as_str()) =>
+            {
+                Some(Ty::Bool)
+            }
             ExprKind::Binary(_, l, r) => self.hint(l, env).or_else(|| self.hint(r, env)),
             ExprKind::Index(b, _, _) => {
                 if let Some(Ty::Array(t, _)) = self.hint(b, env) {
@@ -1202,7 +1323,12 @@ impl Checker {
                     None
                 }
             }
+            ExprKind::Unary(op, _) if op == "!" => Some(Ty::Bool),
             ExprKind::Unary(_, e) => self.hint(e, env),
+            ExprKind::Match(_, arms) => arms.iter().find_map(|a| match &a.body {
+                MatchBody::Value(value) => self.hint(value, env),
+                MatchBody::Block(_) => None,
+            }),
             _ => None,
         }
     }
@@ -1376,6 +1502,70 @@ impl Checker {
                     lt
                 }
             }
+            ExprKind::Match(value, arms) => {
+                let selector = self.expression(value, None, env);
+                if !selector.numeric() && selector != Ty::Bool {
+                    self.error(value.span, "Match requires an integer or bool");
+                }
+                self.check_patterns(arms, &selector, env, value.span);
+                let hint = expected
+                    .cloned()
+                    .or_else(|| {
+                        arms.iter().find_map(|a| match &a.body {
+                            MatchBody::Value(v) => self.hint(v, env),
+                            MatchBody::Block(_) => None,
+                        })
+                    })
+                    .unwrap_or(Ty::U8);
+                let blocks = arms
+                    .first()
+                    .is_some_and(|a| matches!(a.body, MatchBody::Block(_)));
+                let old = self.bounds.clone();
+                for arm in arms {
+                    self.bounds = old.clone();
+                    if let ExprKind::Name(name) = &value.kind {
+                        if !self.shared.contains(name) && !arm.patterns.is_empty() {
+                            let intervals = arm
+                                .patterns
+                                .iter()
+                                .filter_map(|(a, b)| {
+                                    Some((
+                                        eval_const(a, &self.constants)?,
+                                        eval_const(b.as_ref().unwrap_or(a), &self.constants)?,
+                                    ))
+                                })
+                                .collect::<Vec<_>>();
+                            if let (Some(lo), Some(hi)) = (
+                                intervals.iter().map(|i| i.0).min(),
+                                intervals.iter().map(|i| i.1).max(),
+                            ) {
+                                self.bounds.insert(name.clone(), (lo, hi));
+                            }
+                        }
+                    }
+                    match &mut arm.body {
+                        MatchBody::Value(v) => {
+                            if blocks {
+                                self.error(arm.span, "Cannot mix value and statement match arms");
+                            }
+                            self.expression(v, Some(&hint), env);
+                        }
+                        MatchBody::Block(body) => {
+                            if !blocks {
+                                self.error(arm.span, "Cannot mix value and statement match arms");
+                            }
+                            self.block(body, &mut env.clone());
+                        }
+                    }
+                }
+                // Arms can mutate locals or globals through calls and assembly.
+                self.bounds.clear();
+                if blocks {
+                    Ty::Void
+                } else {
+                    hint
+                }
+            }
             ExprKind::Asm(inputs, _) => {
                 let mut seen = BTreeSet::new();
                 for (r, x) in inputs {
@@ -1398,6 +1588,74 @@ impl Checker {
         }
         e.ty = t.clone();
         t
+    }
+    fn check_patterns(
+        &mut self,
+        arms: &mut [MatchArm],
+        ty: &Ty,
+        env: &BTreeMap<String, (Ty, bool)>,
+        span: Span,
+    ) {
+        if !ty.numeric() && ty != &Ty::Bool {
+            return;
+        }
+        let mut intervals = Vec::new();
+        let mut wildcard = false;
+        let count = arms.len();
+        if arms.is_empty() {
+            self.error(span, "Match requires at least one arm");
+        }
+        for (index, arm) in arms.iter_mut().enumerate() {
+            if arm.patterns.is_empty() {
+                if wildcard || index + 1 != count {
+                    self.error(arm.span, "Wildcard must be the final match arm");
+                }
+                wildcard = true;
+            }
+            for (first, last) in &mut arm.patterns {
+                self.expression(first, Some(ty), env);
+                if let Some(last) = last {
+                    self.expression(last, Some(ty), env);
+                }
+                let lo = eval_const(first, &self.constants);
+                let hi = eval_const(last.as_ref().unwrap_or(first), &self.constants);
+                if let (Some(lo), Some(hi)) = (lo, hi) {
+                    if lo > hi {
+                        self.error(first.span, "Match range is reversed");
+                    }
+                    if intervals.iter().any(|(a, b)| lo <= *b && hi >= *a) {
+                        self.error(first.span, "Match patterns overlap");
+                    }
+                    intervals.push((lo, hi));
+                } else {
+                    self.error(first.span, "Match patterns require compile-time constants");
+                }
+            }
+        }
+        if !wildcard {
+            intervals.sort_unstable();
+            let low = if ty.signed() {
+                -(1i64 << (ty.size() * 8 - 1))
+            } else {
+                0
+            };
+            let high = if ty == &Ty::Bool {
+                1
+            } else if ty.signed() {
+                (1i64 << (ty.size() * 8 - 1)) - 1
+            } else {
+                ty.mask()
+            };
+            let mut covered = low;
+            for (lo, hi) in intervals {
+                if lo == covered {
+                    covered = hi + 1;
+                }
+            }
+            if covered != high + 1 {
+                self.error(span, "Non-exhaustive match; add a final _ arm");
+            }
+        }
     }
     fn range(&self, e: &Expr) -> (i64, i64) {
         if let Some(n) = eval_const(e, &self.constants) {
@@ -1752,6 +2010,22 @@ pub fn eval_const(e: &Expr, constants: &BTreeMap<String, i64>) -> Option<i64> {
                 _ => return None,
             }
         }
+        ExprKind::Match(value, arms) => {
+            let value = eval_const(value, constants)?;
+            let arm = arms.iter().find(|arm| {
+                arm.patterns.is_empty()
+                    || arm.patterns.iter().any(|(first, last)| {
+                        let lo = eval_const(first, constants);
+                        let hi = eval_const(last.as_ref().unwrap_or(first), constants);
+                        lo.is_some_and(|lo| value >= lo) && hi.is_some_and(|hi| value <= hi)
+                    })
+            })?;
+            if let MatchBody::Value(result) = &arm.body {
+                eval_const(result, constants)?
+            } else {
+                return None;
+            }
+        }
         ExprKind::Call(n, args) if ["u8", "i8", "u16", "i16", "bool"].contains(&n.as_str()) => {
             let x = eval_const(args.first()?, constants)?;
             if n == "bool" {
@@ -1774,6 +2048,12 @@ pub fn terminates(body: &[Stmt]) -> bool {
     body.iter().any(|s| match s {
         Stmt::Return(..) => true,
         Stmt::If { yes, no, .. } => terminates(yes) && terminates(no),
+        Stmt::Expr(Expr {
+            kind: ExprKind::Match(_, arms),
+            ..
+        }) => arms
+            .iter()
+            .all(|a| matches!(&a.body, MatchBody::Block(body) if terminates(body))),
         _ => false,
     })
 }
@@ -1795,6 +2075,16 @@ fn assigned_names(body: &[Stmt]) -> BTreeSet<String> {
             Stmt::If { yes, no, .. } => {
                 out.extend(assigned_names(yes));
                 out.extend(assigned_names(no));
+            }
+            Stmt::Expr(Expr {
+                kind: ExprKind::Match(_, arms),
+                ..
+            }) => {
+                for arm in arms {
+                    if let MatchBody::Block(body) = &arm.body {
+                        out.extend(assigned_names(body));
+                    }
+                }
             }
             Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop(body) => {
                 out.extend(assigned_names(body))

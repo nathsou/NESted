@@ -59,13 +59,12 @@ FONT = {
 ' ': ['00000']*7,
 }
 PALETTES = {
-'bloom': [0x3b,0x0c,0x21,0x30, 0x3b,0x37,0x1c,0x2c, 0x3b,0x0c,0x2c,0x37, 0x3b,0x09,0x19,0x37,
-          0x3b,0x0c,0x16,0x30, 0x3b,0x0c,0x29,0x37, 0x3b,0x09,0x19,0x37, 0x3b,0x0c,0x2c,0x30],
+'bloom': [0x30,0x0f,0x10,0x00]*4 + [0x30,0x0f,0x16,0x30]*4,
 'starstring': [0x0f,0x30,0x12,0x2c, 0x0f,0x02,0x12,0x2c, 0x0f,0x04,0x14,0x34, 0x0f,0x06,0x16,0x28,
                0x0f,0x02,0x2c,0x30, 0x0f,0x04,0x34,0x30, 0x0f,0x06,0x28,0x30, 0x0f,0x05,0x26,0x30],
 'skythread': [0x0f,0x30,0x12,0x2c, 0x0f,0x01,0x11,0x31, 0x0f,0x01,0x11,0x21, 0x0f,0x06,0x16,0x30,
-             0x0f,0x0c,0x2c,0x30, 0x0f,0x06,0x16,0x28, 0x0f,0x01,0x21,0x30, 0x0f,0x04,0x34,0x30],
-'emberkeep': [0x0f,0x30,0x08,0x28, 0x0f,0x08,0x18,0x28, 0x0f,0x09,0x19,0x29, 0x0f,0x05,0x16,0x26,
+             0x0f,0x0f,0x26,0x37, 0x0f,0x06,0x16,0x28, 0x0f,0x01,0x21,0x30, 0x0f,0x04,0x34,0x30],
+'emberkeep': [0x0f,0x30,0x00,0x10, 0x0f,0x01,0x00,0x10, 0x0f,0x09,0x19,0x29, 0x0f,0x05,0x16,0x26,
              0x0f,0x0c,0x27,0x37, 0x0f,0x09,0x19,0x37, 0x0f,0x05,0x26,0x30, 0x0f,0x01,0x21,0x30],
 }
 def blank(n=8): return [[0]*n for _ in range(n)]
@@ -89,9 +88,6 @@ def common_tiles(game):
     tiles=[blank() for _ in range(256)]
     for c,rows in FONT.items():
         tile=blank()
-        for y,row in enumerate(rows):
-            for x,v in enumerate(row):
-                if game!='bloom' and v=='1' and x+2<8 and y+1<8:tile[y+1][x+2]=2
         for y,row in enumerate(rows):
             for x,v in enumerate(row):
                 if v=='1':tile[y][x+1]=1
@@ -220,24 +216,48 @@ def common_tiles(game):
         for x,value in enumerate(row):
             if value==2:row[x]=3
     split_sprite(tiles,208,dash)
-    # A filled garden cell is a muted teal patch; empty cells are paper cream.
     if game=='bloom':
-        for index,kind in [(128,0),(132,1),(136,2)]:
-            cell=blank(16)
-            for y in range(1,15):
-                for x in range(1,15):cell[y][x]=2 if kind==1 else 1
-            for x in range(2,14):cell[1][x]=3 if kind==1 else 1
-            if kind==2:
-                for k in range(5,11):cell[k][k]=2;cell[k][15-k]=2
-            split_sprite(tiles,index,cell)
-        tiles[9]=[[3]*8 for _ in range(8)]
-        tiles[10]=pattern(['........','........','........','........','........','..2...2.','.232.232','22222222'])
-    if game=='bloom':
-        decor=json.loads((ROOT/'games/art/decor.json').read_text())
-        for name,index in [('mushroom',96),('flower',112)]:
-            img=pattern(decor[name])
-            for dy in range(4):
-                for dx in range(4):tiles[index+dy*4+dx]=[row[dx*8:dx*8+8] for row in img[dy*8:dy*8+8]]
+        # Four border variants per state: emphasize the fifth row/column.
+        for kind in range(3):
+            for border in range(4):
+                cell=blank(16)
+                for y in range(16):
+                    for x in range(16):
+                        if x < (2 if border&1 else 1) or y < (2 if border&2 else 1):cell[y][x]=2
+                        elif kind==1:cell[y][x]=1
+                if kind==2:
+                    for k in range(5,12):cell[k][k]=3;cell[k][16-k]=3
+                split_sprite(tiles,128+kind*16+border*4,cell)
+        for number in range(10):
+            tiles[96+number]=[[2 if v else 0 for v in row] for row in tiles[48+number]]
+        tiles[120]=[[2 if x==0 else 0 for x in range(8)]for y in range(8)]
+        tiles[121]=[[2 if y==0 else 0 for x in range(8)]for y in range(8)]
+        tiles[122]=[[2 if x==0 or y==0 else 0 for x in range(8)]for y in range(8)]
+        split_sprite(tiles,196,cursor)
+    if game=='starstring':
+        tiles[192]=pattern(['...22...','..2332..','.233332.','23333332','.233332.','..2332..','...22...','........'])
+        tiles[196]=pattern(['..2222..','.233332.','.232232.','.232232.','.233332.','..2222..','...22...','...22...'])
+        tiles[200]=pattern(['...33...','..3333..','.332233.','33222233','.332233.','..3333..','...33...','........'])
+        tiles[244]=pattern(['...22...','...32...','...32...','...32...','...32...','...32...','...32...','...22...'])
+        tiles[249]=pattern(['........','........','........','22222222','22222222','........','........','........'])
+        for i,rows in enumerate([
+            ['...1....','..11....','.111111.','1111111.','.111111.','..11....','...1....','........'],
+            ['...1....','...1....','...1....','.1.1.1..','..111...','...1....','........','........'],
+            ['...1....','..111...','.1.1.1..','...1....','...1....','...1....','........','........'],
+            ['...1....','...11...','.111111.','.1111111','.111111.','...11...','...1....','........']]):tiles[128+i]=pattern(rows)
+    if game=='skythread':
+        stone=blank(16)
+        rect(stone,0,0,16,16,1);rect(stone,0,0,16,2,3);rect(stone,0,2,1,14,2)
+        rect(stone,8,2,1,6,2);rect(stone,2,9,11,1,2);rect(stone,5,10,1,6,2)
+        split_sprite(tiles,184,stone)
+    if game=='emberkeep':
+        floor=blank(16);rect(floor,0,0,16,16,1)
+        for x,y in [(3,4),(11,10)]:floor[y][x]=2
+        split_sprite(tiles,220,floor)
+        wall=blank(16);rect(wall,0,0,16,16,2)
+        rect(wall,0,7,16,1,1);rect(wall,7,0,1,7,1);rect(wall,3,8,1,8,1)
+        rect(wall,0,0,16,1,3);rect(wall,0,8,16,1,3)
+        split_sprite(tiles,224,wall)
     return tiles
 class Screen:
     def __init__(self):self.data=[0]*960;self.pals=[0]*960
@@ -268,34 +288,29 @@ class Screen:
                 attrs.append(val)
         return bytes(self.data+attrs)
 
-def garden():
+def nonogram():
     s=Screen()
-    # Quiet sky-blue field, paper title/footer and spacious 8x8 board.
-    for y in [0,1,26,27,28,29]:
-        for x in range(32):s.tile(x,y,9,2)
-    s.text(9,1,'BLOOM & LOGIC',2)
-    s.text(7,3,'A LITTLE PUZZLE GARDEN')
-    for y in range(8,24):
-        for x in range(8,24):s.tile(x,y,0,1)
-    for x,y,art in [(0,8,112),(0,17,96),(26,7,96),(26,19,112)]:
-        for dy in range(4):
-            for dx in range(4):s.tile(x+dx,y+dy,art+dy*4+dx,3)
-    for x in range(32):s.tile(x,29,10,3)
-    s.text(3,25,'A FILL  B MARK  SELECT UNDO')
-    s.text(5,27,'START: NEXT LITTLE GARDEN',2)
+    s.text(12,1,'NONOGRAM')
+    s.text(8,2,'PUZZLE 01 / 16')
+    for y in range(8,24):s.tile(26,y,120)
+    for x in range(10,26):s.tile(x,24,121)
+    s.tile(26,24,122)
+    s.text(7,25,'PUZZLE IN PROGRESS')
+    s.text(5,27,'A FILL  B MARK  SELECT UNDO')
+    s.text(8,28,'START: NEXT PUZZLE')
     return s
 
 def rhythm():
-    s=Screen();rng=random.Random(52)
-    for y in range(3,23):
-        for x in range(2,30):
-            if rng.randrange(16)==0:s.tile(x,y,16,1)
-    s.box(1,1,30,28);s.text(9,2,'STARSTRING');s.text(5,4,'MOONLIGHT CIRCUIT / 112 BPM');s.text(3,6,'SCORE');s.text(22,6,'COMBO')
-    for x in (5,11,17,23):
-        for y in range(9,25):s.tile(x,y,6,1);s.tile(x+2,y,6,1)
-        s.tile(x+1,25,ord('LDU R'.replace(' ', '')[(x-5)//6]),0)
+    s=Screen()
+    s.text(11,1,'STARSTRING')
+    s.text(5,4,'MOONLIGHT CIRCUIT / 112 BPM')
+    s.text(3,6,'SCORE');s.text(22,6,'COMBO')
+    for lane,x in enumerate((5,11,17,23)):
+        for y in range(10,25):s.tile(x,y,6,1);s.tile(x+2,y,6,1)
+        s.tile(x+1,25,128+lane)
     for x in range(3,29):s.tile(x,24,5,2)
-    s.text(4,27,'ARROWS: PLAY   START: RETRY');return s
+    s.text(4,28,'ARROWS PLAY / START PAUSE')
+    return s
 
 ROOMS = [
 ['................','................','................','.............E..','.............##.','........G.......','...........###..','................','.........###....','................','......###.......','................','...###..........','..P.............','################'],
@@ -321,7 +336,10 @@ def mountain(room,index):
     return s
 
 def dungeon():
-    s=Screen();s.box(0,0,32,30);s.text(2,1,'EMBERKEEP');s.text(18,1,'LAST LANTERN');s.text(2,2,'FL 1 P2 HP 08 K - G 000');s.text(2,28,'ARROWS MOVE / BUMP TO ATTACK');s.text(2,29,'A WAIT  B POTION  START NEW');
+    s=Screen()
+    s.text(2,1,'EMBERKEEP');s.text(18,1,'LAST LANTERN')
+    s.text(2,2,'FL 1 P2 HP 08 K - G 000')
+    s.text(3,28,'ARROWS MOVE  A WAIT  B HEAL')
     for y in range(4,28):
         for x in range(32):s.tile(x,y,0,1)
     return s
@@ -330,12 +348,25 @@ PUZZLES=[
 ['00111100','01111110','11111111','11011011','11111111','00111100','00100100','01100110'],
 ['01100110','11111111','11111111','11111111','01111110','00111100','00011000','00000000'],
 ['01000010','11100111','11111111','11011011','11111111','01111110','00111100','00011000'],
-['00011000','00111100','00111100','01111110','01111110','11111111','01011010','10000001'],
+['00011000','00111100','00111100','01111110','01111110','11111111','01011010','11000011'],
 ['00011000','00011000','01111110','11111111','01111110','00011000','00111100','01100110'],
 ['00111100','01000010','10111101','10100101','10111101','01011010','00100100','01100110'],
 ['11000011','11100111','01111110','00111100','01111110','11100111','11000011','00000000'],
 ['00011000','00111100','01111110','11111111','01111110','00111100','00011000','00011000'],
 ]
+PUZZLES += [
+['00000000','00111000','01111101','11111111','01111101','00111000','00000000','00000000'],
+['00011110','00010010','00010010','00010000','00010000','01110000','11110000','01100000'],
+['00000000','11111100','10000110','10000101','10000110','01111000','00000000','11111110'],
+['00111000','01100100','01000100','00111000','00010000','00011000','00010000','00011000'],
+['00011000','00111100','01111110','11111111','01000010','01011010','01011010','01111110'],
+['00011000','00011000','00111100','00011000','01011010','10011001','11011011','01111110'],
+['00000001','00000011','00000111','00001111','00011111','00111111','01111111','11111111'],
+['11110000','11110000','00111100','00111100','00001111','00001111','11000011','11000111'],
+]
+
+PUZZLES = [PUZZLES[i] for i in [14,1,7,0,2,3,4,5,6,8,9,10,11,12,13,15]]
+
 def clues(line):
     groups=[];run=0
     for v in line+'0':
@@ -368,6 +399,21 @@ def validate_puzzles():
     for number,puzzle in enumerate(PUZZLES):
         rows=[[p for p in patterns if clues(p)==clues(row)]for row in puzzle]
         columns=[[p for p in patterns if clues(p)==clues(''.join(row[x]for row in puzzle))]for x in range(8)]
+        board=[['?']*8 for _ in range(8)]
+        for iteration in range(64):
+            changes=0
+            for vertical in (False,True):
+                for line in range(8):
+                    candidates=[p for p in (columns if vertical else rows)[line] if all(
+                        board[i][line] in ('?',p[i]) if vertical else board[line][i] in ('?',p[i]) for i in range(8))]
+                    assert candidates, f'Puzzle {number+1} has contradictory clues'
+                    for i in range(8):
+                        value=candidates[0][i]
+                        if all(p[i]==value for p in candidates):
+                            y,x=(i,line) if vertical else (line,i)
+                            if board[y][x]=='?':board[y][x]=value;changes+=1
+            if not changes:break
+        assert [''.join(row)for row in board]==puzzle,f'Puzzle {number+1} must be solvable by line deductions without guessing'
         solutions=[]
         def search(board,candidates):
             y=len(board)
@@ -390,7 +436,7 @@ def generate():
         (OUT/f'{game}.chr').write_bytes(chr_data*2)
         (OUT/f'{game}.pal').write_bytes(bytes(PALETTES[game]))
         (OUT/f'{game}.music.nst').write_text(music_source(game))
-    (OUT/'bloom.map').write_bytes(garden().encode())
+    (OUT/'bloom.map').write_bytes(nonogram().encode())
     (OUT/'starstring.map').write_bytes(rhythm().encode())
     (OUT/'emberkeep.map').write_bytes(dungeon().encode())
     screens=[];collision=[]

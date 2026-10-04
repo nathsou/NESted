@@ -90,6 +90,18 @@ struct Generator<'a> {
 fn err(span: Span, message: impl Into<String>) -> Diagnostic {
     Diagnostic::error(span, message)
 }
+fn local_label(function: &str, name: &str) -> String {
+    format!(
+        "__l_{}_{}_{}_{}",
+        function.len(),
+        function,
+        name.len(),
+        name
+    )
+}
+fn temporary_label(function: &str) -> String {
+    format!("__t_{}_{}", function.len(), function)
+}
 fn bytes(label: &str, data: &[u8]) -> String {
     let mut s = format!("{label}:\n");
     for v in data.chunks(24) {
@@ -114,7 +126,13 @@ impl Generator<'_> {
         self.emit(format!(";@src {},{}", s.start, s.end));
     }
     fn label(&mut self, hint: &str) -> String {
-        let s = format!("__{}_{}_{}", self.function, hint, self.label);
+        let s = format!(
+            "__b_{}_{}_{}_{}",
+            self.function.len(),
+            self.function,
+            self.label,
+            hint
+        );
         self.label += 1;
         s
     }
@@ -122,7 +140,7 @@ impl Generator<'_> {
         self.emit(format!("{label}:"));
     }
     fn temp(&mut self, n: usize) -> String {
-        let s = format!("__v_{}_tmp+{}", self.function, self.temp);
+        let s = format!("{}+{}", temporary_label(&self.function), self.temp);
         self.temp += n;
         self.temp_max = self.temp_max.max(self.temp);
         s
@@ -405,6 +423,44 @@ impl Generator<'_> {
                 }
             }
             ExprKind::Call(name, args) => self.call(name, args, e)?,
+            ExprKind::Match(value, arms) => {
+                let temporary = self.temp(value.ty.size());
+                self.expression(value)?;
+                self.save(&temporary, &value.ty);
+                self.locals.insert(
+                    temporary.clone(),
+                    Storage {
+                        label: temporary.clone(),
+                        ty: value.ty.clone(),
+                        constant: None,
+                        bank: None,
+                    },
+                );
+                let selector = Expr {
+                    kind: ExprKind::Name(temporary.clone()),
+                    ty: value.ty.clone(),
+                    span: value.span,
+                };
+                let done = self.label("match_end");
+                for arm in arms {
+                    let yes = self.label("match_arm");
+                    let next = self.label("match_next");
+                    if let Some(test) = match_condition(&selector, &arm.patterns) {
+                        self.condition(&test, &yes, &next)?;
+                    } else {
+                        self.op("jmp", &yes);
+                    }
+                    self.at(&yes);
+                    match &arm.body {
+                        MatchBody::Value(result) => self.expression(result)?,
+                        MatchBody::Block(body) => self.statements(body)?,
+                    }
+                    self.op("jmp", &done);
+                    self.at(&next);
+                }
+                self.at(&done);
+                self.locals.remove(&temporary);
+            }
             ExprKind::Asm(inputs, body) => {
                 let mut temps = Vec::new();
                 for (reg, value) in inputs {
@@ -910,7 +966,7 @@ impl Generator<'_> {
                 .unwrap();
             for ((value, ty, _), param) in values.into_iter().zip(&f.params) {
                 self.load(&value, &ty);
-                self.save(&format!("__v_{}_{}", name, param.0), &param.1);
+                self.save(&local_label(name, &param.0), &param.1);
             }
             self.op("jsr", format!("__fn_{name}"));
             if sig.1 != e.ty {
@@ -1393,7 +1449,7 @@ pub fn generate(
         let mut layout = Vec::new();
         let mut offset = 0;
         for (name, ty) in &f.locals {
-            let label = format!("__v_{}_{}", f.name, name);
+            let label = local_label(&f.name, name);
             g.locals.insert(
                 name.clone(),
                 Storage {
@@ -1409,8 +1465,8 @@ pub fn generate(
         g.at(&format!("__fn_{}", f.name));
         g.statements(&f.body)?;
         g.op("rts", "");
-        g.at(&format!("__fn_{}_end", f.name));
-        layout.push((format!("__v_{}_tmp", f.name), offset, g.temp_max));
+        g.at(&format!("__end_{}", f.name));
+        layout.push((temporary_label(&f.name), offset, g.temp_max));
         sizes.insert(f.name.clone(), offset + g.temp_max);
         local_layouts.insert(f.name.clone(), layout);
         functions.insert(f.name.clone(), g.lines.join("\n"));
@@ -1481,7 +1537,14 @@ pub fn generate(
             eq.push(format!("{label} = {}", pool + offset + local_offset));
             if *size > 0 {
                 g.memory.push(MemoryEntry {
-                    name: label.trim_start_matches("__v_").into(),
+                    name: f
+                        .locals
+                        .keys()
+                        .find(|n| local_label(&f.name, n) == *label)
+                        .map_or_else(
+                            || format!("{}::temporaries", f.name),
+                            |n| format!("{}::{n}", f.name),
+                        ),
                     address: (pool + offset + local_offset) as u16,
                     size: *size,
                     kind: "static frame (overlaid)".into(),
@@ -1696,6 +1759,15 @@ fn visit_expr(e: &Expr, visit: &mut impl FnMut(&Expr)) {
             visit_expr(b, visit);
         }
         ExprKind::Unary(_, a) => visit_expr(a, visit),
+        ExprKind::Match(value, arms) => {
+            visit_expr(value, visit);
+            for arm in arms {
+                match &arm.body {
+                    MatchBody::Value(result) => visit_expr(result, visit),
+                    MatchBody::Block(body) => visit_block(body, visit),
+                }
+            }
+        }
         ExprKind::Call(_, v) => {
             for e in v {
                 visit_expr(e, visit);
@@ -1708,6 +1780,29 @@ fn visit_expr(e: &Expr, visit: &mut impl FnMut(&Expr)) {
         }
         _ => {}
     }
+}
+fn match_condition(value: &Expr, patterns: &[(Expr, Option<Expr>)]) -> Option<Expr> {
+    fn binary(op: &str, a: Expr, b: Expr) -> Expr {
+        Expr {
+            span: a.span,
+            ty: Ty::Bool,
+            kind: ExprKind::Binary(op.into(), Box::new(a), Box::new(b)),
+        }
+    }
+    patterns
+        .iter()
+        .map(|(lo, hi)| {
+            if let Some(hi) = hi {
+                binary(
+                    "&&",
+                    binary(">=", value.clone(), lo.clone()),
+                    binary("<=", value.clone(), hi.clone()),
+                )
+            } else {
+                binary("==", value.clone(), lo.clone())
+            }
+        })
+        .reduce(|a, b| binary("||", a, b))
 }
 fn visit_block(body: &[Stmt], visit: &mut impl FnMut(&Expr)) {
     for s in body {

@@ -1,6 +1,7 @@
-// BLOOM & LOGIC — an original Nonogram garden.
-// Arrow keys move; A fills; B marks; Select undoes; Start changes puzzle.
-cartridge "Bloom & Logic" {
+// NONOGRAM — sixteen uniquely solvable puzzles, with no guessing required.
+// A fills, B marks, Select undoes. Hold A/B while moving to paint a line.
+// Start advances; Select+Start goes back. The red corners mark the cursor.
+cartridge "Nonogram" {
     mapper = nrom;
     region = ntsc;
     mirroring = vertical;
@@ -8,107 +9,216 @@ cartridge "Bloom & Logic" {
     palette = "assets/bloom.pal";
     screen = "assets/bloom.map";
 }
-const PUZZLES: [u8; 512] = asset("assets/bloom.puzzles.bin");
-const CLUES: [u8; 512] = asset("assets/bloom.clues.bin");
+const PUZZLES: [u8; 1024] = asset("assets/bloom.puzzles.bin");
+const CLUES: [u8; 1024] = asset("assets/bloom.clues.bin");
 const MELODY: [u16; 32] = [
-    213, 169, 142, 169, 189, 159, 126, 159, 213, 169, 142, 112, 126, 142, 169, 0,
-    253, 213, 169, 213, 225, 189, 159, 189, 284, 225, 189, 142, 159, 189, 213, 0,
+    213, 169, 142, 169, 189, 159, 126, 159,
+    213, 169, 142, 112, 126, 142, 169, 0,
+    253, 213, 169, 213, 225, 189, 159, 189,
+    284, 225, 189, 142, 159, 189, 213, 0,
 ];
 const BASS: [u16; 32] = [
-    427, 338, 284, 338, 380, 319, 253, 319, 427, 338, 284, 225, 253, 284, 338, 0,
-    507, 427, 338, 427, 452, 380, 319, 380, 570, 452, 380, 284, 319, 380, 427, 0,
+    427, 338, 284, 338, 380, 319, 253, 319,
+    427, 338, 284, 225, 253, 284, 338, 0,
+    507, 427, 338, 427, 452, 380, 319, 380,
+    570, 452, 380, 284, 319, 380, 427, 0,
 ];
 var cells: [u8; 64] = [0; 64];
+var undo_cell: [u8; 64] = [0; 64];
+var undo_value: [u8; 64] = [0; 64];
+var undo_head: u8 = 0;
+var undo_count: u8 = 0;
 var level: u8 = 0;
 var cursor_x: u8 = 0;
 var cursor_y: u8 = 0;
-var last_cell: u8 = 0;
-var last_value: u8 = 0;
-var can_undo: bool = false;
 var solved: bool = false;
-var frame: u8 = 0;
+var errors: u8 = 0;
 var move_delay: u8 = 0;
+var paint_state: u8 = 0;
+var last_painted: u8 = 255;
 var music_clock: u8 = 0;
 var music_step: u8 = 0;
 var effect_timer: u8 = 0;
 
 fn draw_cell(index: u8) {
-    let state: u8 = cells[raw index];
-    var tile_id: u8 = 128;
-    if state == 1 { tile_id = 132; }
-    if state == 2 { tile_id = 136; }
-    let x: u8 = 8 + ((index & 7) << 1);
-    let y: u8 = 8 + ((index >> 3) << 1);
-    tile(x, y, tile_id);
-    tile(x + 1, y, tile_id + 1);
-    tile(x, y + 1, tile_id + 2);
-    tile(x + 1, y + 1, tile_id + 3);
+    let column: u8 = index & 7;
+    let row: u8 = index >> 3;
+    var border: u8 = 0;
+    if column == 5 {
+        border |= 1;
+    }
+    if row == 5 {
+        border |= 2;
+    }
+    let art: u8 = 128 + (cells[raw index] << 4) + (border << 2);
+    let x: u8 = 10 + (column << 1);
+    let y: u8 = 8 + (row << 1);
+    tile(x, y, art);
+    tile(x + 1, y, art + 1);
+    tile(x, y + 1, art + 2);
+    tile(x + 1, y + 1, art + 3);
 }
 
-fn title() {
-    if level == 0 { text(8, 24, "1: LITTLE MUSHROOM"); }
-    if level == 1 { text(8, 24, "2: KIND HEART    "); }
-    if level == 2 { text(8, 24, "3: NIGHT CAT     "); }
-    if level == 3 { text(8, 24, "4: PAPER ROCKET  "); }
-    if level == 4 { text(8, 24, "5: WILDFLOWER    "); }
-    if level == 5 { text(8, 24, "6: GARDEN SPIRIT "); }
-    if level == 6 { text(8, 24, "7: BUTTERFLY     "); }
-    if level == 7 { text(8, 24, "8: LANTERN LIGHT "); }
+fn line_complete(line: u8, vertical: bool) -> bool {
+    var actual: u16 = 0;
+    var run: u8 = 0;
+    for i in 0..9 {
+        var filled: bool = false;
+        if i < 8 {
+            var cell: u8 = (line << 3) | i;
+            if vertical {
+                cell = (i << 3) | line;
+            }
+            filled = cells[raw cell] == 1;
+        }
+        if filled {
+            run += 1;
+        } else if run != 0 {
+            actual = (actual << 4) | u16(run);
+            run = 0;
+        }
+    }
+    var offset: u16 = (u16(level) << 6) + (u16(line) << 2);
+    if vertical {
+        offset += 32;
+    }
+    var expected: u16 = 0;
+    for slot in 0..4 {
+        expected = (expected << 4) | u16(CLUES[raw offset + u16(slot)]);
+    }
+    return actual == expected;
+}
+
+fn draw_clues(line: u8, vertical: bool) {
+    let done: bool = line_complete(line, vertical);
+    var offset: u16 = (u16(level) << 6) + (u16(line) << 2);
+    if vertical {
+        offset += 32;
+    }
+    for slot in 0..4 {
+        let clue: u8 = CLUES[raw offset + u16(slot)];
+        var glyph: u8 = 32;
+        if clue != 0 || slot == 3 {
+            glyph = 48 + clue;
+            if done {
+                glyph = 96 + clue;
+            }
+        }
+        if vertical {
+            tile(11 + (line << 1), 4 + slot, glyph);
+        } else {
+            tile(6 + slot, 8 + (line << 1), glyph);
+        }
+    }
+}
+
+fn status() {
+    solved = errors == 0;
+    if solved {
+        text(7, 25, " PUZZLE COMPLETE  ");
+    } else {
+        text(7, 25, "PUZZLE IN PROGRESS");
+    }
 }
 
 fn new_puzzle() {
     render(false);
+    hide_sprites();
+    screen("assets/bloom.map");
     solved = false;
-    can_undo = false;
+    undo_head = 0;
+    undo_count = 0;
     cursor_x = 0;
     cursor_y = 0;
-    for i in 0..64 { cells[i] = 0; draw_cell(i); }
-    for row in 0..8 {
-        for column in 0..4 {
-            let c: u8 = CLUES[raw (u16(level) << 6) + (u16(row) << 2) + u16(column)];
-            var ch: u8 = 32;
-            if c != 0 { ch = c + 48; }
-            tile(4 + column, 8 + (row << 1), ch);
+    move_delay = 0;
+    last_painted = 255;
+    errors = 0;
+    for i in 0..64 {
+        if PUZZLES[raw(u16(level) << 6) + u16(i)] == 1 {
+            errors += 1;
         }
+        cells[i] = 0;
+        draw_cell(i);
     }
-    for col in 0..8 {
-        for slot in 0..4 {
-            let clue: u8 = CLUES[raw (u16(level) << 6) + 32 + (u16(col) << 2) + u16(slot)];
-            var glyph: u8 = 32;
-            if clue != 0 { glyph = clue + 48; }
-            tile(8 + (col << 1), 4 + slot, glyph);
-        }
+    for line in 0..8 {
+        draw_clues(line, false);
+        draw_clues(line, true);
     }
-    title();
-    text(3, 25, "A FILL  B MARK  SELECT UNDO");
-    text(5, 27, "START: NEXT LITTLE GARDEN");
+    let number: u8 = level + 1;
+    tile(15, 2, 48 + number / 10);
+    tile(16, 2, 48 + number % 10);
     render(true);
 }
 
-fn complete() -> bool {
-    for i in 0..64 {
-        let expected: u8 = PUZZLES[raw (u16(level) << 6) + u16(i)];
-        if expected == 1 && cells[i] != 1 { return false; }
-        if expected == 0 && cells[i] == 1 { return false; }
+fn set_cell(cell: u8, state: u8) {
+    let expected: bool = PUZZLES[raw(u16(level) << 6) + u16(cell)] == 1;
+    let before: bool = (cells[raw cell] == 1) != expected;
+    let after: bool = (state == 1) != expected;
+    if before && !after {
+        errors -= 1;
     }
-    return true;
+    if !before && after {
+        errors += 1;
+    }
+    cells[raw cell] = state;
+    draw_cell(cell);
+    draw_clues(cell & 7, true);
+    draw_clues(cell >> 3, false);
+    status();
+}
+
+fn paint(cell: u8, state: u8) {
+    if cells[raw cell] == state {
+        return;
+    }
+    undo_cell[raw undo_head] = cell;
+    undo_value[raw undo_head] = cells[raw cell];
+    undo_head = (undo_head + 1) & 63;
+    if undo_count < 64 {
+        undo_count += 1;
+    }
+    set_cell(cell, state);
+    tone(1, 240 + (u16(cell & 7) << 3), 2);
+    effect_timer = 3;
+    if solved {
+        tone(1, 106, 4);
+        effect_timer = 24;
+    }
+}
+
+fn undo() {
+    if undo_count == 0 {
+        return;
+    }
+    undo_head = (undo_head - 1) & 63;
+    undo_count -= 1;
+    let cell: u8 = undo_cell[raw undo_head];
+    set_cell(cell, undo_value[raw undo_head]);
+    cursor_x = cell & 7;
+    cursor_y = cell >> 3;
 }
 
 fn music() {
     music_clock += 1;
-    if music_clock == 12 {
+    if music_clock == 18 {
         music_clock = 0;
         let note: u8 = music_step & 31;
         let pitch: u16 = MELODY[note];
-        if pitch != 0 { tone(0, pitch, 5); } else { silence(0); }
-        if (music_step & 1) == 0 { tone(2, BASS[note], 8); }
-        if (music_step & 7) == 0 { noise(5, 2); }
+        if pitch != 0 {
+            tone(0, pitch, 3);
+        } else {
+            silence(0);
+        }
+        if (music_step & 1) == 0 {
+            tone(2, BASS[note], 6);
+        }
         music_step += 1;
     }
-    if music_clock == 3 { silence(3); }
     if effect_timer != 0 {
         effect_timer -= 1;
-        if effect_timer == 0 { silence(1); }
+        if effect_timer == 0 {
+            silence(1);
+        }
     }
 }
 
@@ -117,57 +227,62 @@ fn init() {
 }
 
 fn update() {
-    frame += 1;
     music();
     let edge: u8 = pressed();
     let held: u8 = buttons();
     if (edge & 8) != 0 {
-        level = (level + 1) & 7;
+        if (held & 4) != 0 {
+            level = (level + 15) & 15;
+        } else {
+            level = (level + 1) & 15;
+        }
         new_puzzle();
     }
-    if move_delay != 0 { move_delay -= 1; }
+    if move_delay != 0 {
+        move_delay -= 1;
+    }
     if move_delay == 0 || (edge & 240) != 0 {
-        if (held & 128) != 0 && cursor_x < 7 { cursor_x += 1; move_delay = 7; }
-        if (held & 64) != 0 && cursor_x > 0 { cursor_x -= 1; move_delay = 7; }
-        if (held & 32) != 0 && cursor_y < 7 { cursor_y += 1; move_delay = 7; }
-        if (held & 16) != 0 && cursor_y > 0 { cursor_y -= 1; move_delay = 7; }
+        if (held & 128) != 0 && cursor_x < 7 {
+            cursor_x += 1;
+            move_delay = 8;
+        } else if (held & 64) != 0 && cursor_x > 0 {
+            cursor_x -= 1;
+            move_delay = 8;
+        }
+        if (held & 32) != 0 && cursor_y < 7 {
+            cursor_y += 1;
+            move_delay = 8;
+        } else if (held & 16) != 0 && cursor_y > 0 {
+            cursor_y -= 1;
+            move_delay = 8;
+        }
     }
     let cell: u8 = ((cursor_y << 3) | cursor_x) & 63;
-    if !solved {
-        if (edge & 3) != 0 {
-            last_cell = cell;
-            last_value = cells[cell];
-            can_undo = true;
-            if (edge & 1) != 0 {
-                if cells[cell] == 1 { cells[cell] = 0; } else { cells[cell] = 1; }
-            } else {
-                if cells[cell] == 2 { cells[cell] = 0; } else { cells[cell] = 2; }
-            }
-            draw_cell(cell);
-            tone(1, 210 + (u16(cursor_x) << 3), 4);
-            effect_timer = 5;
-            if complete() {
-                solved = true;
-                text(3, 25, "SOLVED! YOUR GARDEN IS ALIVE");
-                tone(1, 106, 8);
-                effect_timer = 30;
-            }
+    if (edge & 3) != 0 && (edge & 4) == 0 && !solved {
+        var wanted: u8 = 1;
+        if (edge & 2) != 0 {
+            wanted = 2;
         }
-        if (edge & 4) != 0 && can_undo {
-            cells[raw last_cell] = last_value;
-            draw_cell(last_cell);
-            can_undo = false;
+        paint_state = wanted;
+        if cells[cell] == wanted {
+            paint_state = 0;
         }
+        paint(cell, paint_state);
+        last_painted = cell;
+    } else if (held & 3) != 0 && (held & 4) == 0 && cell != last_painted && !solved {
+        paint(cell, paint_state);
+        last_painted = cell;
     }
-    let x: u8 = 64 + (cursor_x << 4);
+    if (held & 3) == 0 {
+        last_painted = 255;
+    }
+    if (edge & 4) != 0 && (edge & 8) == 0 {
+        undo();
+    }
+    let x: u8 = 80 + (cursor_x << 4);
     let y: u8 = 64 + (cursor_y << 4);
-    sprite(0, x, y, 140, 0);
-    sprite(1, x + 8, y, 141, 0);
-    sprite(2, x, y + 8, 142, 0);
-    sprite(3, x + 8, y + 8, 143, 0);
-    let flutter: u8 = (frame >> 3) & 3;
-    sprite(4, 208, 144 + flutter, 240, 1);
-    sprite(5, 216, 144 + flutter, 241, 1);
-    sprite(6, 208, 152 + flutter, 242, 1);
-    sprite(7, 216, 152 + flutter, 243, 1);
+    sprite(0, x, y, 196, 0);
+    sprite(1, x + 8, y, 197, 0);
+    sprite(2, x, y + 8, 198, 0);
+    sprite(3, x + 8, y + 8, 199, 0);
 }

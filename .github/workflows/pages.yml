@@ -29,6 +29,8 @@ jobs:
       - run: npm ci
       - name: Build native compiler and WASM playground
         run: npm run build
+      - name: Check example formatting
+        run: target/release/nested fmt --check games/*.nst
       - name: Verify WASM parity, music and native LSP
         run: npm test
       - name: Verify browser workbench
