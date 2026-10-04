@@ -30,7 +30,7 @@ in the workbench.
 
 Browser checks cover all four cartridges, relative deployment paths, LSP,
 diagnostics, rebuilds, audio activation, header/picker dimensions, integer
-canvas scale, pane resizing, layout switching, 390-pixel mobile panes, fresh
+canvas scale, pane resizing, layout switching, 320–1600-pixel widths, mobile panes with 44-pixel touch controls, fresh
 formatting and draft restoration. Screenshots are captured from current ROMs.
 
 ## Games

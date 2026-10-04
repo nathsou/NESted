@@ -79,7 +79,7 @@ outputs actual NES APU audio. Assembly, intermediate passes and live RAM are
 available alongside the editable source. A 44-pixel toolbar, cartridge dropdown,
 draggable panes and Play/Code layouts keep the workbench compact; mobile tabs
 keep Source, Game and Output accessible. Drafts are saved locally, and Reset
-example can restore the previous draft.
+example can restore the previous draft. [See the mobile layout](docs/screenshots/mobile.png).
 
 `nested-compiler` has **no third-party dependencies and no I/O**. Other projects
 supply source and asset bytes and receive a ROM plus diagnostics and reports:

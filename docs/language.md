@@ -160,7 +160,7 @@ DMC stalls and PPU phase. Assembly listings show per-instruction min/max costs.
 | `sprite(slot,x,y,tile,attributes)` | Writes one of 64 shadow OAM entries. Tile IDs refer to the game's pattern table. |
 | `hide_sprites()` | Hides all shadow OAM entries. |
 | `palette(index,color)` | Direct while rendering is disabled, queued during rendering. |
-| `render(bool)` | Enables/disables rendering and selects queued/direct video writes. |
+| `render(bool)` | Disabling clears pending video writes and NMI. Enabling waits for the next vblank, copies OAM and restores scroll/rendering/NMI. |
 | `screen("asset.map")` | Copies a 1024-byte nametable while rendering is disabled. |
 | `screen_bank(bank,offset:u16)` | Copies a nametable from banked PRG data, leaving that bank selected. |
 | `tone(channel,period:u16,volume)` | Pulse channels 0/1, triangle channel 2. Timer periods and volume are hardware values. |

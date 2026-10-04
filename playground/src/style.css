@@ -159,7 +159,7 @@ dialog form > div { display: flex; justify-content: flex-end; gap: 12px; margin-
 #app[data-layout="play"] .player-panel { width: 100%; max-width: 830px; }
 #app[data-layout="code"] .workspace { grid-template-columns: minmax(0, 1.3fr) 6px minmax(0, 1fr); }
 #app[data-layout="code"] .player-panel, #app[data-layout="code"] [data-divider="1"] { display: none; }
-@media (max-width: 1120px) and (min-width: 801px) { .workspace { grid-template-columns: minmax(260px, 1fr) 6px 276px 6px minmax(220px, 1fr); } }
+@media (max-width: 1120px) and (min-width: 801px) { .header nav a:not(:last-child) { display: none; } .header nav { gap: 10px; } .workspace { grid-template-columns: minmax(260px, 1fr) 6px 276px 6px minmax(220px, 1fr); } }
 @media (max-width: 800px) {
   #app { grid-template-rows: 44px 34px minmax(0, 1fr) 24px; }
   .header { gap: 7px; padding: 0 8px; }
@@ -179,7 +179,16 @@ dialog form > div { display: flex; justify-content: flex-end; gap: 12px; margin-
   #app[data-pane="editor"] .editor-panel, #app[data-pane="player"] .player-panel, #app[data-pane="inspector"] .inspector-panel { display: flex; }
   .statusbar > div:last-child { display: none; }
   .statusbar { font-size: 8px; }
+  .controller { display: grid; grid-template-columns: 134px minmax(0, 1fr); gap: 8px 20px; max-width: 300px; margin: auto; padding: 6px 0; }
+  .dpad { grid-area: 1 / 1 / 3 / 2; grid-template: repeat(3, 44px) / repeat(3, 44px); }
+  .dpad button { font-size: 13px; }
+  .dpad svg { width: 14px; height: 14px; }
+  .ab-buttons { grid-area: 1 / 2; justify-content: center; }
+  .ab-buttons button span { width: 44px; height: 44px; font-size: 16px; }
+  .controller-middle { grid-area: 2 / 2; justify-content: center; }
+  .controller-middle button { min-height: 44px; padding: 7px; font-size: 9px; }
   .controls { max-width: 400px; margin: 4px auto 8px; }
   .player-links, .audio-strip, .cartridge-meta { max-width: 768px; margin-left: auto; margin-right: auto; }
 }
+@media (max-width: 380px) { .brand strong { display: none; } .header { gap: 6px; } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }

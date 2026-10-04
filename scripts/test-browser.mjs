@@ -19,6 +19,7 @@ try{
  for(const value of ['play','code','workbench']){await browser.evaluate(`(()=>{const select=document.getElementById('layout-select');select.value='${value}';select.dispatchEvent(new Event('change'));})()`);assert.equal(await browser.evaluate(`document.getElementById('app').dataset.layout`),value);}
  await browser.send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
  for(const pane of ['editor','player','inspector']){await browser.evaluate(`document.querySelector('[data-pane="${pane}"]').click()`);assert.equal(await browser.evaluate(`getComputedStyle(document.querySelector('.${pane==='editor'?'editor':pane==='player'?'player':'inspector'}-panel')).display`),'flex');assert.equal(await browser.evaluate('document.documentElement.scrollWidth>innerWidth'),false);}
+ for(const width of [320,390,820,1024,1366]){await browser.send('Emulation.setDeviceMetricsOverride',{width,height:844,deviceScaleFactor:1,mobile:width<801});assert.equal(await browser.evaluate('document.documentElement.scrollWidth>innerWidth'),false,`Viewport ${width} overflows`);}
  await browser.send('Emulation.setDeviceMetricsOverride',{width:1600,height:1000,deviceScaleFactor:1,mobile:false});
  const rpc=await browser.evaluate(`window.__nested.rpc('textDocument/completion',{textDocument:{uri:'file:///games/emberkeep.nst'},position:{line:31,character:0}})`);assert.ok(rpc.items.some(i=>i.label==='tone'));
  const original=await browser.evaluate('window.__nested.source');
