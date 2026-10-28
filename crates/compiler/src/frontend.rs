@@ -354,7 +354,8 @@ pub enum Initial {
     Scalar(Expr),
     List(Vec<Expr>),
     Repeat(Expr, usize),
-    Asset(String),
+    /// Path and byte offset; the length comes from the declared type.
+    Asset(String, usize),
 }
 #[derive(Clone, Debug)]
 pub struct Global {
@@ -936,8 +937,9 @@ impl Parser<'_> {
                         return Err(Diagnostic::error(t.span, "asset requires a literal path"));
                     }
                     self.p += 1;
+                    let offset = if self.take(",") { self.number()? } else { 0 };
                     self.need(")")?;
-                    Initial::Asset(t.text)
+                    Initial::Asset(t.text, offset)
                 } else {
                     Initial::Scalar(self.expression(0)?)
                 };
@@ -1166,7 +1168,7 @@ pub fn analyze(source: &str) -> Analysis {
         });
         for attr in f.attrs.keys() {
             if ![
-                "nmi", "irq", "reset", "export", "inline", "noinline", "cold", "budget",
+                "nmi", "irq", "reset", "export", "inline", "noinline", "cold", "budget", "recursive",
             ]
             .contains(&attr.as_str())
             {
@@ -1214,7 +1216,7 @@ pub fn analyze(source: &str) -> Analysis {
                     a.error(g.span, "Repetition count does not match array length");
                 }
             }
-            Initial::Asset(_) => {
+            Initial::Asset(..) => {
                 if !g.constant || !matches!(g.ty,Ty::Array(ref t,_) if **t==Ty::U8) {
                     a.error(g.span, "Assets require const [u8; N] storage");
                 }

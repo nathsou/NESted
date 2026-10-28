@@ -1,5 +1,10 @@
-use crate::{frontend::*, optimizer::calls_block};
+use crate::{
+    frontend::*,
+    liveness::{Live, Liveness},
+    optimizer::calls_block,
+};
 use std::collections::{BTreeMap, BTreeSet};
+mod lower;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mapper {
@@ -86,6 +91,19 @@ struct Generator<'a> {
     memory: Vec<MemoryEntry>,
     bank_data: BTreeMap<u8, Vec<u8>>,
     bank_reads: usize,
+    /// Depth bound of the function being generated when it is `@recursive(N)`.
+    recursive: Option<usize>,
+    liveness: Option<Liveness>,
+    /// Locals live after the innermost simple statement being generated;
+    /// `None` conservatively saves the whole frame around a recursive call.
+    statement_live: Option<Live>,
+    /// Frame byte -> save array, for the current recursive function.
+    saves: BTreeMap<String, String>,
+    /// Temporary bytes stored to during the current statement; a temporary
+    /// allocated but not yet written holds nothing worth saving.
+    written_temps: BTreeSet<usize>,
+    /// Loop counter currently held in Y (see `y_loop`).
+    y_counter: Option<String>,
 }
 fn err(span: Span, message: impl Into<String>) -> Diagnostic {
     Diagnostic::error(span, message)
@@ -102,6 +120,9 @@ fn local_label(function: &str, name: &str) -> String {
 fn temporary_label(function: &str) -> String {
     format!("__t_{}_{}", function.len(), function)
 }
+/// All `@recursive` functions share one save stack: slot arrays `__rs_K`
+/// indexed by the number of active recursive calls.
+const RECURSION_DEPTH: &str = "__rdepth";
 fn bytes(label: &str, data: &[u8]) -> String {
     let mut s = format!("{label}:\n");
     for v in data.chunks(24) {
@@ -116,6 +137,13 @@ impl Generator<'_> {
         self.lines.push(s.into());
     }
     fn op(&mut self, op: &str, arg: impl AsRef<str>) {
+        if op.starts_with("st") {
+            let prefix = format!("{}+", temporary_label(&self.function));
+            if let Some(rest) = arg.as_ref().strip_prefix(&prefix) {
+                let offset: usize = rest.split('+').filter_map(|n| n.parse::<usize>().ok()).sum();
+                self.written_temps.insert(offset);
+            }
+        }
         self.emit(if arg.as_ref().is_empty() {
             format!("  {op}")
         } else {
@@ -236,7 +264,17 @@ impl Generator<'_> {
         self.op("sta", "$0b");
         Ok(())
     }
+    /// Evaluates `e` into A (bytes) or A/X (16-bit values).
     fn expression(&mut self, e: &Expr) -> Result<(), Diagnostic> {
+        if e.ty.wide() {
+            self.wide_ax(e)
+        } else if e.ty.size() == 1 {
+            self.byte_expr(e)
+        } else {
+            self.expression_fallback(e)
+        }
+    }
+    fn expression_fallback(&mut self, e: &Expr) -> Result<(), Diagnostic> {
         let saved = self.temp;
         match &e.kind {
             ExprKind::Number(n) => self.number(*n, &e.ty),
@@ -732,6 +770,9 @@ impl Generator<'_> {
                 self.condition(r, yes, no)?;
             }
             ExprKind::Binary(op, l, r)
+                if ["==", "!=", "<", ">", "<=", ">="].contains(&op.as_str())
+                    && self.compare(op, l, r, yes, no)? => {}
+            ExprKind::Binary(op, l, r)
                 if ["==", "!=", "<", ">", "<=", ">="].contains(&op.as_str()) =>
             {
                 if !l.ty.wide() {
@@ -833,6 +874,7 @@ impl Generator<'_> {
         Ok(())
     }
     fn call(&mut self, name: &str, args: &[Expr], e: &Expr) -> Result<(), Diagnostic> {
+        let live_temporaries = self.temp;
         if ["u8", "i8", "u16", "i16", "bool"].contains(&name) {
             self.expression(&args[0])?;
             if e.ty.wide() && !args[0].ty.wide() {
@@ -897,6 +939,15 @@ impl Generator<'_> {
             return Err(err(e.span, "NROM has no PRG bank switching"));
         }
         let builtin = builtins().into_iter().find(|b| b.name == name);
+        if builtin.is_none() {
+            let callee = self.program.functions.iter().find(|f| f.name == name);
+            if let Some(callee) = callee {
+                if self.direct_arguments(callee, args)? {
+                    self.op("jsr", format!("__fn_{name}"));
+                    return Ok(());
+                }
+            }
+        }
         let mut values = Vec::new();
         for arg in args {
             if let ExprKind::String(s) = &arg.kind {
@@ -964,18 +1015,158 @@ impl Generator<'_> {
                 .iter()
                 .find(|f| f.name == name)
                 .unwrap();
+            let saved = if name == self.function && self.recursive.is_some() {
+                self.recursive_save(f, live_temporaries)
+            } else {
+                Vec::new()
+            };
             for ((value, ty, _), param) in values.into_iter().zip(&f.params) {
                 self.load(&value, &ty);
                 self.save(&local_label(name, &param.0), &param.1);
             }
             self.op("jsr", format!("__fn_{name}"));
+            if !saved.is_empty() {
+                self.recursive_restore(&saved, &sig.1);
+            }
             if sig.1 != e.ty {
                 return Err(err(e.span, "Call result type changed during lowering"));
             }
         }
         Ok(())
     }
+    /// An innermost byte `for` loop whose body never touches Y keeps its
+    /// counter in Y: `abs,y` indexing and `iny`/`cpy` stepping. The counter's
+    /// memory copy is refreshed each iteration for every other use.
+    /// Returns false when the loop is not eligible.
+    fn y_loop(
+        &mut self,
+        stmt: &Stmt,
+        name: &str,
+        start: &Expr,
+        end: &Expr,
+        body: &[Stmt],
+    ) -> Result<bool, Diagnostic> {
+        let Ok(storage) = self.storage(name) else {
+            return Ok(false);
+        };
+        if storage.ty.size() != 1 || self.y_counter.is_some() || !y_free(body) {
+            return Ok(false);
+        }
+        if std::env::var("NESTED_NO_YLOOP").is_ok_and(|v| v == "all" || v == self.function) {
+            return Ok(false);
+        }
+        if writes_name(body, name) {
+            return Ok(false);
+        }
+        // The counter must be dead after the loop.
+        if let Some(l) = &self.liveness {
+            if l.after
+                .get(&(stmt as *const Stmt as usize))
+                .is_none_or(|live| live.contains(name))
+            {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        }
+        let end_operand = match self.byte_operand(end, 'x') {
+            Some(o) if o.prep.is_none() => o.text,
+            _ => return Ok(false),
+        };
+        self.byte_expr(start)?;
+        self.op("tay", "");
+        let test = self.label("yfor_test");
+        let yes = self.label("yfor_body");
+        let next = self.label("yfor_next");
+        let done = self.label("yfor_end");
+        self.op("jmp", &test);
+        self.at(&yes);
+        self.op("sty", &storage.label);
+        self.y_counter = Some(name.to_owned());
+        self.loops.push((done.clone(), next.clone()));
+        let result = self.statements(body);
+        self.loops.pop();
+        self.y_counter = None;
+        result?;
+        self.at(&next);
+        self.op("iny", "");
+        self.at(&test);
+        self.op("cpy", &end_operand);
+        self.op("bcc", &yes);
+        self.at(&done);
+        Ok(true)
+    }
+    /// Copies the caller's live frame bytes into per-byte arrays indexed by the
+    /// recursion depth. A frame byte's array holds one entry per active level.
+    fn recursive_save(&mut self, f: &Function, live_temporaries: usize) -> Vec<(String, String)> {
+        let mut bytes = Vec::new();
+        for (name, ty) in &f.locals {
+            if self
+                .statement_live
+                .as_ref()
+                .is_some_and(|live| !live.contains(name))
+            {
+                continue;
+            }
+            let label = local_label(&f.name, name);
+            for k in 0..ty.size() {
+                bytes.push(if k == 0 {
+                    label.clone()
+                } else {
+                    format!("{label}+{k}")
+                });
+            }
+        }
+        for k in 0..live_temporaries {
+            if self.written_temps.contains(&k) {
+                bytes.push(format!("{}+{k}", temporary_label(&f.name)));
+            }
+        }
+        let depth = RECURSION_DEPTH;
+        let mut saved = Vec::new();
+        for byte in bytes {
+            let n = self.saves.len();
+            let array = self
+                .saves
+                .entry(byte.clone())
+                .or_insert_with(|| format!("__rs_{n}"))
+                .clone();
+            saved.push((byte, array));
+        }
+        if !saved.is_empty() {
+            self.op("ldx", depth);
+            for (byte, array) in &saved {
+                self.op("lda", byte);
+                self.op("sta", format!("{array},x"));
+            }
+            self.op("inc", depth);
+        }
+        saved
+    }
+    fn recursive_restore(&mut self, saved: &[(String, String)], result: &Ty) {
+        if *result != Ty::Void {
+            self.op("sta", "$17");
+            if result.wide() {
+                self.op("stx", "$18");
+            }
+        }
+        self.op("dec", RECURSION_DEPTH);
+        self.op("ldx", RECURSION_DEPTH);
+        for (byte, array) in saved {
+            self.op("lda", format!("{array},x"));
+            self.op("sta", byte);
+        }
+        if *result != Ty::Void {
+            self.op("lda", "$17");
+            if result.wide() {
+                self.op("ldx", "$18");
+            }
+        }
+    }
     fn assign(&mut self, target: &Expr, value: &Expr) -> Result<(), Diagnostic> {
+        if self.assign_direct(target, value)? {
+            return Ok(());
+        }
         let saved = self.temp;
         match &target.kind {
             ExprKind::Name(n) => {
@@ -1033,6 +1224,22 @@ impl Generator<'_> {
     }
     fn statements(&mut self, body: &[Stmt]) -> Result<(), Diagnostic> {
         for s in body {
+            let outer = self.statement_live.take();
+            if let Some(liveness) = &self.liveness {
+                if let Some(after) = liveness.after.get(&(s as *const Stmt as usize)) {
+                    self.statement_live = live_across_call(liveness, s, after, &self.function);
+                }
+            }
+            if self.temp == 0 {
+                self.written_temps.clear();
+            }
+            self.statement(s)?;
+            self.statement_live = outer;
+        }
+        Ok(())
+    }
+    fn statement(&mut self, s: &Stmt) -> Result<(), Diagnostic> {
+        {
             match s {
                 Stmt::Local { name, value, .. } => {
                     self.mark(value.span);
@@ -1110,17 +1317,18 @@ impl Generator<'_> {
                     self.at(&done);
                 }
                 Stmt::While { condition, body } => {
+                    // Test at the bottom: one branch per iteration.
                     let test = self.label("while_test");
                     let yes = self.label("while_body");
                     let done = self.label("while_end");
-                    self.at(&test);
-                    self.mark(condition.span);
-                    self.condition(condition, &yes, &done)?;
+                    self.op("jmp", &test);
                     self.at(&yes);
                     self.loops.push((done.clone(), test.clone()));
                     self.statements(body)?;
                     self.loops.pop();
-                    self.op("jmp", &test);
+                    self.at(&test);
+                    self.mark(condition.span);
+                    self.condition(condition, &yes, &done)?;
                     self.at(&done);
                 }
                 Stmt::For {
@@ -1131,6 +1339,9 @@ impl Generator<'_> {
                     span,
                 } => {
                     let t = self.storage(name)?.ty;
+                    if self.y_loop(s, name, start, end, body)? {
+                        return Ok(());
+                    }
                     let counter = Expr {
                         kind: ExprKind::Name(name.clone()),
                         ty: t.clone(),
@@ -1141,7 +1352,6 @@ impl Generator<'_> {
                     let yes = self.label("for_body");
                     let next = self.label("for_next");
                     let done = self.label("for_end");
-                    self.at(&test);
                     let condition = Expr {
                         kind: ExprKind::Binary(
                             "<".into(),
@@ -1151,7 +1361,8 @@ impl Generator<'_> {
                         ty: Ty::Bool,
                         span: *span,
                     };
-                    self.condition(&condition, &yes, &done)?;
+                    // Test at the bottom: one branch per iteration.
+                    self.op("jmp", &test);
                     self.at(&yes);
                     self.loops.push((done.clone(), next.clone()));
                     self.statements(body)?;
@@ -1165,7 +1376,8 @@ impl Generator<'_> {
                         self.op("inc", format!("{label}+1"));
                         self.at(&no_carry);
                     }
-                    self.op("jmp", &test);
+                    self.at(&test);
+                    self.condition(&condition, &yes, &done)?;
                     self.at(&done);
                 }
                 Stmt::Loop(body) => {
@@ -1201,6 +1413,141 @@ impl Generator<'_> {
     }
 }
 
+/// Whether lowering `body` can leave Y untouched: no calls, assembly, runtime
+/// math, variable shifts, 16-bit array elements or 16-bit indices, nested
+/// `for` loops (which may claim Y themselves) or expression `match`.
+fn y_free(body: &[Stmt]) -> bool {
+    let mut ok = true;
+    visit_block(body, &mut |e| match &e.kind {
+        ExprKind::Call(n, _) if !["u8", "i8", "u16", "i16", "bool"].contains(&n.as_str()) => ok = false,
+        ExprKind::Asm(..) | ExprKind::Match(..) => ok = false,
+        ExprKind::Binary(op, _, r)
+            if ["*", "/", "%"].contains(&op.as_str())
+                || ((op == "<<" || op == ">>") && !matches!(r.kind, ExprKind::Number(_))) =>
+        {
+            ok = false
+        }
+        ExprKind::Index(_, index, _) if e.ty.size() != 1 || index.ty.wide() => ok = false,
+        _ => {}
+    });
+    fn nested(body: &[Stmt]) -> bool {
+        body.iter().any(|s| match s {
+            Stmt::For { .. } => true,
+            Stmt::If { yes, no, .. } => nested(yes) || nested(no),
+            Stmt::While { body, .. } | Stmt::Loop(body) => nested(body),
+            _ => false,
+        })
+    }
+    ok && !nested(body)
+}
+fn writes_name(body: &[Stmt], name: &str) -> bool {
+    body.iter().any(|s| match s {
+        Stmt::Assign { target, .. } => matches!(&target.kind, ExprKind::Name(n) if n == name),
+        Stmt::Local { name: n, .. } => n == name,
+        Stmt::If { yes, no, .. } => writes_name(yes, name) || writes_name(no, name),
+        Stmt::While { body, .. } | Stmt::Loop(body) | Stmt::For { body, .. } => {
+            writes_name(body, name)
+        }
+        _ => false,
+    })
+}
+/// Frame offsets for a function's locals. Locals that are never live at the
+/// same time share bytes (greedy coloring of the liveness interference graph).
+fn frame_slots(f: &Function) -> BTreeMap<String, usize> {
+    let mut calls = BTreeSet::new();
+    let mut asm = false;
+    calls_block(&f.body, &mut calls, &mut asm);
+    let liveness = Liveness::analyze(f);
+    let mut order: Vec<(&String, &Ty)> = f.locals.iter().collect();
+    order.sort_by_key(|(n, t)| (std::cmp::Reverse(t.size()), (*n).clone()));
+    let mut slots: BTreeMap<String, usize> = BTreeMap::new();
+    let mut next_unique = 0;
+    for (name, ty) in &order {
+        // Assembly may write locals invisibly; unanalyzed definitions too.
+        let shared = !asm
+            && liveness.defined.contains(*name)
+            && std::env::var("NESTED_NO_SHARE").map_or(true, |v| v != f.name);
+        let size = ty.size();
+        let mut offset = 0;
+        'search: loop {
+            for (other, &at) in &slots {
+                let other_size = f.locals[other].size();
+                let overlap = offset < at + other_size && at < offset + size;
+                let conflict = !shared
+                    || !liveness.defined.contains(other)
+                    || liveness.interferes(name, other);
+                if overlap && conflict {
+                    offset = at + other_size;
+                    continue 'search;
+                }
+            }
+            break;
+        }
+        next_unique = next_unique.max(offset + size);
+        slots.insert((*name).clone(), offset);
+    }
+    let _ = next_unique;
+    slots
+}
+/// Locals that must survive a recursive call made by simple statement `s`:
+/// whatever is live after `s` (minus the variable it defines) plus what the
+/// rest of the statement reads. Arguments of the call itself are evaluated
+/// before it and need no save when the statement makes exactly one such call.
+fn live_across_call(l: &Liveness, s: &Stmt, after: &Live, function: &str) -> Option<Live> {
+    fn count(e: &Expr, f: &str) -> usize {
+        let mut n = 0;
+        visit_expr(e, &mut |e| {
+            if matches!(&e.kind, ExprKind::Call(name, _) if name == f) {
+                n += 1;
+            }
+        });
+        n
+    }
+    fn reads_outside(l: &Liveness, e: &Expr, f: &str, out: &mut Live) {
+        match &e.kind {
+            ExprKind::Call(name, _) if name == f => {}
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b, _) => {
+                reads_outside(l, a, f, out);
+                reads_outside(l, b, f, out);
+            }
+            ExprKind::Unary(_, a) => reads_outside(l, a, f, out),
+            ExprKind::Call(_, v) => v.iter().for_each(|a| reads_outside(l, a, f, out)),
+            _ => l.reads(e, out),
+        }
+    }
+    let mut live = after.clone();
+    let mut exprs: Vec<&Expr> = Vec::new();
+    match s {
+        Stmt::Local { name, value, .. } => {
+            live.remove(name);
+            exprs.push(value);
+        }
+        Stmt::Assign { target, op, value } => {
+            match &target.kind {
+                ExprKind::Name(n) if op == "=" => {
+                    live.remove(n);
+                }
+                _ => exprs.push(target),
+            }
+            exprs.push(value);
+        }
+        Stmt::Expr(value) => exprs.push(value),
+        Stmt::Return(value, _) => {
+            live.clear();
+            exprs.extend(value.iter());
+        }
+        _ => return None,
+    }
+    let calls: usize = exprs.iter().map(|e| count(e, function)).sum();
+    for e in exprs {
+        if calls == 1 {
+            reads_outside(l, e, function, &mut live);
+        } else {
+            l.reads(e, &mut live);
+        }
+    }
+    Some(live)
+}
 fn reach(
     name: &str,
     graph: &BTreeMap<String, BTreeSet<String>>,
@@ -1274,6 +1621,8 @@ pub fn generate(
             "chr",
             "palette",
             "screen",
+            "queue",
+            "stack",
         ]
         .contains(&key.as_str())
         {
@@ -1347,9 +1696,40 @@ pub fn generate(
         memory: Vec::new(),
         bank_data: BTreeMap::new(),
         bank_reads: 0,
+        recursive: None,
+        liveness: None,
+        statement_live: None,
+        saves: BTreeMap::new(),
+        written_temps: BTreeSet::new(),
+        y_counter: None,
     };
+    let config_number = |key: &str, max: usize| -> Result<Option<usize>, Diagnostic> {
+        program
+            .config
+            .get(key)
+            .map(|v| {
+                parse_number(v)
+                    .filter(|n| (0..=max as i64).contains(n))
+                    .map(|n| n as usize)
+                    .ok_or_else(|| {
+                        err(
+                            Span::default(),
+                            format!("Cartridge '{key}' must be an integer 0..{max}"),
+                        )
+                    })
+            })
+            .transpose()
+    };
+    let queue = config_number("queue", 40)?.unwrap_or(40);
+    let stack_reserve = config_number("stack", 256)?;
+    let mut sprites = false;
+    for f in &program.functions {
+        let mut calls = BTreeSet::new();
+        calls_block(&f.body, &mut calls, &mut false);
+        sprites |= calls.contains("sprite") || calls.contains("hide_sprites");
+    }
     let mut zp = 0x20usize;
-    let mut ram = 0x400usize;
+    let mut ram = Ram::new(sprites, queue, stack_reserve);
     let mut eq = Vec::new();
     if mapper == Mapper::Uxrom {
         let path = program
@@ -1410,9 +1790,12 @@ pub fn generate(
                         "Explicit zero-page allocation exceeds available space",
                     ));
                 }
-                let n = ram;
-                ram += size;
-                n
+                ram.alloc(size).ok_or_else(|| {
+                    err(
+                        global.span,
+                        format!("'{}' ({size} bytes) does not fit in free internal RAM", global.name),
+                    )
+                })?
             };
             eq.push(format!("{label} = {address}"));
             g.memory.push(MemoryEntry {
@@ -1436,10 +1819,31 @@ pub fn generate(
     let mut sizes = BTreeMap::new();
     let mut local_layouts = BTreeMap::new();
     let mut graph = BTreeMap::new();
+    let mut recursive = BTreeMap::new();
+    let mut recursive_slots = 0;
     for f in &program.functions {
         let mut calls = BTreeSet::new();
         let mut asm = false;
         calls_block(&f.body, &mut calls, &mut asm);
+        g.recursive = None;
+        g.liveness = Some(Liveness::analyze(f));
+        if let Some(n) = f.attrs.get("recursive") {
+            let n = n
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=256).contains(n))
+                .ok_or_else(|| {
+                    err(
+                        f.name_span,
+                        "@recursive(N) requires a depth bound N in 1..256",
+                    )
+                })?;
+            // Self-calls save the caller's live frame; the graph stays acyclic.
+            calls.remove(&f.name);
+            recursive.insert(f.name.clone(), n);
+            g.recursive = Some(n);
+        }
+        g.saves.clear();
         graph.insert(f.name.clone(), calls);
         g.function = f.name.clone();
         g.locals.clear();
@@ -1447,6 +1851,7 @@ pub fn generate(
         g.temp_max = 0;
         g.lines.clear();
         let mut layout = Vec::new();
+        let slots = frame_slots(f);
         let mut offset = 0;
         for (name, ty) in &f.locals {
             let label = local_label(&f.name, name);
@@ -1459,8 +1864,8 @@ pub fn generate(
                     bank: None,
                 },
             );
-            layout.push((label, offset, ty.size()));
-            offset += ty.size();
+            layout.push((label, slots[name], ty.size()));
+            offset = offset.max(slots[name] + ty.size());
         }
         g.at(&format!("__fn_{}", f.name));
         g.statements(&f.body)?;
@@ -1470,6 +1875,45 @@ pub fn generate(
         sizes.insert(f.name.clone(), offset + g.temp_max);
         local_layouts.insert(f.name.clone(), layout);
         functions.insert(f.name.clone(), g.lines.join("\n"));
+        if g.recursive.is_some() {
+            recursive_slots = recursive_slots.max(g.saves.len());
+        }
+    }
+    // N in @recursive(N) bounds the active recursive calls of all such
+    // functions on any call path; the shared stack holds that many levels.
+    let recursion_levels = recursive.values().copied().max().unwrap_or(0);
+    if !recursive.is_empty() {
+        let address = if zp < 256 {
+            zp += 1;
+            zp - 1
+        } else {
+            ram.alloc(1)
+                .ok_or_else(|| err(Span::default(), "No RAM for recursion depth"))?
+        };
+        eq.push(format!("{RECURSION_DEPTH} = {address}"));
+        g.memory.push(MemoryEntry {
+            name: "recursion depth".into(),
+            address: address as u16,
+            size: 1,
+            kind: "recursion".into(),
+        });
+        for slot in 0..recursive_slots {
+            let address = ram.alloc(recursion_levels).ok_or_else(|| {
+                err(
+                    Span::default(),
+                    format!(
+                        "Recursion save stack ({recursive_slots} slots x {recursion_levels} levels) exceeds free internal RAM"
+                    ),
+                )
+            })?;
+            eq.push(format!("__rs_{slot} = {address}"));
+            g.memory.push(MemoryEntry {
+                name: format!("recursion slot {slot}"),
+                address: address as u16,
+                size: recursion_levels,
+                kind: "recursion save stack".into(),
+            });
+        }
     }
     let mut done = BTreeSet::new();
     for f in &program.functions {
@@ -1502,10 +1946,17 @@ pub fn generate(
         }
     }
     let stack_bytes = 32
+        + 2 * recursion_levels
         + 2 * pools
             .iter()
             .map(|p| p.keys().map(|n| depths[n]).max().unwrap_or(0))
             .sum::<usize>();
+    if stack_reserve.is_some_and(|n| stack_bytes > n) {
+        return Err(err(
+            Span::default(),
+            format!("Generated code needs a {stack_bytes}-byte hardware stack allowance, exceeding the cartridge 'stack' reservation"),
+        ));
+    }
     if stack_bytes > 256 {
         return Err(err(
             Span::default(),
@@ -1521,9 +1972,12 @@ pub fn generate(
         zp += peak;
         base
     } else {
-        let base = ram;
-        ram += peak;
-        base
+        ram.alloc(peak).ok_or_else(|| {
+            err(
+                Span::default(),
+                format!("Static frames ({peak} bytes) do not fit in free internal RAM"),
+            )
+        })?
     };
     for f in &program.functions {
         let offset = (0..3)
@@ -1551,12 +2005,6 @@ pub fn generate(
                 });
             }
         }
-    }
-    if ram > 0x800 {
-        return Err(err(
-            Span::default(),
-            format!("RAM allocation ends at ${ram:04x}, exceeding internal RAM ($0800)"),
-        ));
     }
     let reset = program
         .functions
@@ -1701,6 +2149,8 @@ jsr __rt_copy_ram
         nmi,
         irq,
         functions.contains_key("init"),
+        sprites,
+        queue,
     ));
     for f in &program.functions {
         assembly.push_str(&functions[&f.name]);
@@ -1713,7 +2163,7 @@ jsr __rt_copy_ram
     Ok(Generated {
         assembly,
         memory: g.memory,
-        ram_bytes: ram - 0x400 + zp - 0x20,
+        ram_bytes: ram.used + zp - 0x20,
         zero_page_bytes: zp - 0x20,
         frame_bytes: peak,
         bank_data: g.bank_data,
@@ -1723,10 +2173,43 @@ jsr __rt_copy_ram
         stack_bytes,
     })
 }
+/// Free internal RAM outside zero page, allocated best-fit. Page 2 is free when
+/// the program never uses sprites; the VRAM queue shrinks to the declared size;
+/// a declared hardware-stack reservation releases the bottom of page 1.
+struct Ram {
+    regions: Vec<(usize, usize)>,
+    used: usize,
+}
+impl Ram {
+    fn new(sprites: bool, queue: usize, stack: Option<usize>) -> Self {
+        let mut regions = vec![(0x400, 0x800), (0x300 + queue * 3, 0x37e)];
+        if !sprites {
+            regions.push((0x200, 0x300));
+        }
+        if let Some(n) = stack {
+            regions.push((0x100, 0x200 - n));
+        }
+        Self { regions, used: 0 }
+    }
+    fn alloc(&mut self, size: usize) -> Option<usize> {
+        if size == 0 {
+            return Some(0x400);
+        }
+        let region = self
+            .regions
+            .iter_mut()
+            .filter(|(start, end)| end - start >= size)
+            .min_by_key(|(start, end)| end - start)?;
+        let address = region.0;
+        region.0 += size;
+        self.used += size;
+        Some(address)
+    }
+}
 fn call_depths(
     graph: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<BTreeMap<String, usize>, String> {
-    let mut depths = BTreeMap::new();
+    let mut depths: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for _ in 0..64 {
         for (name, calls) in graph {
             if depths.contains_key(name) {
@@ -1737,15 +2220,16 @@ fn call_depths(
                 .filter(|n| graph.contains_key(*n))
                 .collect::<Vec<_>>();
             if children.iter().all(|n| depths.contains_key(*n)) {
-                let depth = 1 + children.iter().map(|n| depths[*n]).max().unwrap_or(0);
-                if depth > 64 {
+                let depth = 1 + children.iter().map(|n| depths[*n].0).max().unwrap_or(0);
+                let levels = depth;
+                if levels > 64 {
                     return Err("Call depth exceeds 64; the hardware stack is finite".into());
                 }
-                depths.insert(name.clone(), depth);
+                depths.insert(name.clone(), (depth, levels));
             }
         }
         if depths.len() == graph.len() {
-            return Ok(depths);
+            return Ok(depths.into_iter().map(|(n, d)| (n, d.0)).collect());
         }
     }
     Err("Call graph exceeds 64 levels".into())

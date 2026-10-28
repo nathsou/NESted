@@ -372,6 +372,397 @@ pub fn calls_block(body: &[Stmt], calls: &mut BTreeSet<String>, asm: &mut bool) 
         }
     }
 }
+/// Renames locals (bindings and uses) for an inlined body.
+fn rename_expr(e: &mut Expr, map: &BTreeMap<String, String>) {
+    match &mut e.kind {
+        ExprKind::Name(n) => {
+            if let Some(r) = map.get(n) {
+                *n = r.clone();
+            }
+        }
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b, _) => {
+            rename_expr(a, map);
+            rename_expr(b, map);
+        }
+        ExprKind::Unary(_, a) => rename_expr(a, map),
+        ExprKind::Call(_, v) => v.iter_mut().for_each(|a| rename_expr(a, map)),
+        ExprKind::Asm(v, _) => v.iter_mut().for_each(|(_, a)| rename_expr(a, map)),
+        ExprKind::Match(value, arms) => {
+            rename_expr(value, map);
+            for arm in arms {
+                match &mut arm.body {
+                    MatchBody::Value(v) => rename_expr(v, map),
+                    MatchBody::Block(b) => rename_block(b, map),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+fn rename_block(body: &mut [Stmt], map: &BTreeMap<String, String>) {
+    for s in body {
+        match s {
+            Stmt::Local { name, value, .. } => {
+                if let Some(r) = map.get(name) {
+                    *name = r.clone();
+                }
+                rename_expr(value, map);
+            }
+            Stmt::Assign { target, value, .. } => {
+                rename_expr(target, map);
+                rename_expr(value, map);
+            }
+            Stmt::Expr(e) => rename_expr(e, map),
+            Stmt::If { condition, yes, no } => {
+                rename_expr(condition, map);
+                rename_block(yes, map);
+                rename_block(no, map);
+            }
+            Stmt::While { condition, body } => {
+                rename_expr(condition, map);
+                rename_block(body, map);
+            }
+            Stmt::For {
+                name,
+                start,
+                end,
+                body,
+                ..
+            } => {
+                if let Some(r) = map.get(name) {
+                    *name = r.clone();
+                }
+                rename_expr(start, map);
+                rename_expr(end, map);
+                rename_block(body, map);
+            }
+            Stmt::Loop(body) => rename_block(body, map),
+            Stmt::Return(Some(e), _) => rename_expr(e, map),
+            _ => {}
+        }
+    }
+}
+fn written_names(body: &[Stmt]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    fn target(e: &Expr, out: &mut BTreeSet<String>) {
+        match &e.kind {
+            ExprKind::Name(n) => {
+                out.insert(n.clone());
+            }
+            ExprKind::Index(base, _, _) => target(base, out),
+            _ => {}
+        }
+    }
+    fn walk(body: &[Stmt], out: &mut BTreeSet<String>) {
+        for s in body {
+            match s {
+                Stmt::Local { name, .. } => {
+                    out.insert(name.clone());
+                }
+                Stmt::Assign { target: t, .. } => target(t, out),
+                Stmt::If { yes, no, .. } => {
+                    walk(yes, out);
+                    walk(no, out);
+                }
+                Stmt::For { name, body, .. } => {
+                    out.insert(name.clone());
+                    walk(body, out);
+                }
+                Stmt::While { body, .. } | Stmt::Loop(body) => walk(body, out),
+                _ => {}
+            }
+        }
+    }
+    walk(body, &mut out);
+    out
+}
+fn returns_inside(body: &[Stmt]) -> bool {
+    body.iter().any(|s| match s {
+        Stmt::Return(..) => true,
+        Stmt::If { yes, no, .. } => returns_inside(yes) || returns_inside(no),
+        Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop(body) => {
+            returns_inside(body)
+        }
+        _ => false,
+    })
+}
+fn uses_asm(body: &[Stmt]) -> bool {
+    let mut calls = BTreeSet::new();
+    let mut asm = false;
+    calls_block(body, &mut calls, &mut asm);
+    asm
+}
+/// `@inline` functions whose only `return` is their final statement are
+/// expanded at statement-level call sites: `f(..);`, `let x = f(..);`,
+/// `x = f(..);` and `return f(..);`. Parameters become fresh locals.
+fn inline_statements(program: &mut Program) -> usize {
+    let entry = |f: &Function| {
+        ["init", "update"].contains(&f.name.as_str())
+            || f.attrs
+                .keys()
+                .any(|a| ["reset", "nmi", "irq", "recursive"].contains(&a.as_str()))
+    };
+    let candidates: BTreeMap<String, Function> = program
+        .functions
+        .iter()
+        .filter(|f| f.attrs.contains_key("inline") && !entry(f) && !uses_asm(&f.body))
+        .filter(|f| {
+            let (last, rest) = match f.body.split_last() {
+                Some((last, rest)) => (Some(last), rest),
+                None => (None, &[][..]),
+            };
+            !returns_inside(rest)
+                && !last.is_some_and(|l| !matches!(l, Stmt::Return(..)) && returns_inside(std::slice::from_ref(l)))
+        })
+        .map(|f| (f.name.clone(), f.clone()))
+        .collect();
+    if candidates.is_empty() {
+        return 0;
+    }
+    let constants: BTreeSet<String> = program
+        .globals
+        .iter()
+        .filter(|g| g.constant && matches!(g.initial, Initial::Scalar(_)))
+        .map(|g| g.name.clone())
+        .collect();
+    let mut counter = 0usize;
+    let mut total = 0;
+    for _ in 0..4 {
+        let mut changed = 0;
+        for f in &mut program.functions {
+            let mut added = BTreeMap::new();
+            let caller = Caller {
+                name: f.name.clone(),
+                locals: f.locals.keys().cloned().collect(),
+                constants: &constants,
+            };
+            changed += expand(&mut f.body, &caller, &candidates, &mut counter, &mut added);
+            f.locals.extend(added);
+        }
+        total += changed;
+        if changed == 0 {
+            break;
+        }
+    }
+    total
+}
+struct Caller<'a> {
+    name: String,
+    locals: BTreeSet<String>,
+    constants: &'a BTreeSet<String>,
+}
+fn expand(
+    body: &mut Vec<Stmt>,
+    caller: &Caller,
+    candidates: &BTreeMap<String, Function>,
+    counter: &mut usize,
+    added: &mut BTreeMap<String, Ty>,
+) -> usize {
+    let mut changed = 0;
+    let mut out = Vec::new();
+    for mut s in std::mem::take(body) {
+        match &mut s {
+            Stmt::If { yes, no, .. } => {
+                changed += expand(yes, caller, candidates, counter, added);
+                changed += expand(no, caller, candidates, counter, added);
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop(body) => {
+                changed += expand(body, caller, candidates, counter, added);
+            }
+            _ => {}
+        }
+        let call = match &s {
+            Stmt::Expr(e) | Stmt::Local { value: e, .. } | Stmt::Return(Some(e), _) => Some(e),
+            Stmt::Assign { target, op, value } if op == "=" && matches!(target.kind, ExprKind::Name(_)) => Some(value),
+            _ => None,
+        };
+        let Some(Expr {
+            kind: ExprKind::Call(name, args),
+            span,
+            ..
+        }) = call
+        else {
+            out.push(s);
+            continue;
+        };
+        let Some(f) = candidates.get(name).filter(|f| f.name != caller.name) else {
+            out.push(s);
+            continue;
+        };
+        *counter += 1;
+        let map: BTreeMap<String, String> = f
+            .locals
+            .keys()
+            .map(|n| (n.clone(), format!("__i{counter}_{n}")))
+            .collect();
+        for (n, t) in &f.locals {
+            added.insert(map[n].clone(), t.clone());
+        }
+        let span = *span;
+        // A constant, or a variable the body cannot change, is substituted.
+        let written = written_names(&f.body);
+        let mut calls = BTreeSet::new();
+        calls_block(&f.body, &mut calls, &mut false);
+        let opaque = calls.iter().any(|c| {
+            !["u8", "i8", "u16", "i16", "bool", "peek", "buttons", "pressed"].contains(&c.as_str())
+        });
+        let mut bind = BTreeMap::new();
+        for ((param, ty, _), arg) in f.params.iter().zip(args.iter()) {
+            // Constants never change; the caller's locals only change by
+            // its own statements; globals may change in any callee.
+            let stable = match &arg.kind {
+                ExprKind::Number(_) => true,
+                ExprKind::Name(n) if caller.constants.contains(n) => true,
+                ExprKind::Name(n) if caller.locals.contains(n) || added.contains_key(n) => {
+                    !written.contains(n)
+                }
+                ExprKind::Name(n) => !opaque && !written.contains(n),
+                _ => false,
+            };
+            if stable && !written.contains(param) && arg.ty == *ty {
+                bind.insert(map[param].clone(), arg.clone());
+                continue;
+            }
+            out.push(Stmt::Local {
+                name: map[param].clone(),
+                ty: Some(ty.clone()),
+                value: arg.clone(),
+                mutable: true,
+                span,
+            });
+        }
+        let mut inlined = f.body.clone();
+        rename_block(&mut inlined, &map);
+        replace_statements(&mut inlined, &bind);
+        let result = match inlined.last() {
+            Some(Stmt::Return(value, _)) => {
+                let value = value.clone();
+                inlined.pop();
+                value
+            }
+            _ => None,
+        };
+        out.extend(inlined);
+        match (s, result) {
+            (Stmt::Local { name, ty, mutable, span, .. }, Some(value)) => out.push(Stmt::Local {
+                name,
+                ty,
+                value,
+                mutable,
+                span,
+            }),
+            (Stmt::Assign { target, op, .. }, Some(value)) => {
+                out.push(Stmt::Assign { target, op, value })
+            }
+            (Stmt::Return(_, span), value) => out.push(Stmt::Return(value, span)),
+            (Stmt::Expr(_), Some(value)) => {
+                let mut calls = BTreeSet::new();
+                let mut asm = false;
+                calls_expr(&value, &mut calls, &mut asm);
+                if !calls.is_empty() || asm {
+                    out.push(Stmt::Expr(value));
+                }
+            }
+            _ => {}
+        }
+        changed += 1;
+    }
+    *body = out;
+    changed
+}
+/// Statement-level `match` with block arms becomes `let m = value;` and an
+/// if/else chain, so later passes see ordinary statements.
+fn desugar_matches(program: &mut Program) {
+    let mut counter = 0usize;
+    for f in &mut program.functions {
+        let mut added = BTreeMap::new();
+        desugar_block(&mut f.body, &mut counter, &mut added);
+        f.locals.extend(added);
+    }
+}
+fn desugar_block(body: &mut Vec<Stmt>, counter: &mut usize, added: &mut BTreeMap<String, Ty>) {
+    let mut out = Vec::new();
+    for mut s in std::mem::take(body) {
+        match &mut s {
+            Stmt::If { yes, no, .. } => {
+                desugar_block(yes, counter, added);
+                desugar_block(no, counter, added);
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop(body) => {
+                desugar_block(body, counter, added)
+            }
+            _ => {}
+        }
+        let Stmt::Expr(Expr {
+            kind: ExprKind::Match(value, arms),
+            span,
+            ..
+        }) = &mut s
+        else {
+            out.push(s);
+            continue;
+        };
+        if !arms.iter().all(|a| matches!(a.body, MatchBody::Block(_))) {
+            out.push(s);
+            continue;
+        }
+        *counter += 1;
+        let name = format!("__m{counter}");
+        added.insert(name.clone(), value.ty.clone());
+        let span = *span;
+        out.push(Stmt::Local {
+            name: name.clone(),
+            ty: Some(value.ty.clone()),
+            value: (**value).clone(),
+            mutable: false,
+            span,
+        });
+        let selector = Expr {
+            kind: ExprKind::Name(name),
+            ty: value.ty.clone(),
+            span,
+        };
+        let mut chain: Vec<Stmt> = Vec::new();
+        for arm in std::mem::take(arms).into_iter().rev() {
+            let MatchBody::Block(mut block) = arm.body else {
+                unreachable!()
+            };
+            desugar_block(&mut block, counter, added);
+            match pattern_condition(&selector, &arm.patterns) {
+                None => chain = block,
+                Some(condition) => {
+                    chain = vec![Stmt::If {
+                        condition,
+                        yes: block,
+                        no: chain,
+                    }]
+                }
+            }
+        }
+        out.extend(chain);
+    }
+    *body = out;
+}
+fn pattern_condition(value: &Expr, patterns: &[(Expr, Option<Expr>)]) -> Option<Expr> {
+    fn binary(op: &str, a: Expr, b: Expr) -> Expr {
+        Expr {
+            span: a.span,
+            ty: Ty::Bool,
+            kind: ExprKind::Binary(op.into(), Box::new(a), Box::new(b)),
+        }
+    }
+    patterns
+        .iter()
+        .map(|(lo, hi)| match hi {
+            Some(hi) => binary(
+                "&&",
+                binary(">=", value.clone(), lo.clone()),
+                binary("<=", value.clone(), hi.clone()),
+            ),
+            None => binary("==", value.clone(), lo.clone()),
+        })
+        .reduce(|a, b| binary("||", a, b))
+}
 pub fn optimize(program: &mut Program) -> Optimizations {
     let volatile = program
         .globals
@@ -380,6 +771,8 @@ pub fn optimize(program: &mut Program) -> Optimizations {
         .map(|g| g.name.clone())
         .collect::<BTreeSet<_>>();
     let mut stats = Optimizations::default();
+    desugar_matches(program);
+    stats.inlined += inline_statements(program);
     let mut constants = BTreeMap::new();
     for g in &program.globals {
         if g.constant {

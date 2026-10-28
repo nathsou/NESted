@@ -329,3 +329,79 @@ fn formatting_preserves_rom_bytes_and_assembly_comments() {
             .contains("Duplicate")
     );
 }
+#[test]
+fn self_recursion_preserves_live_frames() {
+    let source = r#"
+cartridge { queue = 8; stack = 96; }
+var fib_result: u16 = 0;
+var tree: u16 = 0;
+var big: [u8; 900] = [0; 900];
+@recursive(24)
+fn fib(n: u8) -> u16 {
+    if n < 2 { return u16(n); }
+    return fib(n - 1) + fib(n - 2);
+}
+@recursive(8)
+fn walk(depth: u8, base: u16) -> u16 {
+    if depth == 0 { return base; }
+    var total: u16 = 0;
+    for k in 0..3 {
+        let child: u16 = walk(depth - 1, base + u16(k));
+        total += child + u16(depth);
+    }
+    return total;
+}
+fn init() { fib_result = fib(15); tree = walk(4, 1); big[899] = 7; }
+fn update() {}
+"#;
+    fn walk(depth: u16, base: u16) -> u16 {
+        if depth == 0 {
+            return base;
+        }
+        let mut total: u16 = 0;
+        for k in 0..3 {
+            total = total.wrapping_add(walk(depth - 1, base + k).wrapping_add(depth));
+        }
+        total
+    }
+    for optimize in [false, true] {
+        let (c, mut n) = run(source, optimize, 60);
+        assert_eq!(read(&c, &mut n, "fib_result"), 610);
+        assert_eq!(read(&c, &mut n, "tree"), walk(4, 1));
+        assert!(!c.generated.assembly.contains("__rt_hide_sprites"));
+    }
+}
+#[test]
+fn y_register_loops_keep_memory_and_targets_consistent() {
+    // Innermost loops hold their counter in Y; indexed targets, value reads and
+    // nested indexing must all agree with the counter's memory copy.
+    let source = r#"
+var a: [u8; 32] = [0; 32];
+var b: [u8; 32] = [0; 32];
+var sum: u16 = 0;
+var last_seen: u8 = 0;
+fn init() {
+    for k in 0..32 { a[raw k] = k + 1; }
+    for k2 in 3..20 { b[raw k2] = a[raw k2] * 2 + k2; last_seen = k2; }
+    for k3 in 0..32 { sum += u16(b[raw a[raw k3] & 31]); }
+}
+fn update() {}
+"#;
+    let mut a = [0u8; 32];
+    let mut b = [0u8; 32];
+    for k in 0..32 {
+        a[k] = k as u8 + 1;
+    }
+    for k in 3..20 {
+        b[k] = a[k].wrapping_mul(2).wrapping_add(k as u8);
+    }
+    let mut sum = 0u16;
+    for k in 0..32 {
+        sum += u16::from(b[(a[k] & 31) as usize]);
+    }
+    for optimize in [false, true] {
+        let (c, mut n) = run(source, optimize, 10);
+        assert_eq!(read(&c, &mut n, "sum"), sum);
+        assert_eq!(read(&c, &mut n, "last_seen") & 255, 19);
+    }
+}
