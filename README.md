@@ -37,11 +37,17 @@ replies to a minute per move. **D-pad** moves the cursor, **A** picks up and
 drops a piece, **B** cancels a selection or makes the engine move now,
 **Select** flips the board and **Start** opens the menu.
 
-STRENGTH_PLACEHOLDER
+At level 5 (10 seconds a move) it scores about **1680 Elo** on Stockfish's
+`UCI_Elo` scale: 162/400 against Stockfish 16 limited to 1700 and 1800 Elo at
+0.1 s a move (95% interval roughly 1650–1720), searching about 280 positions a second.
+At level 8 (a minute a move) it held Stockfish 1800 to 59.5/120, about
+**1800 Elo**. It also thinks on your time: while you consider a move it
+searches the reply it expects, and answers at once when you play it.
 
 The engine uses a 0x88 board with dense piece lists, staged pseudo-legal move
 generation with cheap pin and check tests, and incrementally updated PeSTO
-tapered evaluation and Zobrist keys. Search is iterative-deepening PVS with null
+tapered evaluation (plus a bishop-pair bonus and mop-up against a bare
+king) and Zobrist keys. Search is iterative-deepening PVS with null
 move, late-move reductions, futility and reverse-futility pruning, check
 extensions, killers, history, a move-ordering hash table and a pruned capture
 quiescence search. It also has threefold repetition, the fifty-move rule,
