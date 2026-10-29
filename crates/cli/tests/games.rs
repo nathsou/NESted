@@ -416,7 +416,7 @@ fn every_nonogram_puzzle_completes_and_navigation_wraps() {
 #[test]
 fn chess_plays_a_controller_move_and_the_engine_replies() {
     let mut g = Game::load("chess");
-    // Menu: lower the level to 1 (a fast, depth-limited reply), then start.
+    // Menu: Black to NES level 1 (a fast, depth-limited reply), then start.
     g.tap(16);
     for _ in 0..4 {
         g.tap(64);
@@ -503,4 +503,29 @@ fn chess_ponders_on_the_humans_time_and_stops_on_a_button() {
     assert_eq!(g.byte("game_plies"), 3, "the expected move was played");
     g.frames(0, 20);
     assert_eq!(g.byte("game_plies"), 4, "the pondered answer is instant");
+}
+
+#[test]
+fn chess_bots_play_each_other_at_their_own_levels() {
+    let mut g = Game::load("chess");
+    // White: human -> NES 1 (one step right). Black: NES 5 -> NES 2.
+    g.tap(16);
+    g.tap(16);
+    g.tap(128);
+    g.tap(32);
+    for _ in 0..3 {
+        g.tap(64);
+    }
+    assert_eq!(g.at("players", 0), 1);
+    assert_eq!(g.at("players", 1), 2);
+    g.tap(8);
+    let in_book = g.c.assembly.symbols["__v_in_book"];
+    g.n.write_ram(in_book, 0);
+    let mut frames = 0;
+    while g.byte("game_plies") < 6 {
+        g.frames(0, 1);
+        frames += 1;
+        assert!(frames < 3000, "the bots keep moving without input");
+    }
+    assert_eq!(g.byte("screen_state"), 1, "still playing");
 }

@@ -31,9 +31,9 @@ controller, or connect a gamepad. Sound starts with **Enable sound**.
 ![NESted Chess: a Center Game against the cartridge](docs/screenshots/chess.png)
 
 A complete chess engine and playable board in a 32-KiB NROM cartridge with the
-console's 2 KiB of RAM, written entirely in NESted. Play either color against
-the NES (or a friend, or watch it play itself) at eight levels, from one-ply
-replies to a minute per move. **D-pad** moves the cursor, **A** picks up and
+console's 2 KiB of RAM, written entirely in NESted. Each color is a human or
+the NES at one of eight levels, from one-ply replies to a minute per move: play
+the cartridge, a friend, or watch two engine levels play each other. **D-pad** moves the cursor, **A** picks up and
 drops a piece, **B** cancels a selection or makes the engine move now,
 **Select** flips the board and **Start** opens the menu.
 
