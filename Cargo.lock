@@ -78,6 +78,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nested-chessbench"
+version = "0.1.0"
+dependencies = [
+ "nested-compiler",
+ "nested-runtime",
+]
+
+[[package]]
 name = "nested-cli"
 version = "0.1.0"
 dependencies = [

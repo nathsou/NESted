@@ -26,6 +26,39 @@ Arrows move or hit lanes. **Z = A**, **X = B**, **Shift = Select**,
 **Enter = Start**. Click the canvas for keyboard input, use the on-screen
 controller, or connect a gamepad. Sound starts with **Enable sound**.
 
+## NESted Chess · NROM
+
+![NESted Chess: a Center Game against the cartridge](docs/screenshots/chess.png)
+
+A complete chess engine and playable board in a 32-KiB NROM cartridge with the
+console's 2 KiB of RAM, written entirely in NESted. Each color is a human or
+the NES at one of eight levels, from one-ply replies to a minute per move: play
+the cartridge, a friend, or watch two engine levels play each other. **D-pad** moves the cursor, **A** picks up and
+drops a piece, **B** cancels a selection or makes the engine move now,
+**Select** flips the board and **Start** opens the menu.
+
+At level 5 (10 seconds a move) it scores about **1680 Elo** on Stockfish's
+`UCI_Elo` scale: 162/400 against Stockfish 16 limited to 1700 and 1800 Elo at
+0.1 s a move (95% interval roughly 1650–1720), searching about 280 positions a second.
+At level 8 (a minute a move) it held Stockfish 1800 to 59.5/120, about
+**1800 Elo**. It also thinks on your time: while you consider a move it
+searches the reply it expects, and answers at once when you play it.
+
+The engine uses a 0x88 board with dense piece lists, staged pseudo-legal move
+generation with cheap pin and check tests, and incrementally updated PeSTO
+tapered evaluation (plus a bishop-pair bonus and mop-up against a bare
+king) and Zobrist keys. Search is iterative-deepening PVS with null
+move, late-move reductions, futility and reverse-futility pruning, check
+extensions, killers, history, a move-ordering hash table and a pruned capture
+quiescence search. It also has threefold repetition, the fifty-move rule,
+insufficient material and a Stockfish-built opening book. Recursion uses the
+compiler's `@recursive(N)` shared save stack. The engine yields to a `@vblank`
+handler, so the spinner and B button stay live while it thinks.
+
+`crates/chessbench` runs the cartridge headlessly at over 100× real time for
+perft, profiling and a UCI bridge. `scripts/chess` builds the tables, graphics
+and book, and runs self-play and Stockfish matches.
+
 ## Build and use
 
 Requires stable Rust, Node 24+ and Python 3. TypeScript uses the native
@@ -130,8 +163,9 @@ draft restoration, desktop resizing and mobile panes. Cartridge tests check
 video-queue capacity and the eight-sprite scanline limit on every rendered
 frame. The [refinement audit](docs/audit.md) records the issues and evidence.
 
-v0.1 intentionally uses NTSC, fixed code banks and static scalar functions. It
-has no heap, recursion, structs, references, module imports, banked functions,
-PAL timing or battery saves yet. Queue capacity is 40 video writes per prepared
+v0.1 intentionally uses NTSC, fixed code banks and static scalar functions;
+recursion is opt-in through `@recursive(N)` save stacks. It has no heap,
+structs, references, module imports, banked functions, PAL timing or battery
+saves yet. Queue capacity is 40 video writes per prepared
 frame. The [language guide](docs/language.md) documents these contracts and the
 [design notes](docs/design.md) explain their benefits and tradeoffs.

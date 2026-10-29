@@ -41,13 +41,16 @@ signed right shifts extend the sign, including oversized shifts.
 
 Global `const` values reside in ROM or become immediate constants. Global `var`
 values reside in RAM and require compile-time initializers. Arrays accept
-lists, repetitions (`[0; 64]`) or constant byte assets (`asset("path")`). Their
+lists, repetitions (`[0; 64]`) or constant byte assets (`asset("path")`, or
+`asset("path", offset)` to take the array's bytes from an offset, so one file
+can back several tables). Their
 length is fixed. Functions accept and return scalar values. Locals use `let`
 (immutable) or `var` (mutable), with optional inferred types.
 
 `if/else`, `while`, `for i in 0..64`, `loop`, `break`, `continue`, and `return`
-are available. There is no recursion or shadowing. Function-local names must be
-unique even across separate blocks. Range ends are checked each iteration.
+are available. There is no shadowing, and recursion only through
+`@recursive` (below). Function-local names must be unique even across separate
+blocks. Range ends are checked each iteration.
 Ordinary function arguments and compound-assignment indices evaluate once in
 source order. `&&` and `||` short-circuit.
 
@@ -141,9 +144,55 @@ Use assembly when you need your own main loop, interrupt enable policy or PPU
 sequencing. In ordinary mode `init` runs once and `update` prepares each frame.
 An ordinary `@nmi` callback runs when a prepared frame is published.
 
+`@vblank fn f() { ... }` runs at **every** NMI, after the frame publication
+work, even while the main thread is busy in a long computation and publishes
+nothing. It follows the interrupt rules above (separate frames, `@shared`
+bytes, constant-address `peek`/`poke`), and is responsible for restoring the
+scroll registers if it writes the PPU. NESted Chess uses it to animate its
+thinking indicator and to read a "move now" button during a search.
+
 `@export` retains an otherwise unreachable function. `@noinline` prevents
-source-level inlining. `@inline` and `@cold` are currently accepted hints;
-inlining remains governed by the small pure-function heuristic.
+source-level inlining. `@cold` is an accepted hint.
+
+`@inline` expands a function at statement-level call sites: `f(a);`,
+`let x = f(a);`, `x = f(a);` and `return f(a);`. The function may not `return`
+except as its final statement. Parameters become fresh locals, or are
+substituted directly when the argument is a constant or a variable the body
+cannot change. Small pure single-expression functions are inlined anywhere,
+as before. Statement-level `match` lowers to an if/else chain over a local, so
+calls inside its arms are expanded too.
+
+## Recursion
+
+```nested
+@recursive(20)
+fn search(depth: u8, alpha: i16, beta: i16) -> i16 { ... search(depth - 1, -beta, -alpha) ... }
+```
+
+A `@recursive(N)` function may call itself. Frames stay static: at each self
+call the compiler copies the caller's **live** frame bytes (locals that a later
+statement can still read, and temporaries in use) onto a save stack, and
+restores them on return. Liveness is computed over the function's statements,
+so state that is only read by the call's own arguments, or redefined by the
+call's result, costs nothing. All recursive functions share one save stack:
+`N` bounds the number of active recursive calls along any call path, and the
+stack holds `N` levels of the largest saved frame. Mutual recursion remains an
+error. The hardware-stack allowance includes `2 * N` bytes of return
+addresses. Keep frames small across the recursive call: NESted Chess's search
+saves 9 bytes per level.
+
+## Code generation notes
+
+Byte expressions use memory, immediate and indexed operands directly; 16-bit
+arithmetic is performed byte-wise into memory; signed comparisons use the
+overflow flag; loops test at the bottom. Locals that are never live at the
+same time share frame bytes. An innermost `for` loop whose body cannot touch
+the Y register (no calls, runtime math or 16-bit table elements) keeps its
+counter in Y. A machine pass then threads jumps, tracks register contents
+across straight-line code and forward joins to drop redundant loads, stores
+and `cmp #0`, removes dead stores to temporaries and turns `jsr`+`rts` into
+`jmp`. `arr[raw i - c]` folds the constant into the base address when the
+array is short enough that a wrapped index could never be in bounds.
 
 `@budget(500)` checks an acyclic worst-case **unstalled instruction-cycle** bound,
 including direct callees and conservative branch costs. Loops must disappear
@@ -170,8 +219,11 @@ DMC stalls and PPU phase. Assembly listings show per-instruction min/max costs.
 | `peek(address:u16) -> u8`, `poke(address:u16,value)` | Volatile CPU bus access, including hardware side effects. |
 | `bank(bank)` | Selects a PRG bank. NROM rejects this operation. |
 | `bank_peek(bank,offset:u16) -> u8` | Selects and reads a banked byte. |
+| `vram(address:u16,value)` | Writes any PPU address (attribute bytes, for example). Queued like `tile`. |
 
-The queue holds **40 tile/palette writes per prepared frame**. Overflow drops
+The queue holds **40 tile/palette writes per prepared frame** by default;
+`queue = 16;` in the cartridge block shrinks it and returns the rest of the
+area to the allocator. Overflow drops
 writes and increments RAM `$037F`; the workbench's memory/debug API and game tests
 can inspect it. The shipped games are tested for zero overflow. Copy whole
 screens with rendering disabled rather than submitting them as a frame queue.
@@ -185,10 +237,16 @@ user callback consumes additional time and is the programmer's timing contract.
 | `$0000–$001F` | Runtime scratch/input/publication state |
 | `$0020–$00FF` | Compiler zero-page globals and static frames |
 | `$0100–$01FF` | Hardware stack |
-| `$0200–$02FF` | Shadow OAM |
+| `$0200–$02FF` | Shadow OAM (general RAM when the program never draws sprites) |
 | `$0300–$0377` | Forty three-byte VRAM queue entries |
 | `$037E`, `$037F` | Hardware frame counter; dropped queue write count |
-| `$0400–$07FF` | Compiler RAM globals/arrays and static frames |
+| `$0380–$07FF` | Compiler RAM globals/arrays and static frames |
+
+A program that never calls `sprite` or `hide_sprites` gets page 2 as ordinary
+RAM and renders background only. `stack = 100;` reserves that many bytes for
+the hardware stack and makes the rest of page 1 allocatable; the compiler
+rejects the build if its own stack allowance exceeds the reservation. Arrays
+are placed best-fit across the free regions.
 
 NROM uses a 32-KiB fixed PRG image and 8-KiB CHR ROM. MMC1 and UxROM have a fixed
 last 16-KiB PRG window plus 16-KiB data banks. UxROM uploads the declared 8-KiB CHR

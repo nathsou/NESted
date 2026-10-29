@@ -2,6 +2,7 @@
 //! one-byte publication marker. NMI never touches runtime scratch before a
 //! completed frame is published. DMC playback is disabled by this runtime.
 use crate::{codegen::Mapper, frontend::Program};
+#[allow(clippy::too_many_arguments)]
 pub fn runtime(
     mapper: Mapper,
     p: &Program,
@@ -10,7 +11,12 @@ pub fn runtime(
     nmi: Option<&str>,
     irq: Option<&str>,
     has_init: bool,
+    sprites: bool,
+    queue: usize,
+    vblank: Option<&str>,
 ) -> String {
+    // PPUMASK: background (+ sprites when the program draws any).
+    let mask = if sprites { 30 } else { 10 };
     let mut s = String::from(
         r#"
 __reset:
@@ -129,7 +135,10 @@ __load_chr_ram:
     if p.config.contains_key("palette") {
         s.push_str("bit $2002\nlda #63\nsta $2006\nlda #0\nsta $2006\nldx #0\n__load_palette:\nlda __initial_palette,x\nsta $2007\ninx\ncpx #32\nbne __load_palette\n");
     }
-    s.push_str("jsr __rt_hide_sprites\nlda #15\nsta $4015\nlda #8\nsta $4001\nsta $4005\n");
+    if sprites {
+        s.push_str("jsr __rt_hide_sprites\n");
+    }
+    s.push_str("lda #15\nsta $4015\nlda #8\nsta $4001\nsta $4005\n");
     if let Some(reset) = reset {
         s.push_str(&format!("jsr __fn_{reset}\n__halt:\njmp __halt\n"));
     } else {
@@ -144,7 +153,7 @@ __load_chr_ram:
  sta $2005
  lda #128
  sta $2000
- lda #30
+ lda #MASK
  sta $2001
  lda #1
  sta $0c
@@ -194,10 +203,7 @@ __flush_queue:
 __flush_done:
  lda #0
  sta $0d
- sta $2003
- lda #2
- sta $4014
- lda #0
+OAM_DMA lda #0
  sta $2005
  sta $2005
  lda #128
@@ -211,9 +217,13 @@ __flush_done:
     if reset.is_none() {
         s.push_str("lda #0\nsta $00\n");
     }
+    s.push_str("__nmi_done:\n");
+    if let Some(name) = vblank {
+        // Every vblank, whether or not the main thread published a frame.
+        s.push_str(&format!("jsr __fn_{name}\n"));
+    }
     s.push_str(
         r#"
-__nmi_done:
  pla
  tay
  pla
@@ -279,7 +289,7 @@ __rt_tile:
  lda $0c
  beq __tile_direct
  ldx $0d
- cpx #120
+ cpx #QUEUE
  bcs __queue_full
  lda $0f
  sta $0300,x
@@ -306,6 +316,33 @@ __tile_direct:
  sta $2007
  rts
 
+__rt_vram:
+ lda $0c
+ beq __vram_direct
+ ldx $0d
+ cpx #QUEUE
+ bcs __queue_full
+ lda $05
+ sta $0300,x
+ inx
+ lda $04
+ sta $0300,x
+ inx
+ lda $06
+ sta $0300,x
+ inx
+ stx $0d
+ rts
+__vram_direct:
+ bit $2002
+ lda $05
+ sta $2006
+ lda $04
+ sta $2006
+ lda $06
+ sta $2007
+ rts
+
 __rt_palette:
  lda $04
  and #31
@@ -313,7 +350,7 @@ __rt_palette:
  lda $0c
  beq __palette_direct
  ldx $0d
- cpx #120
+ cpx #QUEUE
  bcs __queue_full
  lda #63
  sta $0300,x
@@ -368,6 +405,7 @@ __text_no_carry:
 __text_done:
  rts
 
+SPRITES_BEGIN
 __rt_sprite:
  lda $04
  cmp #64
@@ -398,6 +436,7 @@ __hide_loop:
  inx
  bne __hide_loop
  rts
+SPRITES_END
 
 __rt_render:
  lda $04
@@ -413,16 +452,12 @@ __render_on:
 __render_wait_vblank:
  bit $2002
  bpl __render_wait_vblank
- lda #0
- sta $2003
- lda #2
- sta $4014
- lda #0
+OAM_DMA lda #0
  sta $2005
  sta $2005
  lda #128
  sta $2000
- lda #30
+ lda #MASK
  sta $2001
  lda #1
  sta $0c
@@ -638,6 +673,22 @@ __div_skip:
  rts
 "#,
     );
+    let dma = if sprites {
+        "sta $2003\n lda #2\n sta $4014\n"
+    } else {
+        ""
+    };
+    s = s
+        .replace("OAM_DMA ", dma)
+        .replace("#MASK", &format!("#{mask}"))
+        .replace("#QUEUE", &format!("#{}", queue * 3));
+    if !sprites {
+        let start = s.find("SPRITES_BEGIN").unwrap();
+        let end = s.find("SPRITES_END").unwrap() + "SPRITES_END".len();
+        s.replace_range(start..end, "");
+    } else {
+        s = s.replace("SPRITES_BEGIN", "").replace("SPRITES_END", "");
+    }
     match mapper{
  Mapper::Nrom=>s.push_str("__rt_bank:\nrts\n"),
  Mapper::Uxrom=>s.push_str("__rt_bank:\nlda $04\nsta $1e\ntax\nsta __bank_bus_values,x\nrts\n__bank_bus_values:\n.byte 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n"),

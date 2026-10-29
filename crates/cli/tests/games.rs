@@ -40,8 +40,10 @@ impl Game {
                     }
                 }
             }
+            // Programs without sprites use page 2 as ordinary RAM.
+            let sprites = self.c.generated.assembly.contains("__rt_hide_sprites");
             assert!(
-                self.n.read_ram(0x0c) == 0 || rows.iter().all(|n| *n <= 8),
+                !sprites || self.n.read_ram(0x0c) == 0 || rows.iter().all(|n| *n <= 8),
                 "NES sprite scanline limit exceeded: {}",
                 rows.iter().max().unwrap()
             );
@@ -409,4 +411,121 @@ fn every_nonogram_puzzle_completes_and_navigation_wraps() {
     assert_eq!(game.byte("level"), 0);
     game.tap(4 | 8);
     assert_eq!(game.byte("level"), 15);
+}
+
+#[test]
+fn chess_plays_a_controller_move_and_the_engine_replies() {
+    let mut g = Game::load("chess");
+    // Menu: Black to NES level 1 (a fast, depth-limited reply), then start.
+    g.tap(16);
+    for _ in 0..4 {
+        g.tap(64);
+    }
+    g.tap(8);
+    g.frames(0, 30);
+    assert_eq!(g.byte("screen_state"), 1, "game started");
+    // The cursor starts on e2: select, two squares up, move.
+    g.tap(1);
+    g.tap(16);
+    g.tap(16);
+    g.tap(1);
+    g.frames(0, 240);
+    let board = g.c.assembly.symbols["__v_board"];
+    assert_eq!(g.n.read_ram(board + 0x34), 1, "white pawn on e4");
+    assert_eq!(g.byte("game_plies"), 2, "1.e4 and the engine's reply");
+    assert_eq!(g.byte("side"), 0, "white to move again");
+}
+
+#[test]
+fn chess_ponders_on_the_humans_time_and_stops_on_a_button() {
+    let mut g = Game::load("chess");
+    // Default level (an unlimited-depth search), out of book from the start.
+    g.tap(8);
+    g.frames(0, 30);
+    let in_book = g.c.assembly.symbols["__v_in_book"];
+    g.n.write_ram(in_book, 0);
+    g.tap(1);
+    g.tap(16);
+    g.tap(16);
+    g.tap(1);
+    let board = g.c.assembly.symbols["__v_board"];
+    let mut frames = 0;
+    while g.byte("game_plies") < 2 {
+        g.frames(0, 1);
+        frames += 1;
+        assert!(frames < 2000, "the engine replies");
+    }
+    let before: Vec<u8> = (0..128).map(|i| g.n.read_ram(board + i)).collect();
+    g.frames(0, 400);
+    assert_eq!(g.byte("pondering"), 1, "pondering while the human thinks");
+    let cursor = g.byte("cursor");
+    g.tap(128);
+    g.frames(0, 30);
+    assert_eq!(g.byte("pondering"), 0, "a button stops pondering");
+    assert_eq!(g.byte("ponder_valid"), 1);
+    let after: Vec<u8> = (0..128).map(|i| g.n.read_ram(board + i)).collect();
+    // Files 8..15 hold piece-list indices, stale on empty squares.
+    let occupied = |i: usize| i & 8 == 0 || before[i & !8] != 0;
+    let diff: Vec<usize> = (0..128)
+        .filter(|&i| occupied(i) && before[i] != after[i])
+        .collect();
+    assert!(
+        diff.is_empty(),
+        "pondering leaves the position as it was: {diff:?}"
+    );
+    g.frames(0, 6);
+    assert_ne!(
+        g.byte("cursor"),
+        cursor,
+        "the button still moves the cursor"
+    );
+    // Play the expected move: the reply comes at once, from the ponder.
+    let from = g.byte("ponder_move") & 0x77;
+    let to = g.byte("ponder_target") & 0x77;
+    for target in [from, to] {
+        loop {
+            let at = g.byte("cursor");
+            let step = if at >> 4 < target >> 4 {
+                16
+            } else if at >> 4 > target >> 4 {
+                32
+            } else if at & 7 < target & 7 {
+                128
+            } else if at & 7 > target & 7 {
+                64
+            } else {
+                break;
+            };
+            g.tap(step);
+        }
+        g.tap(1);
+    }
+    assert_eq!(g.byte("game_plies"), 3, "the expected move was played");
+    g.frames(0, 20);
+    assert_eq!(g.byte("game_plies"), 4, "the pondered answer is instant");
+}
+
+#[test]
+fn chess_bots_play_each_other_at_their_own_levels() {
+    let mut g = Game::load("chess");
+    // White: human -> NES 1 (one step right). Black: NES 5 -> NES 2.
+    g.tap(16);
+    g.tap(16);
+    g.tap(128);
+    g.tap(32);
+    for _ in 0..3 {
+        g.tap(64);
+    }
+    assert_eq!(g.at("players", 0), 1);
+    assert_eq!(g.at("players", 1), 2);
+    g.tap(8);
+    let in_book = g.c.assembly.symbols["__v_in_book"];
+    g.n.write_ram(in_book, 0);
+    let mut frames = 0;
+    while g.byte("game_plies") < 6 {
+        g.frames(0, 1);
+        frames += 1;
+        assert!(frames < 3000, "the bots keep moving without input");
+    }
+    assert_eq!(g.byte("screen_state"), 1, "still playing");
 }

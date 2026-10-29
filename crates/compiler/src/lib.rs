@@ -4,8 +4,10 @@ pub mod codegen;
 pub mod formatter;
 pub mod frontend;
 pub mod json;
+pub mod liveness;
 pub mod lsp;
 pub mod optimizer;
+pub mod peephole;
 mod runtime6502;
 use codegen::*;
 use frontend::*;
@@ -102,12 +104,16 @@ pub fn compile(
                 out
             }
             Initial::Repeat(e, n) => encode(e)?.repeat(*n),
-            Initial::Asset(path) => assets.get(path).cloned().ok_or_else(|| {
-                vec![Diagnostic::error(
-                    global.span,
-                    format!("Missing asset '{path}'"),
-                )]
-            })?,
+            Initial::Asset(path, offset) => {
+                let data = assets.get(path).ok_or_else(|| {
+                    vec![Diagnostic::error(
+                        global.span,
+                        format!("Missing asset '{path}'"),
+                    )]
+                })?;
+                let end = (*offset + global.ty.size()).min(data.len());
+                data.get(*offset..end).unwrap_or_default().to_vec()
+            }
         };
         if global.data.len() != global.ty.size() {
             return Err(vec![Diagnostic::error(
@@ -145,8 +151,9 @@ pub fn compile(
     });
     let machine_changes = if options.optimize {
         let (s, n) = assembler::optimize_machine(&generated.assembly);
+        let (s, m) = peephole::optimize(&s);
         generated.assembly = s;
-        n
+        n + m
     } else {
         0
     };
@@ -366,7 +373,7 @@ pub fn asset_paths(source: &str) -> Vec<String> {
         }
     }
     for g in &p.globals {
-        if let Initial::Asset(path) = &g.initial {
+        if let Initial::Asset(path, _) = &g.initial {
             paths.insert(path.clone());
         }
     }

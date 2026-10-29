@@ -1,0 +1,14 @@
+[package]
+name = "nested-chessbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless benchmark, perft and UCI bridge for the NESted Chess cartridge"
+
+[[bin]]
+name = "chessbench"
+path = "src/main.rs"
+
+[dependencies]
+nested-compiler.workspace = true
+nested-runtime.workspace = true
