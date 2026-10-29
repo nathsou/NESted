@@ -177,24 +177,11 @@ def lines():
     return step + kind + knight
 
 
-def pawn_tables():
-    """Per-file pawn rank masks -> population count, highest and lowest set
-    rank (0 when empty)."""
-    count, high, low = bytearray(256), bytearray(256), bytearray(256)
-    for m in range(256):
-        count[m] = bin(m).count("1")
-        ranks = [r for r in range(8) if m >> r & 1]
-        high[m] = max(ranks) if ranks else 0
-        low[m] = min(ranks) if ranks else 0
-    return count + high + low
-
-
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "chess.pst.bin").write_bytes(packed(MG, "mg") + packed(EG, "eg"))
     (OUT / "chess.zobrist.bin").write_bytes(zobrist())
     (OUT / "chess.lines.bin").write_bytes(lines())
-    (OUT / "chess.pawns.bin").write_bytes(pawn_tables())
     print("PST material offsets:", OFFSETS)
 
 

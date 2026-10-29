@@ -66,25 +66,6 @@ const LINE_KIND: [u8; 256] = asset("assets/chess.lines.bin", 256);
 const KNIGHT_DELTA: [u8; 256] = asset("assets/chess.lines.bin", 512);
 // Line kinds a piece type attacks along: 1 rook lines, 2 bishop lines.
 const SLIDES: [u8; 8] = [0, 0, 0, 2, 1, 3, 0, 0];
-// Pawn structure tables by per-file rank mask.
-const POPCOUNT: [u8; 256] = asset("assets/chess.pawns.bin", 0);
-const HIGH_RANK: [u8; 256] = asset("assets/chess.pawns.bin", 256);
-const LOW_RANK: [u8; 256] = asset("assets/chess.pawns.bin", 512);
-const RANK_BIT: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
-// Ranks strictly above / below a rank, as masks.
-const ABOVE: [u8; 8] = [254, 252, 248, 240, 224, 192, 128, 0];
-const BELOW: [u8; 8] = [0, 1, 3, 7, 15, 31, 63, 127];
-// King shield: the two ranks in front of a king on its first or second rank.
-const SHIELD_WHITE: [u8; 2] = [6, 12];
-const SHIELD_BLACK: [u8; 8] = [0, 0, 0, 0, 0, 0, 48, 96];
-// Bonuses by relative rank, and penalties by pawns on the file.
-const PASSED_MG: [i16; 8] = [0, 0, 5, 10, 20, 35, 55, 0];
-const PASSED_EG: [i16; 8] = [0, 5, 10, 20, 40, 70, 110, 0];
-const ISOLATED_MG: [i16; 8] = [0, -10, -20, -30, -40, -50, -60, -70];
-const ISOLATED_EG: [i16; 8] = [0, -15, -30, -45, -60, -75, -90, -105];
-const DOUBLED_MG: [i16; 8] = [0, 0, -10, -20, -30, -40, -50, -60];
-const DOUBLED_EG: [i16; 8] = [0, 0, -25, -50, -75, -100, -125, -150];
-const SHIELD_MISSING: i16 = 15;
 // Castling rights kept when a move touches a square (a1, e1, h1, a8, e8, h8).
 const CASTLE_KEEP: [u8; 128] = [
     13, 15, 15, 15, 12, 15, 15, 14, 15, 15, 15, 15, 15, 15, 15, 15,
@@ -121,19 +102,17 @@ var in_check: bool = false;
 var all_promotions: bool = false;
 var stop: bool = false;
 var nodes: u16 = 0;
-var nodes_high: u16 = 0;
-var elapsed: u16 = 0;
-var time_limit: u16 = 300;
-var last_tick: u8 = 0;
-var max_depth: u8 = 0;
-var root_from: u8 = 128;
-var root_to: u8 = 0;
-var root_score: i16 = 0;
-var hash_from: u8 = 128;
-var hash_to: u8 = 0;
-var done_depth: u8 = 0;
-var perft_low: u16 = 0;
-var perft_high: u16 = 0;
+@ram var nodes_high: u16 = 0;
+@ram var elapsed: u16 = 0;
+@ram var time_limit: u16 = 300;
+@ram var last_tick: u8 = 0;
+@ram var max_depth: u8 = 0;
+@ram var root_from: u8 = 128;
+@ram var root_to: u8 = 0;
+@ram var root_score: i16 = 0;
+@ram var done_depth: u8 = 0;
+@ram var perft_low: u16 = 0;
+@ram var perft_high: u16 = 0;
 
 // Low half: pieces. Files 8..15 of each rank: index into the piece list.
 var board: [u8; 128] = [0; 128];
@@ -165,15 +144,6 @@ var killer1_from: [u8; 20] = [0; 20];
 var killer1_to: [u8; 20] = [0; 20];
 var killer2_from: [u8; 20] = [0; 20];
 var killer2_to: [u8; 20] = [0; 20];
-
-// Pawn ranks by file, padded so file - 1 and file + 1 stay in the array:
-// white files at 1..8, black at 11..18.
-var pawn_ranks: [u8; 20] = [0; 20];
-var pawn_key: u16 = 0;
-// Pawn-structure scores for four pawn keys, slot = key & 3.
-var pawn_cache_key: [u16; 4] = [65535; 4];
-var pawn_cache_mg: [i16; 4] = [0; 4];
-var pawn_cache_eg: [i16; 4] = [0; 4];
 
 // Harness mailbox: commands are never issued by the console itself.
 var io_cmd: u8 = 0;
@@ -246,97 +216,6 @@ fn place(p: u8, sq: u8, add: bool) {
     }
 }
 
-// Toggles a pawn in the structure masks and the pawn key (self-inverse).
-@inline
-fn toggle_pawn(p: u8, sq: u8) {
-    if (p & 7) == PAWN {
-        if (p & BLACK) == 0 {
-            pawn_ranks[raw (sq & 7) + 1] ^= RANK_BIT[raw sq >> 4];
-            pawn_key ^= u16(Z00[sq]) | (u16(Z01[sq]) << 8);
-        } else {
-            pawn_ranks[raw (sq & 7) + 11] ^= RANK_BIT[raw sq >> 4];
-            pawn_key ^= u16(Z10[sq | 128]) | (u16(Z11[sq | 128]) << 8);
-        }
-    }
-}
-
-// Passed, isolated and doubled pawns, white-relative, into cache slot `slot`.
-fn pawn_structure(slot: u8) {
-    var smg: i16 = 0;
-    var seg: i16 = 0;
-    for f in 1..9 {
-        let w: u8 = pawn_ranks[raw f];
-        if w != 0 {
-            let n: u8 = POPCOUNT[w];
-            if (pawn_ranks[raw f - 1] | pawn_ranks[raw f + 1]) == 0 {
-                smg += ISOLATED_MG[raw n];
-                seg += ISOLATED_EG[raw n];
-            }
-            smg += DOUBLED_MG[raw n];
-            seg += DOUBLED_EG[raw n];
-            let r: u8 = HIGH_RANK[w];
-            if ((pawn_ranks[raw f + 9] | pawn_ranks[raw f + 10] | pawn_ranks[raw f + 11]) & ABOVE[raw r]) == 0 {
-                smg += PASSED_MG[raw r];
-                seg += PASSED_EG[raw r];
-            }
-        }
-        let b: u8 = pawn_ranks[raw f + 10];
-        if b != 0 {
-            let m: u8 = POPCOUNT[b];
-            if (pawn_ranks[raw f + 9] | pawn_ranks[raw f + 11]) == 0 {
-                smg -= ISOLATED_MG[raw m];
-                seg -= ISOLATED_EG[raw m];
-            }
-            smg -= DOUBLED_MG[raw m];
-            seg -= DOUBLED_EG[raw m];
-            let q: u8 = LOW_RANK[b];
-            if ((pawn_ranks[raw f - 1] | pawn_ranks[raw f] | pawn_ranks[raw f + 1]) & BELOW[raw q]) == 0 {
-                smg -= PASSED_MG[raw 7 - q];
-                seg -= PASSED_EG[raw 7 - q];
-            }
-        }
-    }
-    pawn_cache_mg[raw slot] = smg;
-    pawn_cache_eg[raw slot] = seg;
-    pawn_cache_key[raw slot] = pawn_key;
-}
-
-// Middlegame penalty for missing shield pawns in front of each king.
-fn king_shelter() -> i16 {
-    var v: i16 = 0;
-    let wk: u8 = plist[0];
-    let wr: u8 = wk >> 4;
-    if wr < 2 {
-        let mask: u8 = SHIELD_WHITE[raw wr];
-        let f: u8 = (wk & 7) + 1;
-        if (pawn_ranks[raw f] & mask) == 0 {
-            v -= SHIELD_MISSING;
-        }
-        if f > 1 && (pawn_ranks[raw f - 1] & mask) == 0 {
-            v -= SHIELD_MISSING;
-        }
-        if f < 8 && (pawn_ranks[raw f + 1] & mask) == 0 {
-            v -= SHIELD_MISSING;
-        }
-    }
-    let bk: u8 = plist[16];
-    let br: u8 = bk >> 4;
-    if br > 5 {
-        let mask2: u8 = SHIELD_BLACK[raw br];
-        let g: u8 = (bk & 7) + 11;
-        if (pawn_ranks[raw g] & mask2) == 0 {
-            v += SHIELD_MISSING;
-        }
-        if g > 11 && (pawn_ranks[raw g - 1] & mask2) == 0 {
-            v += SHIELD_MISSING;
-        }
-        if g < 18 && (pawn_ranks[raw g + 1] & mask2) == 0 {
-            v += SHIELD_MISSING;
-        }
-    }
-    return v;
-}
-
 // Tapers white-relative (m, e) by phase, from the side to move's view.
 fn taper(m: i16, e: i16) -> i16 {
     var p: u8 = phase;
@@ -382,27 +261,7 @@ fn taper(m: i16, e: i16) -> i16 {
 }
 
 fn evaluate() -> i16 {
-    let slot: u8 = u8(pawn_key) & 3;
-    if pawn_key != pawn_cache_key[raw slot] {
-        pawn_structure(slot);
-    }
-    return taper(mg + pawn_cache_mg[raw slot] + king_shelter(), eg + pawn_cache_eg[raw slot]);
-}
-
-// Material and placement only: structure terms rarely move the score by
-// more than LAZY_MARGIN, so a score that far outside the window stands.
-const LAZY_MARGIN: i16 = 200;
-
-fn evaluate_lazy(alpha: i16, beta: i16) -> i16 {
-    let slot: u8 = u8(pawn_key) & 3;
-    if pawn_key == pawn_cache_key[raw slot] {
-        return taper(mg + pawn_cache_mg[raw slot] + king_shelter(), eg + pawn_cache_eg[raw slot]);
-    }
-    let quick: i16 = taper(mg, eg);
-    if quick - LAZY_MARGIN >= beta || quick + LAZY_MARGIN <= alpha {
-        return quick;
-    }
-    return evaluate();
+    return taper(mg, eg);
 }
 
 // ---------------------------------------------------------------- attacks
@@ -693,8 +552,6 @@ fn move_piece(p: u8, from: u8, to: u8) {
     board[raw to | 8] = index;
     plist[raw index] = to;
     pst_shift(p, from, to);
-    toggle_pawn(p, from);
-    toggle_pawn(p, to);
     hash_piece(p, from);
     hash_piece(p, to);
 }
@@ -747,7 +604,6 @@ fn remove_piece(p: u8, sq: u8) {
     }
     place(p, sq, false);
     hash_piece(p, sq);
-    toggle_pawn(p, sq);
     phase -= PHASE_WEIGHT[p & 7];
 }
 
@@ -851,7 +707,6 @@ fn make(mf: u8, mt: u8) -> bool {
             let kind: u8 = PROMOTIONS[((mt >> 7) | ((mf >> 2) & 2)) & 3];
             let promoted: u8 = kind | (p & BLACK);
             board[raw to] = promoted;
-            toggle_pawn(p, to);
             place(p, to, false);
             hash_piece(p, to);
             place(promoted, to, true);
@@ -910,10 +765,7 @@ fn unmake(mf: u8, mt: u8) {
         // Undo the promotion's evaluation change.
         place(board[raw to], to, false);
         place(p, to, true);
-    } else {
-        toggle_pawn(p, to);
     }
-    toggle_pawn(p, from);
     unshift(p, from, to);
     board[raw from] = p;
     let index: u8 = board[raw to | 8];
@@ -926,13 +778,11 @@ fn unmake(mf: u8, mt: u8) {
         board[raw victim] = pawn;
         restore_piece(side ^ BLACK, victim, undo_index[raw u]);
         place(pawn, victim, true);
-        toggle_pawn(pawn, victim);
     } else {
         board[raw to] = captured;
         if captured != 0 {
             restore_piece(side ^ BLACK, to, undo_index[raw u]);
             place(captured, to, true);
-            toggle_pawn(captured, to);
         }
     }
     if (p & 7) == KING {
@@ -1232,7 +1082,7 @@ fn qsearch(alpha_in: i16, beta: i16) -> i16 {
     if stop {
         return 0;
     }
-    let stand: i16 = evaluate_lazy(alpha, beta);
+    let stand: i16 = evaluate();
     if stand >= beta || ply >= MAXPLY - 1 {
         return stand;
     }
@@ -1628,10 +1478,6 @@ fn setup(to_move: u8, rights: u8, ep_square: u8) {
     phase = 0;
     h0 = 0;
     h1 = 0;
-    pawn_key = 0;
-    for f in 0..20 {
-        pawn_ranks[f] = 0;
-    }
     var next_white: u8 = 1;
     var next_black: u8 = 17;
     // Kings first, then knights, bishops, rooks, queens and pawns.
@@ -1656,7 +1502,6 @@ fn setup(to_move: u8, rights: u8, ep_square: u8) {
                     }
                     place(p, sq, true);
                     hash_piece(p, sq);
-                    toggle_pawn(p, sq);
                     phase += PHASE_WEIGHT[p & 7];
                 }
             }

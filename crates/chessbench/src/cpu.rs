@@ -20,7 +20,8 @@ pub struct Machine {
     v: bool,
     n: bool,
     pub ram: [u8; 2048],
-    prg: Vec<u8>,
+    /// PRG mirrored to a full 32 KiB so reads need only a mask.
+    prg: Box<[u8; 32768]>,
     pub cycles: u64,
     next_frame: u64,
     pub frames: u64,
@@ -45,7 +46,11 @@ impl Machine {
             return Err("chessbench supports NROM only".into());
         }
         let banks = rom[4] as usize;
-        let prg = rom[16..16 + banks * 16384].to_vec();
+        let image = &rom[16..16 + banks * 16384];
+        let mut prg = Box::new([0u8; 32768]);
+        for (i, b) in prg.iter_mut().enumerate() {
+            *b = image[i % image.len()];
+        }
         let mut m = Self {
             a: 0,
             x: 0,
@@ -96,10 +101,7 @@ impl Machine {
                 }
                 bit | 0x40
             }
-            0x8000..=0xffff => {
-                let len = self.prg.len();
-                self.prg[(addr as usize - 0x8000) % len]
-            }
+            0x8000..=0xffff => self.prg[(addr & 0x7fff) as usize],
             _ => 0,
         }
     }

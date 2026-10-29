@@ -240,7 +240,7 @@ user callback consumes additional time and is the programmer's timing contract.
 | `$0200–$02FF` | Shadow OAM (general RAM when the program never draws sprites) |
 | `$0300–$0377` | Forty three-byte VRAM queue entries |
 | `$037E`, `$037F` | Hardware frame counter; dropped queue write count |
-| `$0400–$07FF` | Compiler RAM globals/arrays and static frames |
+| `$0380–$07FF` | Compiler RAM globals/arrays and static frames |
 
 A program that never calls `sprite` or `hide_sprites` gets page 2 as ordinary
 RAM and renders background only. `stack = 100;` reserves that many bytes for

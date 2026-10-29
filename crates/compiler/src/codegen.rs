@@ -2221,7 +2221,7 @@ struct Ram {
 }
 impl Ram {
     fn new(sprites: bool, queue: usize, stack: Option<usize>) -> Self {
-        let mut regions = vec![(0x400, 0x800), (0x300 + queue * 3, 0x37e)];
+        let mut regions = vec![(0x400, 0x800), (0x300 + queue * 3, 0x37e), (0x380, 0x400)];
         if !sprites {
             regions.push((0x200, 0x300));
         }
