@@ -1324,7 +1324,11 @@ const REVERSE_FUTILITY: [i16; 4] = [0, 85, 180, 290];
         depth += 1;
     }
     if depth == 0 {
-        return qsearch(alpha, beta);
+        // A bare king's stalemates are invisible to quiescence: search it.
+        if piece_count[raw side >> 3] != 1 {
+            return qsearch(alpha, beta);
+        }
+        depth = 1;
     }
     count_node();
     if stop {
@@ -1471,7 +1475,9 @@ const REVERSE_FUTILITY: [i16; 4] = [0, 85, 180, 290];
         i += 1;
     }
     msp = first;
-    if legal == 0 && (flags & FLAG_FUTILE) == 0 {
+    // Futile nodes skip quiet moves only after a legal one, so no legal
+    // move here means mate or stalemate.
+    if legal == 0 {
         if (flags & FLAG_CHECK) != 0 {
             return i16(ply) - MATE;
         }
