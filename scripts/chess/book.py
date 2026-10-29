@@ -4,9 +4,10 @@
 Positions are expanded from the initial position with a probability budget:
 Stockfish's best move inherits most of a position's weight, near-equal
 alternatives the rest, and positions below a threshold are not expanded.
-Each entry is 5 bytes: the engine's 24-bit Zobrist key of the position
-(h0, h1, h2) and the move as 0x88 from/to squares. Keys are computed exactly
-as the cartridge does, from games/assets/chess.zobrist.bin.
+Each position is stored as its 16-bit key (the cartridge's h0, h1 Zobrist
+bytes), a move count, then that many moves as (from, to) squares 0..63.
+Keys are computed exactly as the cartridge does, from
+games/assets/chess.zobrist.bin.
 
   scripts/chess/book.py --entries 700
 """
@@ -68,6 +69,21 @@ def ep_after(board, move):
     return None
 
 
+def encode(entries):
+    """[(key16, from64, to64)] -> grouped book bytes."""
+    groups = {}
+    for key16, f, t in entries:
+        moves = groups.setdefault(key16, [])
+        if (f, t) not in moves:
+            moves.append((f, t))
+    data = bytearray()
+    for (h0, h1), moves in groups.items():
+        data += bytes([h0, h1, len(moves)])
+        for f, t in moves:
+            data += bytes([f, t])
+    return bytes(data)
+
+
 def main():
     a = argparse.ArgumentParser()
     a.add_argument("--entries", type=int, default=700)
@@ -105,9 +121,7 @@ def main():
             child.push(move)
             frontier.append((weight * share / total, child, child_ep))
     engine.quit()
-    data = bytearray()
-    for (h0, h1, h2), move in entries:
-        data += bytes([h0, h1, h2, sq88(move.from_square), sq88(move.to_square)])
+    data = encode([((h0, h1), move.from_square, move.to_square) for (h0, h1, _), move in entries])
     (ASSETS / "chess.book.bin").write_bytes(bytes(data))
     print(f"{len(entries)} entries, {len(seen)} positions, {len(data)} bytes")
 

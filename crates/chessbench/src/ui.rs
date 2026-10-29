@@ -6,11 +6,49 @@
 //! `shot:NAME` writes NAME.png into the output directory.
 use std::path::Path;
 
-pub fn run(rom: &[u8], script: &str, out: &Path) -> Result<(), String> {
+/// RAM addresses of the mailbox and board, for `fen:` steps.
+pub struct Symbols {
+    pub board: u16,
+    pub io_arg: u16,
+    pub io_cmd: u16,
+}
+
+pub fn run(rom: &[u8], script: &str, out: &Path, sym: &Symbols) -> Result<(), String> {
     let mut emu = nested_runtime::Emulator::new(rom.to_vec(), 44100.0)?;
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     for step in script.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let (what, arg) = step.split_once(':').ok_or(format!("bad step {step}"))?;
+        if what == "fen" {
+            // FEN with '_' for spaces: board, side, castling only.
+            let fen = arg.replace('_', " ");
+            let mut parts = fen.split_whitespace();
+            for i in 0..128 {
+                emu.write_ram(sym.board + i, 0);
+            }
+            let (mut rank, mut file) = (7i32, 0i32);
+            for c in parts.next().unwrap_or("").chars() {
+                match c {
+                    '/' => {
+                        rank -= 1;
+                        file = 0;
+                    }
+                    '1'..='8' => file += c as i32 - '0' as i32,
+                    _ => {
+                        let t = " pnbrqk".find(c.to_ascii_lowercase()).unwrap_or(0) as u8;
+                        let color = if c.is_ascii_lowercase() { 8 } else { 0 };
+                        emu.write_ram(sym.board + (rank * 16 + file) as u16, t | color);
+                        file += 1;
+                    }
+                }
+            }
+            let side = if parts.next() == Some("b") { 8 } else { 0 };
+            emu.write_ram(sym.io_arg, side);
+            emu.write_ram(sym.io_arg + 1, 0);
+            emu.write_ram(sym.io_arg + 2, 128);
+            emu.write_ram(sym.io_cmd, 5);
+            emu.frame(0)?;
+            continue;
+        }
         if what == "shot" {
             save_png(emu.pixels(), &out.join(format!("{arg}.png")))?;
             continue;

@@ -111,14 +111,32 @@ impl Generator<'_> {
                 if reg == 'y' && self.y_counter.is_some() {
                     return None;
                 }
+                // `arr[i - c]` reads `arr-c` indexed by i: an index that
+                // wrapped would be out of bounds when len + c <= 256.
+                let (index, offset) = match &index.kind {
+                    ExprKind::Binary(op, a, b) if op == "-" => {
+                        match (eval_const(b, &self.constants), &s.ty) {
+                            (Some(c), Ty::Array(_, len)) if c > 0 && *len as i64 + c <= 256 => {
+                                (a.as_ref(), -c)
+                            }
+                            _ => (index.as_ref(), 0),
+                        }
+                    }
+                    _ => (index.as_ref(), 0),
+                };
                 let index = self.byte_operand(index, reg)?;
                 if index.prep.is_some() {
                     return None;
                 }
                 let load = if reg == 'x' { "ldx" } else { "ldy" };
+                let base = if offset == 0 {
+                    s.label.clone()
+                } else {
+                    format!("{}{offset}", s.label)
+                };
                 Some(Operand {
                     prep: Some((load, index.text)),
-                    text: format!("{},{reg}", s.label),
+                    text: format!("{base},{reg}"),
                 })
             }
             _ => None,
@@ -392,8 +410,27 @@ impl Generator<'_> {
                         }
                     }
                 }
-                let lw = self.wide_value(l)?;
-                let rw = self.wide_value(r)?;
+                // A 16-bit table element as the right operand: index into Y
+                // first, then use `tab,y` / `tab+1,y` directly.
+                let (lw, rw) = match (self.wide_operand(l), self.wide_array(r)) {
+                    (Some(lw), Some((label, index))) => {
+                        self.byte_expr(index)?;
+                        self.op("asl", "a");
+                        self.op("tay", "");
+                        (
+                            lw,
+                            Wide {
+                                lo: format!("{label},y"),
+                                hi: format!("{label}+1,y"),
+                            },
+                        )
+                    }
+                    _ => {
+                        let lw = self.wide_value(l)?;
+                        let rw = self.wide_value(r)?;
+                        (lw, rw)
+                    }
+                };
                 let inst = match op.as_str() {
                     "+" => "adc",
                     "-" => "sbc",

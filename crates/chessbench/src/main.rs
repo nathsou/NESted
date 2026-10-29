@@ -382,7 +382,12 @@ fn run() -> Result<(), String> {
             let script = args.next().ok_or("ui needs a script")?;
             let out = PathBuf::from(args.next().unwrap_or_else(|| "ui-shots".into()));
             let rom = LAST_ROM.with(|r| r.borrow().clone());
-            ui::run(&rom, &script, &out)?;
+            let sym = ui::Symbols {
+                board: c.symbol("board"),
+                io_arg: c.symbol("io_arg"),
+                io_cmd: c.symbol("io_cmd"),
+            };
+            ui::run(&rom, &script, &out, &sym)?;
         }
         "go" => {
             let depth: u8 = args.next().map(|s| s.parse().unwrap()).unwrap_or(3);
@@ -406,50 +411,6 @@ fn run() -> Result<(), String> {
                     (a..b).map(|i| uci_move(c.m.peek(from + i), c.m.peek(to + i))).collect()
                 };
                 println!("{}|{}", list(0, split).join(" "), list(split, end).join(" "));
-            }
-        }
-        "qs" => {
-            for line in io::stdin().lock().lines() {
-                let fen = line.map_err(|e| e.to_string())?;
-                c.setup_fen(&fen)?;
-                c.command(8, &[], 100000)?;
-                println!("{}", i16::from_le_bytes([c.out(0), c.out(1)]));
-            }
-        }
-        "dbg" => {
-            for line in io::stdin().lock().lines() {
-                let fen = line.map_err(|e| e.to_string())?;
-                c.setup_fen(&fen)?;
-                c.think(60000, 1)?;
-                let from = c.symbol("move_from");
-                let to = c.symbol("move_to");
-                let list: Vec<String> = (0..48).map(|i| uci_move(c.m.peek(from + i), c.m.peek(to + i))).collect();
-                println!("{}", list.join(" "));
-                for k in 0..4u16 {
-                    println!("{} {}", uci_move(c.out(k * 4), c.out(k * 4 + 1)), i16::from_le_bytes([c.out(k * 4 + 2), c.out(k * 4 + 3)]));
-                }
-            }
-        }
-        "d1" => {
-            for line in io::stdin().lock().lines() {
-                let fen = line.map_err(|e| e.to_string())?;
-                c.setup_fen(&fen)?;
-                c.command(9, &[], 100000)?;
-                println!("{} {}", uci_move(c.out(2), c.out(3)), i16::from_le_bytes([c.out(0), c.out(1)]));
-            }
-        }
-        "hash" => {
-            // Lines of UCI moves from the initial position.
-            for line in io::stdin().lock().lines() {
-                let line = line.map_err(|e| e.to_string())?;
-                c.new_game()?;
-                for m in line.split_whitespace() {
-                    if !c.play(m)? {
-                        return Err(format!("illegal {m}"));
-                    }
-                }
-                c.command(10, &[], 10)?;
-                println!("{} {} {}", c.out(0), c.out(1), c.out(2));
             }
         }
         "eval" => {

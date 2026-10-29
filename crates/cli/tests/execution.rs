@@ -405,3 +405,31 @@ fn update() {}
         assert_eq!(read(&c, &mut n, "last_seen") & 255, 19);
     }
 }
+#[test]
+fn folded_index_offsets_and_wide_table_operands() {
+    let source = r#"
+const TABLE: [i16; 8] = [-300, 200, -100, 50, 1000, -2000, 7, 30000];
+var bytes: [u8; 16] = [0; 16];
+var neighbours: u16 = 0;
+var total: i16 = 0;
+fn init() {
+    for k in 0..16 { bytes[raw k] = k * 3 + 1; }
+    for j in 1..16 { neighbours += u16(bytes[raw j - 1]) + u16(bytes[raw j]); }
+    for n in 0..8 { total += TABLE[raw n]; total -= TABLE[raw 7 - n] >> 1; }
+}
+fn update() {}
+"#;
+    let bytes: Vec<u16> = (0..16).map(|k| k * 3 + 1).collect();
+    let neighbours: u16 = (1..16).map(|j| bytes[j - 1] + bytes[j]).sum();
+    let table: [i16; 8] = [-300, 200, -100, 50, 1000, -2000, 7, 30000];
+    let mut total: i16 = 0;
+    for n in 0..8 {
+        total = total.wrapping_add(table[n]);
+        total = total.wrapping_sub(table[7 - n] >> 1);
+    }
+    for optimize in [false, true] {
+        let (c, mut n) = run(source, optimize, 10);
+        assert_eq!(read(&c, &mut n, "neighbours"), neighbours);
+        assert_eq!(read(&c, &mut n, "total") as i16, total);
+    }
+}

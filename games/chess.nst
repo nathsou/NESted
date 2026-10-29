@@ -51,26 +51,40 @@ const Z_TABLE: [u8; 16] = [0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 2, 2, 0];
 const Z_OFFSET: [u8; 16] = [0, 0, 8, 128, 136, 0, 8, 0, 0, 128, 136, 0, 8, 128, 136, 0];
 const Z00: [u8; 256] = asset("assets/chess.zobrist.bin", 0);
 const Z01: [u8; 256] = asset("assets/chess.zobrist.bin", 256);
-const Z02: [u8; 256] = asset("assets/chess.zobrist.bin", 512);
 const Z10: [u8; 256] = asset("assets/chess.zobrist.bin", 768);
 const Z11: [u8; 256] = asset("assets/chess.zobrist.bin", 1024);
-const Z12: [u8; 256] = asset("assets/chess.zobrist.bin", 1280);
 const Z20: [u8; 256] = asset("assets/chess.zobrist.bin", 1536);
 const Z21: [u8; 256] = asset("assets/chess.zobrist.bin", 1792);
-const Z22: [u8; 256] = asset("assets/chess.zobrist.bin", 2048);
 const ZC0: [u8; 16] = asset("assets/chess.zobrist.bin", 2304);
 const ZC1: [u8; 16] = asset("assets/chess.zobrist.bin", 2320);
-const ZC2: [u8; 16] = asset("assets/chess.zobrist.bin", 2336);
 const ZE0: [u8; 8] = asset("assets/chess.zobrist.bin", 2352);
 const ZE1: [u8; 8] = asset("assets/chess.zobrist.bin", 2360);
-const ZE2: [u8; 8] = asset("assets/chess.zobrist.bin", 2368);
-const ZS: [u8; 3] = asset("assets/chess.zobrist.bin", 2376);
+const ZS: [u8; 2] = asset("assets/chess.zobrist.bin", 2376);
 // Queen-line step and kind (1 rook, 2 bishop) by 0x88 delta + 119.
 const LINE_STEP: [u8; 256] = asset("assets/chess.lines.bin", 0);
 const LINE_KIND: [u8; 256] = asset("assets/chess.lines.bin", 256);
 const KNIGHT_DELTA: [u8; 256] = asset("assets/chess.lines.bin", 512);
 // Line kinds a piece type attacks along: 1 rook lines, 2 bishop lines.
 const SLIDES: [u8; 8] = [0, 0, 0, 2, 1, 3, 0, 0];
+// Pawn structure tables by per-file rank mask.
+const POPCOUNT: [u8; 256] = asset("assets/chess.pawns.bin", 0);
+const HIGH_RANK: [u8; 256] = asset("assets/chess.pawns.bin", 256);
+const LOW_RANK: [u8; 256] = asset("assets/chess.pawns.bin", 512);
+const RANK_BIT: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+// Ranks strictly above / below a rank, as masks.
+const ABOVE: [u8; 8] = [254, 252, 248, 240, 224, 192, 128, 0];
+const BELOW: [u8; 8] = [0, 1, 3, 7, 15, 31, 63, 127];
+// King shield: the two ranks in front of a king on its first or second rank.
+const SHIELD_WHITE: [u8; 2] = [6, 12];
+const SHIELD_BLACK: [u8; 8] = [0, 0, 0, 0, 0, 0, 48, 96];
+// Bonuses by relative rank, and penalties by pawns on the file.
+const PASSED_MG: [i16; 8] = [0, 0, 5, 10, 20, 35, 55, 0];
+const PASSED_EG: [i16; 8] = [0, 5, 10, 20, 40, 70, 110, 0];
+const ISOLATED_MG: [i16; 8] = [0, -10, -20, -30, -40, -50, -60, -70];
+const ISOLATED_EG: [i16; 8] = [0, -15, -30, -45, -60, -75, -90, -105];
+const DOUBLED_MG: [i16; 8] = [0, 0, -10, -20, -30, -40, -50, -60];
+const DOUBLED_EG: [i16; 8] = [0, 0, -25, -50, -75, -100, -125, -150];
+const SHIELD_MISSING: i16 = 15;
 // Castling rights kept when a move touches a square (a1, e1, h1, a8, e8, h8).
 const CASTLE_KEEP: [u8; 128] = [
     13, 15, 15, 15, 12, 15, 15, 14, 15, 15, 15, 15, 15, 15, 15, 15,
@@ -83,10 +97,10 @@ const CASTLE_KEEP: [u8; 128] = [
     7, 15, 15, 15, 3, 15, 15, 11, 15, 15, 15, 15, 15, 15, 15, 15,
 ];
 const START: [u8; 8] = [4, 2, 3, 5, 6, 3, 2, 4];
-// Opening book (scripts/chess/book.py): 5-byte entries of position key
-// (h0, h1, h2) and move (0x88 from, to).
-const BOOK_BYTES: u16 = 3000;
-const BOOK: [u8; 3000] = asset("assets/chess.book.bin");
+// Opening book (scripts/chess/book.py): per position its key (h0, h1), a
+// move count, then (from, to) squares 0..63 for each move.
+const BOOK_BYTES: u16 = 1887;
+const BOOK: [u8; 1887] = asset("assets/chess.book.bin");
 // Piece-list order: king first, then the order quiet moves are tried in.
 const LIST_ORDER: [u8; 6] = [6, 2, 3, 4, 5, 1];
 
@@ -98,7 +112,6 @@ var castle: u8 = 15;
 var ep: u8 = 128;
 var h0: u8 = 0;
 var h1: u8 = 0;
-var h2: u8 = 0;
 var mg: i16 = 0;
 var eg: i16 = 0;
 var phase: u8 = 0;
@@ -142,7 +155,6 @@ var undo_index: [u8; 20] = [0; 20];
 var undo_castle: [u8; 20] = [0; 20];
 var undo_ep: [u8; 20] = [0; 20];
 var undo_fifty: [u8; 20] = [0; 20];
-var undo_h2: [u8; 20] = [0; 20];
 // Hash of recent positions in the game and search path, by game ply & 31.
 var history0: [u8; 32] = [0; 32];
 var history1: [u8; 32] = [0; 32];
@@ -154,8 +166,18 @@ var killer1_to: [u8; 20] = [0; 20];
 var killer2_from: [u8; 20] = [0; 20];
 var killer2_to: [u8; 20] = [0; 20];
 
+// Pawn ranks by file, padded so file - 1 and file + 1 stay in the array:
+// white files at 1..8, black at 11..18.
+var pawn_ranks: [u8; 20] = [0; 20];
+var pawn_key: u16 = 0;
+// Pawn-structure scores for four pawn keys, slot = key & 3.
+var pawn_cache_key: [u16; 4] = [65535; 4];
+var pawn_cache_mg: [i16; 4] = [0; 4];
+var pawn_cache_eg: [i16; 4] = [0; 4];
+
 // Harness mailbox: commands are never issued by the console itself.
 var io_cmd: u8 = 0;
+var in_book: bool = true;
 var io_arg: [u8; 8] = [0; 8];
 var io_out: [u8; 10] = [0; 10];
 
@@ -167,17 +189,14 @@ fn hash_piece(p: u8, sq: u8) {
         0 => {
             h0 ^= Z00[i];
             h1 ^= Z01[i];
-            h2 ^= Z02[i];
         }
         1 => {
             h0 ^= Z10[i];
             h1 ^= Z11[i];
-            h2 ^= Z12[i];
         }
         _ => {
             h0 ^= Z20[i];
             h1 ^= Z21[i];
-            h2 ^= Z22[i];
         }
     }
 }
@@ -187,12 +206,10 @@ fn hash_state() {
     let c: u8 = castle & 15;
     h0 ^= ZC0[c];
     h1 ^= ZC1[c];
-    h2 ^= ZC2[c];
     if ep != NONE {
         let f: u8 = ep & 7;
         h0 ^= ZE0[f];
         h1 ^= ZE1[f];
-        h2 ^= ZE2[f];
     }
 }
 
@@ -200,7 +217,6 @@ fn hash_state() {
 fn hash_side() {
     h0 ^= ZS[0];
     h1 ^= ZS[1];
-    h2 ^= ZS[2];
 }
 
 // ---------------------------------------------------------------- evaluation
@@ -230,32 +246,163 @@ fn place(p: u8, sq: u8, add: bool) {
     }
 }
 
-fn evaluate() -> i16 {
+// Toggles a pawn in the structure masks and the pawn key (self-inverse).
+@inline
+fn toggle_pawn(p: u8, sq: u8) {
+    if (p & 7) == PAWN {
+        if (p & BLACK) == 0 {
+            pawn_ranks[raw (sq & 7) + 1] ^= RANK_BIT[raw sq >> 4];
+            pawn_key ^= u16(Z00[sq]) | (u16(Z01[sq]) << 8);
+        } else {
+            pawn_ranks[raw (sq & 7) + 11] ^= RANK_BIT[raw sq >> 4];
+            pawn_key ^= u16(Z10[sq | 128]) | (u16(Z11[sq | 128]) << 8);
+        }
+    }
+}
+
+// Passed, isolated and doubled pawns, white-relative, into cache slot `slot`.
+fn pawn_structure(slot: u8) {
+    var smg: i16 = 0;
+    var seg: i16 = 0;
+    for f in 1..9 {
+        let w: u8 = pawn_ranks[raw f];
+        if w != 0 {
+            let n: u8 = POPCOUNT[w];
+            if (pawn_ranks[raw f - 1] | pawn_ranks[raw f + 1]) == 0 {
+                smg += ISOLATED_MG[raw n];
+                seg += ISOLATED_EG[raw n];
+            }
+            smg += DOUBLED_MG[raw n];
+            seg += DOUBLED_EG[raw n];
+            let r: u8 = HIGH_RANK[w];
+            if ((pawn_ranks[raw f + 9] | pawn_ranks[raw f + 10] | pawn_ranks[raw f + 11]) & ABOVE[raw r]) == 0 {
+                smg += PASSED_MG[raw r];
+                seg += PASSED_EG[raw r];
+            }
+        }
+        let b: u8 = pawn_ranks[raw f + 10];
+        if b != 0 {
+            let m: u8 = POPCOUNT[b];
+            if (pawn_ranks[raw f + 9] | pawn_ranks[raw f + 11]) == 0 {
+                smg -= ISOLATED_MG[raw m];
+                seg -= ISOLATED_EG[raw m];
+            }
+            smg -= DOUBLED_MG[raw m];
+            seg -= DOUBLED_EG[raw m];
+            let q: u8 = LOW_RANK[b];
+            if ((pawn_ranks[raw f - 1] | pawn_ranks[raw f] | pawn_ranks[raw f + 1]) & BELOW[raw q]) == 0 {
+                smg -= PASSED_MG[raw 7 - q];
+                seg -= PASSED_EG[raw 7 - q];
+            }
+        }
+    }
+    pawn_cache_mg[raw slot] = smg;
+    pawn_cache_eg[raw slot] = seg;
+    pawn_cache_key[raw slot] = pawn_key;
+}
+
+// Middlegame penalty for missing shield pawns in front of each king.
+fn king_shelter() -> i16 {
+    var v: i16 = 0;
+    let wk: u8 = plist[0];
+    let wr: u8 = wk >> 4;
+    if wr < 2 {
+        let mask: u8 = SHIELD_WHITE[raw wr];
+        let f: u8 = (wk & 7) + 1;
+        if (pawn_ranks[raw f] & mask) == 0 {
+            v -= SHIELD_MISSING;
+        }
+        if f > 1 && (pawn_ranks[raw f - 1] & mask) == 0 {
+            v -= SHIELD_MISSING;
+        }
+        if f < 8 && (pawn_ranks[raw f + 1] & mask) == 0 {
+            v -= SHIELD_MISSING;
+        }
+    }
+    let bk: u8 = plist[16];
+    let br: u8 = bk >> 4;
+    if br > 5 {
+        let mask2: u8 = SHIELD_BLACK[raw br];
+        let g: u8 = (bk & 7) + 11;
+        if (pawn_ranks[raw g] & mask2) == 0 {
+            v += SHIELD_MISSING;
+        }
+        if g > 11 && (pawn_ranks[raw g - 1] & mask2) == 0 {
+            v += SHIELD_MISSING;
+        }
+        if g < 18 && (pawn_ranks[raw g + 1] & mask2) == 0 {
+            v += SHIELD_MISSING;
+        }
+    }
+    return v;
+}
+
+// Tapers white-relative (m, e) by phase, from the side to move's view.
+fn taper(m: i16, e: i16) -> i16 {
     var p: u8 = phase;
     if p > 24 {
         p = 24;
     }
-    var d: i16 = mg - eg;
+    var d: i16 = m - e;
     if d > 1000 {
         d = 1000;
     } else if d < -1000 {
         d = -1000;
     }
-    // eg + (mg - eg) * phase / 32, by shift-and-add.
-    var w: u8 = PHASE_32[raw p];
+    // e + (m - e) * phase / 32, by unrolled shift-and-add (phase <= 32).
+    let w: u8 = PHASE_32[raw p];
     var product: i16 = 0;
-    while w != 0 {
+    if (w & 32) != 0 {
+        product = d << 5;
+    } else {
         if (w & 1) != 0 {
+            product = d;
+        }
+        d = d << 1;
+        if (w & 2) != 0 {
             product += d;
         }
         d = d << 1;
-        w = w >> 1;
+        if (w & 4) != 0 {
+            product += d;
+        }
+        d = d << 1;
+        if (w & 8) != 0 {
+            product += d;
+        }
+        if (w & 16) != 0 {
+            product += d << 1;
+        }
     }
-    let v: i16 = eg + (product >> 5);
+    let v: i16 = e + (product >> 5);
     if side == 0 {
         return v + 10;
     }
     return 10 - v;
+}
+
+fn evaluate() -> i16 {
+    let slot: u8 = u8(pawn_key) & 3;
+    if pawn_key != pawn_cache_key[raw slot] {
+        pawn_structure(slot);
+    }
+    return taper(mg + pawn_cache_mg[raw slot] + king_shelter(), eg + pawn_cache_eg[raw slot]);
+}
+
+// Material and placement only: structure terms rarely move the score by
+// more than LAZY_MARGIN, so a score that far outside the window stands.
+const LAZY_MARGIN: i16 = 200;
+
+fn evaluate_lazy(alpha: i16, beta: i16) -> i16 {
+    let slot: u8 = u8(pawn_key) & 3;
+    if pawn_key == pawn_cache_key[raw slot] {
+        return taper(mg + pawn_cache_mg[raw slot] + king_shelter(), eg + pawn_cache_eg[raw slot]);
+    }
+    let quick: i16 = taper(mg, eg);
+    if quick - LAZY_MARGIN >= beta || quick + LAZY_MARGIN <= alpha {
+        return quick;
+    }
+    return evaluate();
 }
 
 // ---------------------------------------------------------------- attacks
@@ -546,6 +693,8 @@ fn move_piece(p: u8, from: u8, to: u8) {
     board[raw to | 8] = index;
     plist[raw index] = to;
     pst_shift(p, from, to);
+    toggle_pawn(p, from);
+    toggle_pawn(p, to);
     hash_piece(p, from);
     hash_piece(p, to);
 }
@@ -598,6 +747,7 @@ fn remove_piece(p: u8, sq: u8) {
     }
     place(p, sq, false);
     hash_piece(p, sq);
+    toggle_pawn(p, sq);
     phase -= PHASE_WEIGHT[p & 7];
 }
 
@@ -668,14 +818,12 @@ fn make(mf: u8, mt: u8) -> bool {
     undo_castle[raw u] = castle;
     undo_ep[raw u] = ep;
     undo_fifty[raw u] = fifty;
-    undo_h2[raw u] = h2;
     history0[g] = h0;
     history1[g] = h1;
     if ep != NONE {
         let f: u8 = ep & 7;
         h0 ^= ZE0[f];
         h1 ^= ZE1[f];
-        h2 ^= ZE2[f];
         ep = NONE;
     }
     fifty += 1;
@@ -693,7 +841,6 @@ fn make(mf: u8, mt: u8) -> bool {
             let e: u8 = ep & 7;
             h0 ^= ZE0[e];
             h1 ^= ZE1[e];
-            h2 ^= ZE2[e];
         } else if to == undo_ep[raw u] {
             let victim: u8 = to ^ 16;
             undo_captured[raw u] = 0x40;
@@ -704,6 +851,7 @@ fn make(mf: u8, mt: u8) -> bool {
             let kind: u8 = PROMOTIONS[((mt >> 7) | ((mf >> 2) & 2)) & 3];
             let promoted: u8 = kind | (p & BLACK);
             board[raw to] = promoted;
+            toggle_pawn(p, to);
             place(p, to, false);
             hash_piece(p, to);
             place(promoted, to, true);
@@ -723,7 +871,6 @@ fn make(mf: u8, mt: u8) -> bool {
     if rights != castle {
         h0 ^= ZC0[raw castle] ^ ZC0[raw rights];
         h1 ^= ZC1[raw castle] ^ ZC1[raw rights];
-        h2 ^= ZC2[raw castle] ^ ZC2[raw rights];
         castle = rights;
     }
     hash_side();
@@ -763,7 +910,10 @@ fn unmake(mf: u8, mt: u8) {
         // Undo the promotion's evaluation change.
         place(board[raw to], to, false);
         place(p, to, true);
+    } else {
+        toggle_pawn(p, to);
     }
+    toggle_pawn(p, from);
     unshift(p, from, to);
     board[raw from] = p;
     let index: u8 = board[raw to | 8];
@@ -776,11 +926,13 @@ fn unmake(mf: u8, mt: u8) {
         board[raw victim] = pawn;
         restore_piece(side ^ BLACK, victim, undo_index[raw u]);
         place(pawn, victim, true);
+        toggle_pawn(pawn, victim);
     } else {
         board[raw to] = captured;
         if captured != 0 {
             restore_piece(side ^ BLACK, to, undo_index[raw u]);
             place(captured, to, true);
+            toggle_pawn(captured, to);
         }
     }
     if (p & 7) == KING {
@@ -800,7 +952,7 @@ fn unmake(mf: u8, mt: u8) {
     }
     if (mf & 0x80) != 0 {
         phase -= PHASE_WEIGHT[PROMOTIONS[((mt >> 7) | ((mf >> 2) & 2)) & 3] & 7];
-    }    h2 = undo_h2[raw u];
+    }
     let g: u8 = gply & 31;
     h0 = history0[g];
     h1 = history1[g];
@@ -835,14 +987,12 @@ fn make_null() {
     let g: u8 = gply & 31;
     undo_ep[raw u] = ep;
     undo_fifty[raw u] = fifty;
-    undo_h2[raw u] = h2;
     history0[g] = h0;
     history1[g] = h1;
     if ep != NONE {
         let f: u8 = ep & 7;
         h0 ^= ZE0[f];
         h1 ^= ZE1[f];
-        h2 ^= ZE2[f];
     }
     ep = NONE;
     fifty = 0;
@@ -860,7 +1010,6 @@ fn unmake_null() {
     let u: u8 = ply;
     ep = undo_ep[raw u];
     fifty = undo_fifty[raw u];
-    h2 = undo_h2[raw u];
     let g: u8 = gply & 31;
     h0 = history0[g];
     h1 = history1[g];
@@ -921,35 +1070,51 @@ fn history_index(to: u8) -> u8 {
     return ((to & 0x70) >> 1) | (to & 7) | (side << 3);
 }
 
-// Quiet moves [first, last): killers first, then by cutoff history.
+// Quiet moves [first, last): killers first, then the highest cutoff
+// history; past the first few, generation order is kept.
 fn order_quiet(first: u8, last: u8) {
     let k1f: u8 = killer1_from[raw ply];
     let k1t: u8 = killer1_to[raw ply];
     let k2f: u8 = killer2_from[raw ply];
     let k2t: u8 = killer2_to[raw ply];
-    var i: u8 = first;
-    while i < last && i - first < 64 {
-        let mf: u8 = move_from[raw i];
-        let mt: u8 = move_to[raw i];
+    var n: u8 = last - first;
+    if n > 64 {
+        n = 64;
+    }
+    for i in 0..n {
+        let mf: u8 = move_from[raw first + i];
+        let mt: u8 = move_to[raw first + i];
         var key: u8 = cutoffs[raw history_index(mt)] >> 1;
         if mf == k1f && mt == k1t {
             key = 255;
         } else if mf == k2f && mt == k2t {
             key = 254;
         }
-        var k: u8 = i - first;
-        var at: u8 = i;
-        while k != 0 && sort_keys[raw k - 1] < key {
-            sort_keys[raw k] = sort_keys[raw k - 1];
-            move_from[raw at] = move_from[raw at - 1];
-            move_to[raw at] = move_to[raw at - 1];
-            k -= 1;
-            at -= 1;
+        sort_keys[raw i] = key;
+    }
+    var picks: u8 = 4;
+    if picks > n {
+        picks = n;
+    }
+    for j in 0..picks {
+        var best: u8 = j;
+        var best_key: u8 = sort_keys[raw j];
+        var k: u8 = j + 1;
+        while k < n {
+            if sort_keys[raw k] > best_key {
+                best_key = sort_keys[raw k];
+                best = k;
+            }
+            k += 1;
         }
-        sort_keys[raw k] = key;
-        move_from[raw at] = mf;
-        move_to[raw at] = mt;
-        i += 1;
+        if best_key == 0 {
+            return;
+        }
+        if best != j {
+            sort_keys[raw best] = sort_keys[raw j];
+            sort_keys[raw j] = best_key;
+            swap_moves(first + j, first + best);
+        }
     }
 }
 
@@ -1067,7 +1232,7 @@ fn qsearch(alpha_in: i16, beta: i16) -> i16 {
     if stop {
         return 0;
     }
-    let stand: i16 = evaluate();
+    let stand: i16 = evaluate_lazy(alpha, beta);
     if stand >= beta || ply >= MAXPLY - 1 {
         return stand;
     }
@@ -1345,40 +1510,66 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
     return alpha;
 }
 
-// Picks a book move for this position, uniformly among the listed ones.
-fn book_move() -> bool {
-    var count: u8 = 0;
-    var i: u16 = 0;
-    while i < BOOK_BYTES {
-        if BOOK[raw i] == h0 && BOOK[raw i + 1] == h1 && BOOK[raw i + 2] == h2 {
-            count += 1;
-        }
-        i += 5;
-    }
-    if count == 0 {
-        return false;
-    }
-    var pick: u8 = rand();
-    while pick >= count {
-        pick -= count;
-    }
-    i = 0;
-    while i < BOOK_BYTES {
-        if BOOK[raw i] == h0 && BOOK[raw i + 1] == h1 && BOOK[raw i + 2] == h2 {
-            if pick == 0 {
-                root_from = BOOK[raw i + 3];
-                root_to = BOOK[raw i + 4];
-                root_score = 0;
-                done_depth = 0;
-                nodes = 0;
-                nodes_high = 0;
-                elapsed = 0;
+// Is from -> to (no promotion) a legal move in the current position?
+fn legal_move(from: u8, to: u8) -> bool {
+    ply = 0;
+    msp = 0;
+    let checked: bool = king_attacked();
+    in_check = checked;
+    generate_all();
+    let n: u8 = msp;
+    msp = 0;
+    var i: u8 = 0;
+    while i < n {
+        if move_from[raw i] == from && move_to[raw i] == to {
+            in_check = checked;
+            if make(from, to) {
+                unmake(from, to);
                 return true;
             }
-            pick -= 1;
+            return false;
         }
-        i += 5;
+        i += 1;
     }
+    return false;
+}
+
+// Picks a book move for this position, uniformly among the listed ones.
+// Once a position is not found, the book stays closed for this game.
+fn book_move() -> bool {
+    if !in_book || gply > 24 {
+        return false;
+    }
+    var i: u16 = 0;
+    while i < BOOK_BYTES {
+        let n: u8 = BOOK[raw i + 2];
+        if BOOK[raw i] == h0 && BOOK[raw i + 1] == h1 {
+            var pick: u8 = rand();
+            while pick >= n {
+                pick -= n;
+            }
+            let at: u16 = i + 3 + u16(pick << 1);
+            let f: u8 = BOOK[raw at];
+            let t: u8 = BOOK[raw at + 1];
+            let from: u8 = ((f & 0x38) << 1) | (f & 7);
+            let to: u8 = ((t & 0x38) << 1) | (t & 7);
+            // A 16-bit key can collide: the move must be legal here.
+            if !legal_move(from, to) {
+                in_book = false;
+                return false;
+            }
+            root_from = from;
+            root_to = to;
+            root_score = 0;
+            done_depth = 0;
+            nodes = 0;
+            nodes_high = 0;
+            elapsed = 0;
+            return true;
+        }
+        i += 3 + u16(n << 1);
+    }
+    in_book = false;
     return false;
 }
 
@@ -1437,7 +1628,10 @@ fn setup(to_move: u8, rights: u8, ep_square: u8) {
     phase = 0;
     h0 = 0;
     h1 = 0;
-    h2 = 0;
+    pawn_key = 0;
+    for f in 0..20 {
+        pawn_ranks[f] = 0;
+    }
     var next_white: u8 = 1;
     var next_black: u8 = 17;
     // Kings first, then knights, bishops, rooks, queens and pawns.
@@ -1462,6 +1656,7 @@ fn setup(to_move: u8, rights: u8, ep_square: u8) {
                     }
                     place(p, sq, true);
                     hash_piece(p, sq);
+                    toggle_pawn(p, sq);
                     phase += PHASE_WEIGHT[p & 7];
                 }
             }
@@ -1493,6 +1688,7 @@ fn new_game() {
         board[f + 112] = START[f] | BLACK;
     }
     setup(0, 15, NONE);
+    in_book = true;
 }
 
 // Plays a move from outside the search; returns false if it is not legal.
@@ -1596,6 +1792,7 @@ fn handle_io() {
         }
         5 => {
             setup(io_arg[0], io_arg[1], io_arg[2]);
+            mark_all();
         }
         7 => {
             // Move lists: tactical, then quiet; io_out[0] = split, [1] = end.
@@ -1606,51 +1803,6 @@ fn handle_io() {
             io_out[0] = msp;
             generate_quiet();
             io_out[1] = msp;
-        }
-        8 => {
-            ply = 0;
-            msp = 0;
-            stop = false;
-            time_limit = 60000;
-            elapsed = 0;
-            in_check = king_attacked();
-            let q: i16 = qsearch(-INF, INF);
-            io_out[0] = u8(q);
-            io_out[1] = u8(u16(q) >> 8);
-        }
-        9 => {
-            // Reference depth-1 search: best of -qsearch over legal moves.
-            ply = 0;
-            msp = 0;
-            stop = false;
-            time_limit = 60000;
-            elapsed = 0;
-            in_check = king_attacked();
-            let rc: bool = in_check;
-            generate_all();
-            let n: u8 = msp;
-            var best: i16 = -INF;
-            var j: u8 = 0;
-            while j < n {
-                in_check = rc;
-                if make(move_from[raw j], move_to[raw j]) {
-                    let w: i16 = -qsearch(-INF, INF);
-                    unmake(move_from[raw j], move_to[raw j]);
-                    if w > best {
-                        best = w;
-                        io_out[2] = move_from[raw j];
-                        io_out[3] = move_to[raw j];
-                    }
-                }
-                j += 1;
-            }
-            io_out[0] = u8(best);
-            io_out[1] = u8(u16(best) >> 8);
-        }
-        10 => {
-            io_out[0] = h0;
-            io_out[1] = h1;
-            io_out[2] = h2;
         }
         6 => {
             let v: i16 = evaluate();
@@ -1706,6 +1858,10 @@ var game_to: [u8; 16] = [0; 16];
 @shared var searching: u8 = 0;
 @shared var abort_search: u8 = 0;
 var spin: u8 = 0;
+// Promotion prompt: 0 closed, else 1 + index into PROMOTE_PIECES.
+var promoting: u8 = 0;
+const PROMOTE_PIECES: [u8; 4] = [5, 4, 3, 2];
+const PROMOTE_LETTERS: [u8; 4] = [81, 82, 66, 78];
 
 const TEXT_STATUS: u8 = 1;
 const TEXT_LEVEL: u8 = 2;
@@ -1896,6 +2052,9 @@ fn draw_status2() {
                 text(PANEL_X, y, "NO MATERIAL ");
             }
         }
+    } else if promoting != 0 {
+        text(PANEL_X, y, "PROMOTE: <Q>");
+        tile(PANEL_X + 10, y, PROMOTE_LETTERS[(promoting - 1) & 3]);
     } else if in_check {
         text(PANEL_X, y, "CHECK!      ");
     } else if think_wait != 0 {
@@ -2150,6 +2309,7 @@ fn start_game() {
     think_wait = 0;
     outcome = 0;
     flipped = humans == 2;
+    promoting = 0;
     cursor = 0x14;
     if flipped {
         cursor = 0x64;
@@ -2193,7 +2353,34 @@ fn engine_turn() {
     text_dirty |= TEXT_STATUS | TEXT_STATUS2;
 }
 
+fn promotion_input(edge: u8) {
+    if (edge & 64) != 0 {
+        promoting = ((promoting + 2) & 3) + 1;
+        text_dirty |= TEXT_STATUS2;
+    }
+    if (edge & 128) != 0 {
+        promoting = (promoting & 3) + 1;
+        text_dirty |= TEXT_STATUS2;
+    }
+    if (edge & 1) != 0 {
+        let piece: u8 = PROMOTE_PIECES[(promoting - 1) & 3];
+        promoting = 0;
+        if !apply_move(selected, cursor, piece) {
+            sfx(900, 8);
+        }
+        text_dirty |= TEXT_STATUS2;
+    }
+    if (edge & 2) != 0 {
+        promoting = 0;
+        text_dirty |= TEXT_STATUS2;
+    }
+}
+
 fn human_turn(edge: u8, held: u8) {
+    if promoting != 0 {
+        promotion_input(edge);
+        return;
+    }
     // Cursor: immediate on press, then repeating while held.
     var step: u8 = edge & 0xf0;
     if (held & 0xf0) != 0 {
@@ -2244,7 +2431,11 @@ fn human_turn(edge: u8, held: u8) {
             mark(selected);
             selected = NONE;
         } else if selected != NONE {
-            if !apply_move(selected, cursor, QUEEN) {
+            let last_rank: bool = (cursor >> 4) == 7 - (side >> 3) * 7;
+            if (board[raw selected] & 7) == PAWN && last_rank && legal_move(selected | 0x80, cursor) {
+                promoting = 1;
+                text_dirty |= TEXT_STATUS2;
+            } else if !apply_move(selected, cursor, QUEEN) {
                 sfx(900, 8);
             }
         }

@@ -1052,9 +1052,6 @@ impl Generator<'_> {
         if storage.ty.size() != 1 || self.y_counter.is_some() || !y_free(body) {
             return Ok(false);
         }
-        if std::env::var("NESTED_NO_YLOOP").is_ok_and(|v| v == "all" || v == self.function) {
-            return Ok(false);
-        }
         if writes_name(body, name) {
             return Ok(false);
         }
@@ -1464,9 +1461,7 @@ fn frame_slots(f: &Function) -> BTreeMap<String, usize> {
     let mut next_unique = 0;
     for (name, ty) in &order {
         // Assembly may write locals invisibly; unanalyzed definitions too.
-        let shared = !asm
-            && liveness.defined.contains(*name)
-            && std::env::var("NESTED_NO_SHARE").map_or(true, |v| v != f.name);
+        let shared = !asm && liveness.defined.contains(*name);
         let size = ty.size();
         let mut offset = 0;
         'search: loop {
