@@ -11,3 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 nested-compiler.workspace = true
+nested-runtime.workspace = true

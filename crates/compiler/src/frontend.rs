@@ -1044,6 +1044,7 @@ pub fn builtins() -> Vec<Builtin> {
     Builtin{name:"text",params:vec![U8,U8,Str],result:Void,doc:"Draw a literal ASCII string using the cartridge font."},
     Builtin{name:"sprite",params:vec![U8,U8,U8,U8,U8],result:Void,doc:"Set an OAM shadow entry: slot, x, y, tile, attributes. DMA occurs on publication."},
     Builtin{name:"hide_sprites",params:vec![],result:Void,doc:"Hide all 64 shadow OAM entries."},
+    Builtin{name:"vram",params:vec![U16,U8],result:Void,doc:"Write one byte to a PPU address (nametable attributes, palettes). Queued like tile()."},
     Builtin{name:"palette",params:vec![U8,U8],result:Void,doc:"Initialize one PPU palette entry; call while rendering is disabled."},
     Builtin{name:"render",params:vec![Bool],result:Void,doc:"Explicitly disable/enable rendering and direct nametable writes. Used for scene transitions."},
     Builtin{name:"screen",params:vec![Str],result:Void,doc:"Copy a literal 1024-byte nametable asset while rendering is disabled."},
@@ -1169,6 +1170,7 @@ pub fn analyze(source: &str) -> Analysis {
         for attr in f.attrs.keys() {
             if ![
                 "nmi", "irq", "reset", "export", "inline", "noinline", "cold", "budget", "recursive",
+                "vblank",
             ]
             .contains(&attr.as_str())
             {

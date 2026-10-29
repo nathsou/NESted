@@ -6,7 +6,10 @@ cartridge "NESted Chess" {
     mapper = nrom;
     region = ntsc;
     mirroring = vertical;
-    queue = 24;
+    chr = "assets/chess.chr";
+    palette = "assets/chess.pal";
+    screen = "assets/chess.map";
+    queue = 16;
     stack = 100;
 }
 
@@ -131,12 +134,13 @@ var undo_castle: [u8; 24] = [0; 24];
 var undo_ep: [u8; 24] = [0; 24];
 var undo_fifty: [u8; 24] = [0; 24];
 var undo_h2: [u8; 24] = [0; 24];
-var undo_phase: [u8; 24] = [0; 24];
 var undo_mg: [i16; 24] = [0; 24];
 var undo_eg: [i16; 24] = [0; 24];
-// Hash of recent positions in the game and search path, by game ply & 63.
-var history0: [u8; 64] = [0; 64];
-var history1: [u8; 64] = [0; 64];
+// Hash of recent positions in the game and search path, by game ply & 31.
+var history0: [u8; 32] = [0; 32];
+var history1: [u8; 32] = [0; 32];
+// Quiet-move history: cutoff credit by side and destination square.
+var cutoffs: [u8; 128] = [0; 128];
 var sort_keys: [u8; 64] = [0; 64];
 var killer1_from: [u8; 24] = [0; 24];
 var killer1_to: [u8; 24] = [0; 24];
@@ -146,7 +150,7 @@ var killer2_to: [u8; 24] = [0; 24];
 // Harness mailbox: commands are never issued by the console itself.
 var io_cmd: u8 = 0;
 var io_arg: [u8; 8] = [0; 8];
-var io_out: [u8; 16] = [0; 16];
+var io_out: [u8; 10] = [0; 10];
 
 // ---------------------------------------------------------------- hashing
 @inline
@@ -194,7 +198,6 @@ fn hash_side() {
 
 // ---------------------------------------------------------------- evaluation
 // Adds (or removes) a piece's material and placement to the white-relative sums.
-@inline
 fn place(p: u8, sq: u8, add: bool) {
     let t: u8 = p & 7;
     var s: u8 = sq;
@@ -515,7 +518,8 @@ fn generate(mode: u8) {
 }
 
 fn generate_all() {
-    generate(ALL);
+    generate_tactical();
+    generate_quiet();
 }
 
 fn generate_tactical() {
@@ -565,7 +569,6 @@ fn move_piece(p: u8, from: u8, to: u8) {
     hash_piece(p, to);
 }
 
-@inline
 fn remove_piece(p: u8, sq: u8) {
     let index: u8 = board[raw sq | 8];
     undo_index[raw ply] = index;
@@ -580,6 +583,10 @@ fn remove_piece(p: u8, sq: u8) {
     place(p, sq, false);
     hash_piece(p, sq);
     phase -= PHASE_WEIGHT[p & 7];
+}
+
+fn castle_rook(p: u8, from: u8, to: u8) {
+    move_piece(p, from, to);
 }
 
 // Does the side to move stand in check after `us` moved from -> to?
@@ -639,14 +646,13 @@ fn make(mf: u8, mt: u8) -> bool {
     let captured: u8 = board[raw to];
     let t: u8 = p & 7;
     let u: u8 = ply;
-    let g: u8 = gply & 63;
+    let g: u8 = gply & 31;
     undo_moved[raw u] = p;
     undo_captured[raw u] = captured;
     undo_castle[raw u] = castle;
     undo_ep[raw u] = ep;
     undo_fifty[raw u] = fifty;
     undo_h2[raw u] = h2;
-    undo_phase[raw u] = phase;
     undo_mg[raw u] = mg;
     undo_eg[raw u] = eg;
     history0[g] = h0;
@@ -692,10 +698,10 @@ fn make(mf: u8, mt: u8) -> bool {
         }
     } else if t == KING {
         if to == from + 2 {
-            move_piece(ROOK | (p & BLACK), from + 3, from + 1);
+            castle_rook(ROOK | (p & BLACK), from + 3, from + 1);
             special = true;
         } else if from == to + 2 {
-            move_piece(ROOK | (p & BLACK), from - 4, from - 1);
+            castle_rook(ROOK | (p & BLACK), from - 4, from - 1);
             special = true;
         }
     }
@@ -764,11 +770,15 @@ fn unmake(mf: u8, mt: u8) {
     castle = undo_castle[raw u];
     ep = undo_ep[raw u];
     fifty = undo_fifty[raw u];
-    phase = undo_phase[raw u];
-    mg = undo_mg[raw u];
+    if captured != 0 && captured != 0x40 {
+        phase += PHASE_WEIGHT[captured & 7];
+    }
+    if (mf & 0x80) != 0 {
+        phase -= PHASE_WEIGHT[PROMOTIONS[((mt >> 7) | ((mf >> 2) & 2)) & 3] & 7];
+    }    mg = undo_mg[raw u];
     eg = undo_eg[raw u];
     h2 = undo_h2[raw u];
-    let g: u8 = gply & 63;
+    let g: u8 = gply & 31;
     h0 = history0[g];
     h1 = history1[g];
 }
@@ -799,7 +809,7 @@ fn unmove_rook(at: u8, home: u8) {
 
 fn make_null() {
     let u: u8 = ply;
-    let g: u8 = gply & 63;
+    let g: u8 = gply & 31;
     undo_ep[raw u] = ep;
     undo_fifty[raw u] = fifty;
     undo_h2[raw u] = h2;
@@ -828,7 +838,7 @@ fn unmake_null() {
     ep = undo_ep[raw u];
     fifty = undo_fifty[raw u];
     h2 = undo_h2[raw u];
-    let g: u8 = gply & 63;
+    let g: u8 = gply & 31;
     h0 = history0[g];
     h1 = history1[g];
 }
@@ -883,11 +893,40 @@ fn order_tactical(first: u8, last: u8) {
     }
 }
 
-// Killer moves first among quiet moves [first, last).
+@inline
+fn history_index(to: u8) -> u8 {
+    return ((to & 0x70) >> 1) | (to & 7) | (side << 3);
+}
+
+// Quiet moves [first, last): killers first, then by cutoff history.
 fn order_quiet(first: u8, last: u8) {
-    if ply < MAXPLY {
-        var q: u8 = bring_forward(first, killer1_from[raw ply], killer1_to[raw ply], last);
-        q = bring_forward(q, killer2_from[raw ply], killer2_to[raw ply], last);
+    let k1f: u8 = killer1_from[raw ply];
+    let k1t: u8 = killer1_to[raw ply];
+    let k2f: u8 = killer2_from[raw ply];
+    let k2t: u8 = killer2_to[raw ply];
+    var i: u8 = first;
+    while i < last && i - first < 64 {
+        let mf: u8 = move_from[raw i];
+        let mt: u8 = move_to[raw i];
+        var key: u8 = cutoffs[raw history_index(mt)] >> 1;
+        if mf == k1f && mt == k1t {
+            key = 255;
+        } else if mf == k2f && mt == k2t {
+            key = 254;
+        }
+        var k: u8 = i - first;
+        var at: u8 = i;
+        while k != 0 && sort_keys[raw k - 1] < key {
+            sort_keys[raw k] = sort_keys[raw k - 1];
+            move_from[raw at] = move_from[raw at - 1];
+            move_to[raw at] = move_to[raw at - 1];
+            k -= 1;
+            at -= 1;
+        }
+        sort_keys[raw k] = key;
+        move_from[raw at] = mf;
+        move_to[raw at] = mt;
+        i += 1;
     }
 }
 
@@ -919,7 +958,7 @@ fn check_time() {
     let now: u8 = peek(0x037e);
     elapsed += u16(now - last_tick);
     last_tick = now;
-    if elapsed >= time_limit {
+    if elapsed >= time_limit || (abort_search != 0 && done_depth != 0) {
         stop = true;
     }
 }
@@ -953,8 +992,8 @@ fn is_draw() -> bool {
     }
     var n: u8 = 4;
     var g: u8 = gply - 4;
-    while n <= fifty && n < 62 {
-        let i: u8 = g & 63;
+    while n <= fifty && n < 30 {
+        let i: u8 = g & 31;
         if history0[i] == h0 && history1[i] == h1 {
             return true;
         }
@@ -1059,9 +1098,39 @@ fn is_quiet(i: u8) -> bool {
     return (move_from[raw i] & 0x80) == 0 && board[raw move_to[raw i] & 0x77] == 0;
 }
 
-fn store_killer(i: u8) {
+// Could move i give check? Ignores blockers, so false means certainly not.
+fn may_check(i: u8) -> bool {
+    let from: u8 = move_from[raw i] & 0x77;
+    let to: u8 = move_to[raw i] & 0x77;
+    let king: u8 = plist[raw (side ^ BLACK) << 1];
+    if LINE_KIND[from + 119 - king] != 0 {
+        return true;
+    }
+    let t: u8 = board[raw from] & 7;
+    let d: u8 = king + 119 - to;
+    if t == KNIGHT {
+        return KNIGHT_DELTA[d] != 0;
+    }
+    if t == PAWN {
+        let a: u8 = king - to;
+        return a == 15 || a == 17 || a == 241 || a == 239;
+    }
+    return (LINE_KIND[d] & SLIDES[t]) != 0;
+}
+
+fn store_killer(i: u8, depth: u8) {
     let mf: u8 = move_from[raw i];
     let mt: u8 = move_to[raw i];
+    let h: u8 = history_index(mt);
+    let credit: u8 = cutoffs[raw h] + depth * depth;
+    if credit < cutoffs[raw h] || credit > 250 {
+        // Saturated: age the whole table.
+        for k in 0..128 {
+            cutoffs[k] = cutoffs[k] >> 1;
+        }
+    } else {
+        cutoffs[raw h] = credit;
+    }
     if killer1_from[raw ply] != mf || killer1_to[raw ply] != mt {
         killer2_from[raw ply] = killer1_from[raw ply];
         killer2_to[raw ply] = killer1_to[raw ply];
@@ -1074,6 +1143,10 @@ const FLAG_CHECK: u8 = 1;
 const FLAG_PV: u8 = 2;
 const FLAG_REDUCED: u8 = 4;
 const FLAG_QUIETS: u8 = 8;
+const FLAG_FUTILE: u8 = 16;
+// Frontier margins by remaining depth.
+const FUTILITY: [i16; 4] = [0, 150, 320, 500];
+const REVERSE_FUTILITY: [i16; 4] = [0, 110, 230, 360];
 
 @recursive(24)
 fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
@@ -1100,7 +1173,16 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
     if beta > alpha + 1 {
         flags |= FLAG_PV;
     }
-    if flags == 0 && can_null && depth >= 2 && has_pieces() && evaluate() >= beta {
+    if flags == 0 && depth <= 3 {
+        let static_eval: i16 = evaluate();
+        if static_eval - REVERSE_FUTILITY[raw depth] >= beta {
+            return static_eval;
+        }
+        if static_eval + FUTILITY[raw depth] <= alpha {
+            flags = FLAG_FUTILE;
+        }
+    }
+    if (flags & (FLAG_CHECK | FLAG_PV)) == 0 && can_null && depth >= 2 && has_pieces() && evaluate() >= beta {
         var null_depth: u8 = 0;
         if depth > 3 {
             null_depth = depth - 3;
@@ -1130,7 +1212,6 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
         generate_tactical();
         order_tactical(first, msp);
     }
-    var best: i16 = -INF;
     var legal: u8 = 0;
     var i: u8 = first;
     loop {
@@ -1150,6 +1231,11 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
         }
         let quiet: bool = is_quiet(i);
         in_check = (flags & FLAG_CHECK) != 0;
+        // Futile frontier nodes only try quiet moves that might give check.
+        if quiet && (flags & FLAG_FUTILE) != 0 && legal != 0 && !may_check(i) {
+            i += 1;
+            continue;
+        }
         if make(move_from[raw i], move_to[raw i]) {
             legal += 1;
             var v: i16 = 0;
@@ -1157,7 +1243,7 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
                 v = -search(depth - 1, -beta, -alpha, true);
             } else {
                 var reduce: u8 = 0;
-                flags &= FLAG_CHECK | FLAG_PV | FLAG_QUIETS;
+                flags &= FLAG_CHECK | FLAG_PV | FLAG_QUIETS | FLAG_FUTILE;
                 if depth >= 3 && legal > 3 && quiet && (flags & FLAG_CHECK) == 0 && !in_check {
                     reduce = 1;
                     if legal > 8 && depth >= 5 {
@@ -1175,35 +1261,32 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
                 msp = first;
                 return 0;
             }
-            if v > best {
-                best = v;
-                if v > alpha {
-                    alpha = v;
-                    if ply == 0 {
-                        root_from = move_from[raw i];
-                        root_to = move_to[raw i];
-                        root_score = v;
+            if v > alpha {
+                alpha = v;
+                if ply == 0 {
+                    root_from = move_from[raw i];
+                    root_to = move_to[raw i];
+                    root_score = v;
+                }
+                if v >= beta {
+                    if is_quiet(i) {
+                        store_killer(i, depth);
                     }
-                    if v >= beta {
-                        if is_quiet(i) {
-                            store_killer(i);
-                        }
-                        msp = first;
-                        return v;
-                    }
+                    msp = first;
+                    return v;
                 }
             }
         }
         i += 1;
     }
     msp = first;
-    if legal == 0 {
+    if legal == 0 && (flags & FLAG_FUTILE) == 0 {
         if (flags & FLAG_CHECK) != 0 {
             return i16(ply) - MATE;
         }
         return 0;
     }
-    return best;
+    return alpha;
 }
 
 fn think() {
@@ -1219,6 +1302,9 @@ fn think() {
     for k in 0..24 {
         killer1_from[raw k] = 0;
         killer2_from[raw k] = 0;
+    }
+    for c in 0..128 {
+        cutoffs[c] = cutoffs[c] >> 2;
     }
     var depth: u8 = 1;
     loop {
@@ -1481,12 +1567,705 @@ fn handle_io() {
     io_cmd = 0;
 }
 
+// ---------------------------------------------------------------- interface
+const BOARD_X: u8 = 2;
+const BOARD_Y: u8 = 6;
+const PANEL_X: u8 = 19;
+const LIST_Y: u8 = 9;
+const STATUS_Y: u8 = 19;
+const MENU: u8 = 0;
+const PLAYING: u8 = 1;
+const OVER: u8 = 2;
+const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+// Thinking time per level in frames (60 per second), and a depth cap for
+// the easiest levels.
+const LEVEL_FRAMES: [u16; 8] = [30, 60, 150, 300, 600, 1200, 2400, 3600];
+const LEVEL_DEPTH: [u8; 8] = [1, 2, 3, 0, 0, 0, 0, 0];
+const SPINNER: [u8; 4] = [45, 47, 124, 92];
+
+var screen_state: u8 = 0;
+var humans: u8 = 1;
+var level: u8 = 4;
+var cursor: u8 = 0x14;
+var selected: u8 = 128;
+var last_from: u8 = 128;
+var last_to: u8 = 128;
+var flipped: bool = false;
+var repeat: u8 = 0;
+var think_wait: u8 = 0;
+var outcome: u8 = 0;
+var menu_item: u8 = 3;
+var sfx_timer: u8 = 0;
+var text_dirty: u8 = 0;
+var list_dirty: u8 = 0;
+var game_plies: u8 = 0;
+var game_started: bool = false;
+var dirty: [u8; 8] = [0; 8];
+var game_from: [u8; 16] = [0; 16];
+var game_to: [u8; 16] = [0; 16];
+@shared var searching: u8 = 0;
+@shared var abort_search: u8 = 0;
+var spin: u8 = 0;
+
+const TEXT_STATUS: u8 = 1;
+const TEXT_LEVEL: u8 = 2;
+const TEXT_STATUS2: u8 = 4;
+const TEXT_LABELS: u8 = 8;
+
+fn mark(sq: u8) {
+    if (sq & 0x88) == 0 {
+        dirty[raw sq >> 4] |= BITS[sq & 7];
+    }
+}
+
+fn mark_all() {
+    for r in 0..8 {
+        dirty[r] = 255;
+    }
+}
+
+fn human_to_move() -> bool {
+    return screen_state == PLAYING && (humans & ((side >> 3) + 1)) != 0;
+}
+
+// Palette of a 16x16 quadrant on screen: board squares are light (0) or
+// dark (1), plus 2 when highlighted.
+fn quadrant_palette(qx: u8, qy: u8) -> u8 {
+    if qx < 1 || qx > 8 || qy < 3 || qy > 10 {
+        return 0;
+    }
+    var f: u8 = qx - 1;
+    var r: u8 = qy - 3;
+    if flipped {
+        f = 7 - f;
+    } else {
+        r = 7 - r;
+    }
+    let sq: u8 = (r << 4) | f;
+    var pal: u8 = 1 - ((r + f) & 1);
+    if sq == selected || sq == last_from || sq == last_to {
+        pal += 2;
+    }
+    return pal;
+}
+
+fn draw_square(sq: u8) {
+    let p: u8 = board[raw sq];
+    var t: u8 = 128;
+    if p != 0 {
+        t = 128 + (((p & 7) + (p >> 3) * 6) << 3);
+    }
+    if sq == cursor && human_to_move() {
+        t += 4;
+    }
+    var f: u8 = sq & 7;
+    var r: u8 = sq >> 4;
+    if flipped {
+        f = 7 - f;
+    } else {
+        r = 7 - r;
+    }
+    let x: u8 = BOARD_X + (f << 1);
+    let y: u8 = BOARD_Y + (r << 1);
+    tile(x, y, t);
+    tile(x + 1, y, t + 1);
+    tile(x, y + 1, t + 2);
+    tile(x + 1, y + 1, t + 3);
+    let bx: u8 = x >> 2;
+    let by: u8 = y >> 2;
+    let qx: u8 = bx << 1;
+    let qy: u8 = by << 1;
+    var value: u8 = quadrant_palette(qx, qy);
+    value |= quadrant_palette(qx + 1, qy) << 2;
+    value |= quadrant_palette(qx, qy + 1) << 4;
+    value |= quadrant_palette(qx + 1, qy + 1) << 6;
+    vram(0x23c0 + u16((by << 3) + bx), value);
+}
+
+fn put_square(x: u8, y: u8, sq: u8) {
+    tile(x, y, 65 + (sq & 7));
+    tile(x + 1, y, 49 + ((sq >> 4) & 7));
+}
+
+fn put_number(x: u8, y: u8, n: u8) {
+    var tens: u8 = 0;
+    var ones: u8 = n;
+    while ones >= 10 {
+        ones -= 10;
+        tens += 1;
+    }
+    if tens >= 10 {
+        tens -= 10;
+    }
+    if tens == 0 {
+        tile(x, y, 32);
+    } else {
+        tile(x, y, 48 + tens);
+    }
+    tile(x + 1, y, 48 + ones);
+}
+
+// Move list: the last 8 full moves, one per row: "NN.E2E4 E7E5".
+fn list_base() -> u8 {
+    let full: u8 = (game_plies + 1) >> 1;
+    if full <= 8 {
+        return 1;
+    }
+    return full - 7;
+}
+
+fn draw_list_row(row: u8) {
+    let y: u8 = LIST_Y + row;
+    if screen_state == MENU {
+        draw_menu_row(row);
+        return;
+    }
+    tile(PANEL_X - 1, y, 32);
+    let number: u8 = list_base() + row;
+    let white: u8 = (number - 1) << 1;
+    if white >= game_plies {
+        text(PANEL_X, y, "            ");
+        return;
+    }
+    put_number(PANEL_X, y, number);
+    tile(PANEL_X + 2, y, 46);
+    let w: u8 = white & 15;
+    put_square(PANEL_X + 3, y, game_from[raw w]);
+    put_square(PANEL_X + 5, y, game_to[raw w]);
+    tile(PANEL_X + 7, y, 32);
+    if white + 1 < game_plies {
+        let b: u8 = (white + 1) & 15;
+        put_square(PANEL_X + 8, y, game_from[raw b]);
+        put_square(PANEL_X + 10, y, game_to[raw b]);
+    } else {
+        text(PANEL_X + 8, y, "    ");
+    }
+}
+
+fn draw_status() {
+    if screen_state == MENU {
+        text(PANEL_X, STATUS_Y, "PRESS START ");
+    } else if screen_state == OVER {
+        match outcome {
+            1 => {
+                text(PANEL_X, STATUS_Y, "CHECKMATE!  ");
+            }
+            2 => {
+                text(PANEL_X, STATUS_Y, "STALEMATE   ");
+            }
+            _ => {
+                text(PANEL_X, STATUS_Y, "DRAW BY     ");
+            }
+        }
+    } else if think_wait != 0 {
+        text(PANEL_X, STATUS_Y, "THINKING    ");
+    } else if side == 0 {
+        text(PANEL_X, STATUS_Y, "WHITE MOVES ");
+    } else {
+        text(PANEL_X, STATUS_Y, "BLACK MOVES ");
+    }
+}
+
+fn draw_status2() {
+    let y: u8 = STATUS_Y + 1;
+    if screen_state == MENU {
+        if game_started {
+            text(PANEL_X, y, "B: RESUME   ");
+        } else {
+            text(PANEL_X, y, "            ");
+        }
+    } else if screen_state == OVER {
+        match outcome {
+            1 => {
+                if side == 0 {
+                    text(PANEL_X, y, "BLACK WINS  ");
+                } else {
+                    text(PANEL_X, y, "WHITE WINS  ");
+                }
+            }
+            2 => {
+                text(PANEL_X, y, "DRAW        ");
+            }
+            3 => {
+                text(PANEL_X, y, "REPETITION  ");
+            }
+            4 => {
+                text(PANEL_X, y, "50 MOVE RULE");
+            }
+            _ => {
+                text(PANEL_X, y, "NO MATERIAL ");
+            }
+        }
+    } else if in_check {
+        text(PANEL_X, y, "CHECK!      ");
+    } else if think_wait != 0 {
+        text(PANEL_X, y, "B: MOVE NOW ");
+    } else {
+        text(PANEL_X, y, "            ");
+    }
+}
+
+fn draw_level() {
+    text(PANEL_X, 6, "LEVEL ");
+    tile(PANEL_X + 6, 6, 49 + level);
+}
+
+fn draw_menu_row(row: u8) {
+    let y: u8 = LIST_Y + row;
+    match row {
+        0 => {
+            text(PANEL_X - 1, y, "  NEW GAME   ");
+        }
+        2 => {
+            if (humans & 1) != 0 {
+                text(PANEL_X - 1, y, " WHITE:HUMAN ");
+            } else {
+                text(PANEL_X - 1, y, " WHITE:NES   ");
+            }
+        }
+        3 => {
+            if (humans & 2) != 0 {
+                text(PANEL_X - 1, y, " BLACK:HUMAN ");
+            } else {
+                text(PANEL_X - 1, y, " BLACK:NES   ");
+            }
+        }
+        5 => {
+            text(PANEL_X - 1, y, " LEVEL:      ");
+            tile(PANEL_X + 6, y, 49 + level);
+        }
+        7 => {
+            text(PANEL_X - 1, y, " START       ");
+        }
+        _ => {
+            text(PANEL_X - 1, y, "             ");
+        }
+    }
+    let marker: u8 = 2 + (menu_item & 1) + ((menu_item >> 1) * 3);
+    if row == marker {
+        tile(PANEL_X - 1, y, 62);
+    }
+}
+
+fn draw_labels() {
+    for k in 0..8 {
+        var n: u8 = k;
+        if !flipped {
+            n = 7 - k;
+        }
+        tile(1, BOARD_Y + (k << 1), 49 + n);
+        var f: u8 = k;
+        if flipped {
+            f = 7 - k;
+        }
+        tile(BOARD_X + (k << 1), BOARD_Y + 16, 65 + f);
+    }
+}
+
+// Spends this frame's VRAM queue: up to three squares, else one text item.
+fn flush_screen() {
+    var budget: u8 = 3;
+    for r in 0..8 {
+        var bits: u8 = dirty[r];
+        if bits != 0 {
+            for f in 0..8 {
+                if budget != 0 && (bits & BITS[f]) != 0 {
+                    draw_square((r << 4) | f);
+                    bits ^= BITS[f];
+                    budget -= 1;
+                }
+            }
+            dirty[r] = bits;
+        }
+    }
+    if budget != 3 {
+        return;
+    }
+    if (text_dirty & TEXT_STATUS) != 0 {
+        text_dirty ^= TEXT_STATUS;
+        draw_status();
+    } else if (text_dirty & TEXT_STATUS2) != 0 {
+        text_dirty ^= TEXT_STATUS2;
+        draw_status2();
+    } else if (text_dirty & TEXT_LEVEL) != 0 {
+        text_dirty ^= TEXT_LEVEL;
+        draw_level();
+    } else if (text_dirty & TEXT_LABELS) != 0 {
+        text_dirty ^= TEXT_LABELS;
+        draw_labels();
+    } else if list_dirty != 0 {
+        for row in 0..8 {
+            if (list_dirty & BITS[row]) != 0 {
+                list_dirty ^= BITS[row];
+                draw_list_row(row);
+                return;
+            }
+        }
+    }
+}
+
+fn screen_idle() -> bool {
+    var any: u8 = text_dirty | list_dirty;
+    for r in 0..8 {
+        any |= dirty[r];
+    }
+    return any == 0;
+}
+
+// ---------------------------------------------------------------- sound
+fn sfx(period: u16, frames: u8) {
+    tone(1, period, 6);
+    sfx_timer = frames;
+}
+
+fn sound_tick() {
+    if sfx_timer != 0 {
+        sfx_timer -= 1;
+        if sfx_timer == 0 {
+            silence(1);
+            silence(3);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- game flow
+// 0 playing, 1 checkmate, 2 stalemate, 3 repetition, 4 fifty moves, 5 material.
+fn game_status() -> u8 {
+    ply = 0;
+    msp = 0;
+    let checked: bool = king_attacked();
+    in_check = checked;
+    generate_all();
+    let n: u8 = msp;
+    var legal: bool = false;
+    var i: u8 = 0;
+    while i < n && !legal {
+        in_check = checked;
+        if make(move_from[raw i], move_to[raw i]) {
+            unmake(move_from[raw i], move_to[raw i]);
+            legal = true;
+        }
+        i += 1;
+    }
+    msp = 0;
+    ply = 0;
+    in_check = checked;
+    if !legal {
+        if checked {
+            return 1;
+        }
+        return 2;
+    }
+    if fifty >= 100 {
+        return 4;
+    }
+    // Threefold repetition among the remembered positions.
+    var seen: u8 = 0;
+    var n2: u8 = 4;
+    var g: u8 = gply - 4;
+    while n2 <= fifty && n2 < 30 {
+        let k: u8 = g & 31;
+        if history0[k] == h0 && history1[k] == h1 {
+            seen += 1;
+        }
+        g -= 2;
+        n2 += 2;
+    }
+    if seen >= 2 {
+        return 3;
+    }
+    if phase <= 1 {
+        var pawns: bool = false;
+        for k2 in 0..32 {
+            if (k2 & 15) < piece_count[k2 >> 4] && (board[raw plist[k2]] & 7) == PAWN {
+                pawns = true;
+            }
+        }
+        if !pawns {
+            return 5;
+        }
+    }
+    return 0;
+}
+
+fn apply_move(from: u8, to: u8, promotion: u8) -> bool {
+    let p: u8 = board[raw from];
+    let captured: u8 = board[raw to];
+    if !play(from, to, promotion) {
+        return false;
+    }
+    mark(from);
+    mark(to);
+    mark(last_from);
+    mark(last_to);
+    mark(selected);
+    if (p & 7) == KING {
+        mark(from + 1);
+        mark(from + 3);
+        mark(from - 1);
+        mark(from - 4);
+    } else if (p & 7) == PAWN {
+        mark(to ^ 16);
+    }
+    last_from = from;
+    last_to = to;
+    selected = NONE;
+    let slot: u8 = game_plies & 15;
+    game_from[raw slot] = from;
+    game_to[raw slot] = to;
+    let base: u8 = list_base();
+    if game_plies < 255 {
+        game_plies += 1;
+    }
+    if list_base() != base {
+        list_dirty = 255;
+    } else {
+        list_dirty |= BITS[((game_plies - 1) >> 1) - (base - 1) & 7];
+    }
+    outcome = game_status();
+    if outcome != 0 {
+        screen_state = OVER;
+        sfx(170, 40);
+    } else if in_check {
+        sfx(220, 12);
+    } else if captured != 0 {
+        noise(6, 8);
+        sfx_timer = 6;
+    } else {
+        sfx(400, 3);
+    }
+    mark(cursor);
+    text_dirty |= TEXT_STATUS | TEXT_STATUS2;
+    return true;
+}
+
+fn start_game() {
+    new_game();
+    screen_state = PLAYING;
+    game_started = true;
+    game_plies = 0;
+    last_from = NONE;
+    last_to = NONE;
+    selected = NONE;
+    think_wait = 0;
+    outcome = 0;
+    flipped = humans == 2;
+    cursor = 0x14;
+    if flipped {
+        cursor = 0x64;
+    }
+    mark_all();
+    list_dirty = 255;
+    text_dirty = TEXT_STATUS | TEXT_STATUS2 | TEXT_LEVEL | TEXT_LABELS;
+}
+
+fn engine_turn() {
+    if think_wait == 0 {
+        think_wait = 2;
+        text_dirty |= TEXT_STATUS | TEXT_STATUS2;
+        mark(cursor);
+        return;
+    }
+    if !screen_idle() {
+        return;
+    }
+    think_wait -= 1;
+    if think_wait != 0 {
+        return;
+    }
+    time_limit = LEVEL_FRAMES[level & 7];
+    max_depth = LEVEL_DEPTH[level & 7];
+    abort_search = 0;
+    searching = 1;
+    think();
+    searching = 0;
+    var promotion: u8 = 0;
+    if (root_from & 0x80) != 0 {
+        promotion = PROMOTIONS[((root_to >> 7) | ((root_from >> 2) & 2)) & 3];
+    }
+    if root_from == NONE || !apply_move(root_from & 0x77, root_to & 0x77, promotion) {
+        // No move found: should not happen while the game is not over.
+        screen_state = OVER;
+        outcome = 2;
+    }
+    text_dirty |= TEXT_STATUS | TEXT_STATUS2;
+}
+
+fn human_turn(edge: u8, held: u8) {
+    // Cursor: immediate on press, then repeating while held.
+    var step: u8 = edge & 0xf0;
+    if (held & 0xf0) != 0 {
+        repeat += 1;
+        if repeat > 14 && (repeat & 3) == 0 {
+            step = held & 0xf0;
+        }
+    } else {
+        repeat = 0;
+    }
+    if step != 0 {
+        mark(cursor);
+        var up: u8 = 16;
+        var right: u8 = 1;
+        if flipped {
+            up = 240;
+            right = 255;
+        }
+        var next: u8 = cursor;
+        if (step & 16) != 0 {
+            next += up;
+        } else if (step & 32) != 0 {
+            next -= up;
+        }
+        if ((next & 0x88) == 0) {
+            cursor = next;
+        }
+        next = cursor;
+        if (step & 128) != 0 {
+            next += right;
+        } else if (step & 64) != 0 {
+            next -= right;
+        }
+        if (next & 0x88) == 0 {
+            cursor = next;
+        }
+        mark(cursor);
+    }
+    let here: u8 = board[raw cursor];
+    let own: bool = here != 0 && (here & BLACK) == side;
+    if (edge & 1) != 0 {
+        if own && cursor != selected {
+            mark(selected);
+            selected = cursor;
+            mark(selected);
+            sfx(500, 2);
+        } else if cursor == selected {
+            mark(selected);
+            selected = NONE;
+        } else if selected != NONE {
+            if !apply_move(selected, cursor, QUEEN) {
+                sfx(900, 8);
+            }
+        }
+    }
+    if (edge & 2) != 0 && selected != NONE {
+        mark(selected);
+        selected = NONE;
+    }
+    if (edge & 4) != 0 {
+        flipped = !flipped;
+        mark_all();
+        text_dirty |= TEXT_LABELS;
+    }
+}
+
+fn menu_input(edge: u8) {
+    if (edge & 16) != 0 {
+        menu_item = (menu_item + 3) & 3;
+        list_dirty = 255;
+    }
+    if (edge & 32) != 0 {
+        menu_item = (menu_item + 1) & 3;
+        list_dirty = 255;
+    }
+    if (edge & (1 | 64 | 128)) != 0 {
+        match menu_item {
+            0 => {
+                humans ^= 1;
+            }
+            1 => {
+                humans ^= 2;
+            }
+            2 => {
+                if (edge & 64) != 0 {
+                    level = (level + 7) & 7;
+                } else {
+                    level = (level + 1) & 7;
+                }
+                text_dirty |= TEXT_LEVEL;
+            }
+            _ => {
+                if (edge & 1) != 0 {
+                    start_game();
+                    return;
+                }
+            }
+        }
+        list_dirty = 255;
+        sfx(500, 2);
+    }
+    if (edge & 8) != 0 {
+        start_game();
+        return;
+    }
+    if (edge & 2) != 0 && game_started {
+        screen_state = PLAYING;
+        list_dirty = 255;
+        text_dirty |= TEXT_STATUS | TEXT_STATUS2;
+        mark(cursor);
+    }
+}
+
+fn open_menu() {
+    screen_state = MENU;
+    think_wait = 0;
+    list_dirty = 0;
+    text_dirty |= TEXT_STATUS | TEXT_STATUS2;
+    list_dirty = 255;
+    mark(cursor);
+}
+
+// Every vblank, even while a search keeps the main loop busy: animate the
+// thinking indicator and let B stop the search.
+@vblank
+fn background() {
+    if searching != 0 {
+        spin += 1;
+        poke(0x4016, 1);
+        poke(0x4016, 0);
+        let a: u8 = peek(0x4016);
+        if (peek(0x4016) & 1) != 0 && a != 255 {
+            abort_search = 1;
+        }
+        if (spin & 7) == 0 {
+            poke(0x2006, 0x22);
+            poke(0x2006, 0x7c);
+            poke(0x2007, SPINNER[(spin >> 3) & 3]);
+            poke(0x2005, 0);
+            poke(0x2005, 0);
+            poke(0x2000, 0x80);
+        }
+    }
+}
+
 fn init() {
     new_game();
+    text_dirty = TEXT_STATUS | TEXT_STATUS2 | TEXT_LEVEL;
+    list_dirty = 255;
 }
 
 fn update() {
     if io_cmd != 0 {
         handle_io();
+        return;
+    }
+    sound_tick();
+    flush_screen();
+    let edge: u8 = pressed();
+    let held: u8 = buttons();
+    if screen_state == MENU {
+        menu_input(edge);
+        return;
+    }
+    if (edge & 8) != 0 {
+        open_menu();
+        return;
+    }
+    if screen_state == OVER {
+        return;
+    }
+    if human_to_move() {
+        human_turn(edge, held);
+    } else {
+        engine_turn();
     }
 }

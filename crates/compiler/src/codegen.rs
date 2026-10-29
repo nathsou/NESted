@@ -1642,7 +1642,7 @@ pub fn generate(
             "Mirroring must be vertical or horizontal",
         ));
     }
-    for attr in ["reset", "nmi", "irq"] {
+    for attr in ["reset", "nmi", "irq", "vblank"] {
         if program
             .functions
             .iter()
@@ -1922,7 +1922,7 @@ pub fn generate(
     let depths = call_depths(&graph).map_err(|m| err(Span::default(), m))?;
     let mut pools: [BTreeMap<String, usize>; 3] = std::array::from_fn(|_| BTreeMap::new());
     for f in &program.functions {
-        let context = if f.attrs.contains_key("nmi") {
+        let context = if f.attrs.contains_key("nmi") || f.attrs.contains_key("vblank") {
             Some(1)
         } else if f.attrs.contains_key("irq") {
             Some(2)
@@ -2016,6 +2016,11 @@ pub fn generate(
         .iter()
         .find(|f| f.attrs.contains_key("nmi"))
         .map(|f| f.name.as_str());
+    let vblank = program
+        .functions
+        .iter()
+        .find(|f| f.attrs.contains_key("vblank"))
+        .map(|f| f.name.as_str());
     let irq = program
         .functions
         .iter()
@@ -2025,7 +2030,7 @@ pub fn generate(
         if (["init", "update"].contains(&f.name.as_str())
             || f.attrs
                 .keys()
-                .any(|a| ["reset", "nmi", "irq"].contains(&a.as_str())))
+                .any(|a| ["reset", "nmi", "irq", "vblank"].contains(&a.as_str())))
             && (!f.params.is_empty() || f.result != Ty::Void)
         {
             return Err(err(
@@ -2151,6 +2156,7 @@ jsr __rt_copy_ram
         functions.contains_key("init"),
         sprites,
         queue,
+        vblank,
     ));
     for f in &program.functions {
         assembly.push_str(&functions[&f.name]);

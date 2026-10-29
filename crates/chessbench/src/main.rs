@@ -5,6 +5,7 @@
 //! executes the ROM on a lean 6502 core and drives that mailbox to run perft,
 //! fixed-time searches and complete games through a UCI front end.
 mod cpu;
+mod ui;
 
 use cpu::Machine;
 use std::collections::BTreeMap;
@@ -18,6 +19,10 @@ const CMD_THINK: u8 = 3;
 const CMD_PERFT: u8 = 4;
 const CMD_SETUP: u8 = 5;
 const CMD_EVALUATE: u8 = 6;
+
+thread_local! {
+    static LAST_ROM: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
 pub struct Cartridge {
     pub m: Machine,
@@ -49,6 +54,7 @@ impl Cartridge {
         let compiled = nested_compiler::compile(&source, &assets, Default::default())
             .map_err(|d| format!("{:?}", d.iter().map(|d| &d.message).collect::<Vec<_>>()))?;
         let mut m = Machine::new(&compiled.rom)?;
+        LAST_ROM.with(|r| *r.borrow_mut() = compiled.rom.clone());
         // Boot: run init and settle into the frame loop.
         for _ in 0..8 {
             m.run_frame();
@@ -369,6 +375,12 @@ fn run() -> Result<(), String> {
             }
         }
         "uci" => uci(&mut c)?,
+        "ui" => {
+            let script = args.next().ok_or("ui needs a script")?;
+            let out = PathBuf::from(args.next().unwrap_or_else(|| "ui-shots".into()));
+            let rom = LAST_ROM.with(|r| r.borrow().clone());
+            ui::run(&rom, &script, &out)?;
+        }
         "go" => {
             let depth: u8 = args.next().map(|s| s.parse().unwrap()).unwrap_or(3);
             for line in io::stdin().lock().lines() {

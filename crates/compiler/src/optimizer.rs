@@ -500,7 +500,7 @@ fn inline_statements(program: &mut Program) -> usize {
         ["init", "update"].contains(&f.name.as_str())
             || f.attrs
                 .keys()
-                .any(|a| ["reset", "nmi", "irq", "recursive"].contains(&a.as_str()))
+                .any(|a| ["reset", "nmi", "irq", "vblank", "recursive"].contains(&a.as_str()))
     };
     let candidates: BTreeMap<String, Function> = program
         .functions
@@ -813,7 +813,7 @@ pub fn optimize(program: &mut Program) -> Optimizations {
             ["init", "update"].contains(&f.name.as_str())
                 || f.attrs
                     .keys()
-                    .any(|a| ["reset", "nmi", "irq", "export"].contains(&a.as_str()))
+                    .any(|a| ["reset", "nmi", "irq", "vblank", "export"].contains(&a.as_str()))
         })
         .map(|f| f.name.clone())
         .collect::<BTreeSet<_>>();

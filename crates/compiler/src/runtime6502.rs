@@ -12,6 +12,7 @@ pub fn runtime(
     has_init: bool,
     sprites: bool,
     queue: usize,
+    vblank: Option<&str>,
 ) -> String {
     // PPUMASK: background (+ sprites when the program draws any).
     let mask = if sprites { 30 } else { 10 };
@@ -215,9 +216,13 @@ OAM_DMA lda #0
     if reset.is_none() {
         s.push_str("lda #0\nsta $00\n");
     }
+    s.push_str("__nmi_done:\n");
+    if let Some(name) = vblank {
+        // Every vblank, whether or not the main thread published a frame.
+        s.push_str(&format!("jsr __fn_{name}\n"));
+    }
     s.push_str(
         r#"
-__nmi_done:
  pla
  tay
  pla
@@ -305,6 +310,33 @@ __tile_direct:
  lda $0f
  sta $2006
  lda $0e
+ sta $2006
+ lda $06
+ sta $2007
+ rts
+
+__rt_vram:
+ lda $0c
+ beq __vram_direct
+ ldx $0d
+ cpx #QUEUE
+ bcs __queue_full
+ lda $05
+ sta $0300,x
+ inx
+ lda $04
+ sta $0300,x
+ inx
+ lda $06
+ sta $0300,x
+ inx
+ stx $0d
+ rts
+__vram_direct:
+ bit $2002
+ lda $05
+ sta $2006
+ lda $04
  sta $2006
  lda $06
  sta $2007
