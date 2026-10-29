@@ -391,10 +391,11 @@ fn run() -> Result<(), String> {
         }
         "go" => {
             let depth: u8 = args.next().map(|s| s.parse().unwrap()).unwrap_or(3);
+            let frames: u16 = args.next().map(|s| s.parse().unwrap()).unwrap_or(60000);
             for line in io::stdin().lock().lines() {
                 let fen = line.map_err(|e| e.to_string())?;
                 c.setup_fen(&fen)?;
-                let t = c.think(60000, depth)?;
+                let t = c.think(frames, depth)?;
                 println!("{} {} {} {}", uci_move(t.from, t.to), t.depth, t.score, t.nodes);
             }
         }

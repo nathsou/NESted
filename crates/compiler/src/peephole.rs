@@ -428,6 +428,7 @@ fn registers(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
     }
     let mut pending: BTreeMap<String, Option<Regs>> = BTreeMap::new();
     let mut keep = vec![true; p.lines.len()];
+    let mut out_text: Vec<Option<String>> = vec![None; p.lines.len()];
     // None: unreachable by fall-through.
     let mut cur: Option<Regs> = Some(Regs::default());
     let mut opaque = false;
@@ -464,6 +465,15 @@ fn registers(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
                 match op {
                     "lda" | "ldx" | "ldy" => {
                         let reg = op.chars().nth(2).unwrap();
+                        // A value just stored from A: transfer instead of load.
+                        if reg != 'a' && trackable(arg) && r.a.contains(arg) && !r.reg(reg).contains(arg) {
+                            out_text[i] = Some(format!("  ta{reg}"));
+                            *changes += 1;
+                            let a = r.a.clone();
+                            *r.reg(reg) = a;
+                            r.nz = Some(reg);
+                            continue;
+                        }
                         if let Some(v) = &value {
                             let holds = r.reg(reg).contains(v);
                             if holds && (r.nz == Some(reg) || !p.flag_read(i + 1, false)) {
@@ -567,12 +577,11 @@ fn registers(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
             }
         }
     }
-    let n = keep.iter().filter(|k| !**k).count();
-    let _ = n;
     p.lines
         .into_iter()
         .zip(keep)
-        .filter_map(|(l, k)| k.then_some(l))
+        .zip(out_text)
+        .filter_map(|((l, k), t)| k.then(|| t.unwrap_or(l)))
         .collect()
 }
 

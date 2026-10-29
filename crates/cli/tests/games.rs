@@ -40,8 +40,10 @@ impl Game {
                     }
                 }
             }
+            // Programs without sprites use page 2 as ordinary RAM.
+            let sprites = self.c.generated.assembly.contains("__rt_hide_sprites");
             assert!(
-                self.n.read_ram(0x0c) == 0 || rows.iter().all(|n| *n <= 8),
+                !sprites || self.n.read_ram(0x0c) == 0 || rows.iter().all(|n| *n <= 8),
                 "NES sprite scanline limit exceeded: {}",
                 rows.iter().max().unwrap()
             );
@@ -409,4 +411,27 @@ fn every_nonogram_puzzle_completes_and_navigation_wraps() {
     assert_eq!(game.byte("level"), 0);
     game.tap(4 | 8);
     assert_eq!(game.byte("level"), 15);
+}
+
+#[test]
+fn chess_plays_a_controller_move_and_the_engine_replies() {
+    let mut g = Game::load("chess");
+    // Menu: lower the level to 1 (a fast, depth-limited reply), then start.
+    g.tap(16);
+    for _ in 0..4 {
+        g.tap(64);
+    }
+    g.tap(8);
+    g.frames(0, 30);
+    assert_eq!(g.byte("screen_state"), 1, "game started");
+    // The cursor starts on e2: select, two squares up, move.
+    g.tap(1);
+    g.tap(16);
+    g.tap(16);
+    g.tap(1);
+    g.frames(0, 240);
+    let board = g.c.assembly.symbols["__v_board"];
+    assert_eq!(g.n.read_ram(board + 0x34), 1, "white pawn on e4");
+    assert_eq!(g.byte("game_plies"), 2, "1.e4 and the engine's reply");
+    assert_eq!(g.byte("side"), 0, "white to move again");
 }

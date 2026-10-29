@@ -1078,7 +1078,9 @@ impl Generator<'_> {
         let done = self.label("yfor_end");
         self.op("jmp", &test);
         self.at(&yes);
-        self.op("sty", &storage.label);
+        if counter_in_memory(body, name) {
+            self.op("sty", &storage.label);
+        }
         self.y_counter = Some(name.to_owned());
         self.loops.push((done.clone(), next.clone()));
         let result = self.statements(body);
@@ -1445,6 +1447,42 @@ fn writes_name(body: &[Stmt], name: &str) -> bool {
         Stmt::While { body, .. } | Stmt::Loop(body) | Stmt::For { body, .. } => {
             writes_name(body, name)
         }
+        _ => false,
+    })
+}
+/// Whether a Y-held loop counter is also needed in memory: any use other
+/// than directly indexing an array (compound assignments index via memory).
+fn counter_in_memory(body: &[Stmt], name: &str) -> bool {
+    fn expr(e: &Expr, name: &str) -> bool {
+        match &e.kind {
+            ExprKind::Name(n) => n == name,
+            ExprKind::Index(base, index, _) => {
+                let direct = matches!(&index.kind, ExprKind::Name(n) if n == name);
+                expr(base, name) || (!direct && expr(index, name))
+            }
+            ExprKind::Binary(_, a, b) => expr(a, name) || expr(b, name),
+            ExprKind::Unary(_, a) => expr(a, name),
+            ExprKind::Call(_, v) => v.iter().any(|a| expr(a, name)),
+            ExprKind::Asm(..) | ExprKind::Match(..) => true,
+            _ => false,
+        }
+    }
+    body.iter().any(|s| match s {
+        Stmt::Local { value, .. } | Stmt::Expr(value) => expr(value, name),
+        Stmt::Assign { target, op, value } => {
+            let compound_index = op != "="
+                && matches!(&target.kind, ExprKind::Index(_, i, _) if expr(i, name) || matches!(&i.kind, ExprKind::Name(n) if n == name));
+            compound_index || expr(target, name) || expr(value, name)
+        }
+        Stmt::If { condition, yes, no } => {
+            expr(condition, name) || counter_in_memory(yes, name) || counter_in_memory(no, name)
+        }
+        Stmt::While { condition, body } => expr(condition, name) || counter_in_memory(body, name),
+        Stmt::For { start, end, body, .. } => {
+            expr(start, name) || expr(end, name) || counter_in_memory(body, name)
+        }
+        Stmt::Loop(body) => counter_in_memory(body, name),
+        Stmt::Return(Some(e), _) => expr(e, name),
         _ => false,
     })
 }
