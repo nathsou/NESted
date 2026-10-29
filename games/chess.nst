@@ -256,8 +256,8 @@ fn place(p: u8, sq: u8, add: bool) {
             bishops[c] -= 1;
         }
         if bishops[c] == 1 {
-            vm += 30;
-            ve += 50;
+            vm += 45;
+            ve += 65;
         }
         if add {
             bishops[c] += 1;
