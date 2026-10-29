@@ -1426,7 +1426,7 @@ const REVERSE_FUTILITY: [i16; 4] = [0, 85, 180, 290];
             } else {
                 var reduce: u8 = 0;
                 flags &= FLAG_CHECK | FLAG_PV | FLAG_QUIETS | FLAG_FUTILE;
-                if depth >= 3 && legal > 3 && quiet && (flags & FLAG_CHECK) == 0 && !in_check {
+                if depth >= 2 && legal > 3 && quiet && (flags & FLAG_CHECK) == 0 && !in_check {
                     reduce = 1;
                     if legal > 8 && depth >= 5 {
                         reduce = 2;
