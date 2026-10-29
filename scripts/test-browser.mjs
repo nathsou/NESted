@@ -7,11 +7,13 @@ try{
  const start=Date.now();for(;;){try{if((await fetch('http://127.0.0.1:4173/')).ok)break;}catch{}if(Date.now()-start>30000)throw new Error('Preview server startup failed');await new Promise(r=>setTimeout(r,100));}
  await browser.start('http://127.0.0.1:4173/');await browser.wait('window.__nested?.ready && window.__nested.frames>20');
  await browser.evaluate('window.__nested.pause()');
- for(let i=0;i<4;i++){
-  if(i>0){await browser.evaluate(`window.__nested.loadGame(${i})`);await browser.wait(`window.__nested.ready && document.getElementById('filename').textContent.includes('${['bloom','starstring','skythread','emberkeep'][i]}')`);await browser.evaluate('window.__nested.pause()');}
+ for(let i=0;i<5;i++){
+  if(i>0){await browser.evaluate(`window.__nested.loadGame(${i})`);await browser.wait(`window.__nested.ready && document.getElementById('filename').textContent.includes('${['bloom','starstring','skythread','emberkeep','chess'][i]}')`);await browser.evaluate('window.__nested.pause()');}
   await browser.evaluate('window.__nested.step(0,120)');
-  const report=await browser.evaluate('({ok:window.__nested.build.ok,mapper:window.__nested.build.mapper,passes:window.__nested.build.passes.length,drop:window.__nested.ram[895]})');assert.equal(report.ok,true);assert.equal(report.mapper,[0,4,1,2][i]);assert.equal(report.passes,7);assert.equal(report.drop,0);
+  const report=await browser.evaluate('({ok:window.__nested.build.ok,mapper:window.__nested.build.mapper,passes:window.__nested.build.passes.length,drop:window.__nested.ram[895]})');assert.equal(report.ok,true);assert.equal(report.mapper,[0,4,1,2,0][i]);assert.equal(report.passes,7);assert.equal(report.drop,0);
  }
+ // The editor checks below run on Emberkeep.
+ await browser.evaluate('window.__nested.loadGame(3)');await browser.wait(`window.__nested.ready && document.getElementById('filename').textContent.includes('emberkeep')`);await browser.evaluate('window.__nested.pause()');
  const layout=await browser.evaluate(`({header:document.querySelector('.header').getBoundingClientRect().height,select:document.getElementById('game-select').getBoundingClientRect().height,screen:document.getElementById('screen').getBoundingClientRect().width,overflow:document.documentElement.scrollWidth>innerWidth})`);assert.equal(layout.header,44);assert.ok(layout.select<34);assert.equal(layout.screen%256,0);assert.equal(layout.overflow,false);
  const before=await browser.evaluate(`document.querySelector('.editor-panel').getBoundingClientRect().width`);
  await browser.evaluate(`document.querySelector('[data-divider="0"]').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))`);
@@ -33,5 +35,5 @@ try{
  await browser.evaluate(`window.__nested.setSource(${JSON.stringify(original)})`);assert.equal((await browser.evaluate('window.__nested.compile()')).ok,true);await browser.wait('window.__nested.ready');
  await browser.evaluate('document.getElementById("sound").click()');await browser.wait('document.getElementById("sound").textContent.includes("Sound on")');
  assert.equal(browser.errors.length,0,JSON.stringify(browser.errors));
- console.log('Production browser: four cartridges, assets under a relative base, LSP, diagnostics, rebuild, audio, compact layouts, resizing, mobile panes, fresh-document formatting and draft restoration passed.');
+ console.log('Production browser: five cartridges, assets under a relative base, LSP, diagnostics, rebuild, audio, compact layouts, resizing, mobile panes, fresh-document formatting and draft restoration passed.');
 }finally{await browser.close();server.kill('SIGTERM');}
