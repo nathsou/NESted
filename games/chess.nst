@@ -230,6 +230,8 @@ var io_out: [u8; 10] = [0; 10];
 
 // ---------------------------------------------------------------- evaluation
 // Adds (or removes) a piece's material and placement to the white-relative sums.
+var bishops: [u8; 2] = [0; 2];
+
 fn place(p: u8, sq: u8, add: bool) {
     let t: u8 = p & 7;
     var s: u8 = sq;
@@ -246,6 +248,20 @@ fn place(p: u8, sq: u8, add: bool) {
     } else {
         vm += i16(PST_B_MG[i]);
         ve += i16(PST_B_EG[i]);
+    }
+    if t == BISHOP {
+        // The pair bonus belongs to the second bishop of a color.
+        let c: u8 = (p >> 3) & 1;
+        if !add {
+            bishops[c] -= 1;
+        }
+        if bishops[c] == 1 {
+            vm += 30;
+            ve += 50;
+        }
+        if add {
+            bishops[c] += 1;
+        }
     }
     if ((p & BLACK) != 0) == add {
         mg -= vm;
@@ -1576,6 +1592,8 @@ fn setup(to_move: u8, rights: u8, ep_square: u8) {
     mg = 0;
     eg = 0;
     phase = 0;
+    bishops[0] = 0;
+    bishops[1] = 0;
     h0 = 0;
     h1 = 0;
     var next_white: u8 = 1;
