@@ -127,7 +127,8 @@ EG = {
         -53, -34, -21, -11, -28, -14, -24, -43],
 }
 # Subtracted from every square so the table fits a signed byte; the
-# cartridge adds the same amount to that piece's material value.
+# cartridge adds the same amount to that piece's material value. Bytes are
+# stored biased by +128 so a placement change is an unsigned subtraction.
 OFFSETS = {("P", "mg"): 10, ("P", "eg"): 60}
 ORDER = "PNBRQK"
 SLOT = [0, 8, 128, 136]
@@ -143,7 +144,7 @@ def packed(tables, phase):
             for file in range(8):
                 v = tables[name][(7 - rank) * 8 + file] - shift
                 v = max(-128, min(127, v))
-                target[offset + rank * 16 + file] = v & 255
+                target[offset + rank * 16 + file] = v + 128
     return a + b
 
 

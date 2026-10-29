@@ -512,7 +512,9 @@ fn inline_statements(program: &mut Program) -> usize {
                 None => (None, &[][..]),
             };
             !returns_inside(rest)
-                && !last.is_some_and(|l| !matches!(l, Stmt::Return(..)) && returns_inside(std::slice::from_ref(l)))
+                && !last.is_some_and(|l| {
+                    !matches!(l, Stmt::Return(..)) && returns_inside(std::slice::from_ref(l))
+                })
         })
         .map(|f| (f.name.clone(), f.clone()))
         .collect();
@@ -573,7 +575,11 @@ fn expand(
         }
         let call = match &s {
             Stmt::Expr(e) | Stmt::Local { value: e, .. } | Stmt::Return(Some(e), _) => Some(e),
-            Stmt::Assign { target, op, value } if op == "=" && matches!(target.kind, ExprKind::Name(_)) => Some(value),
+            Stmt::Assign { target, op, value }
+                if op == "=" && matches!(target.kind, ExprKind::Name(_)) =>
+            {
+                Some(value)
+            }
             _ => None,
         };
         let Some(Expr {
@@ -604,7 +610,10 @@ fn expand(
         let mut calls = BTreeSet::new();
         calls_block(&f.body, &mut calls, &mut false);
         let opaque = calls.iter().any(|c| {
-            !["u8", "i8", "u16", "i16", "bool", "peek", "buttons", "pressed"].contains(&c.as_str())
+            ![
+                "u8", "i8", "u16", "i16", "bool", "peek", "buttons", "pressed",
+            ]
+            .contains(&c.as_str())
         });
         let mut bind = BTreeMap::new();
         for ((param, ty, _), arg) in f.params.iter().zip(args.iter()) {
@@ -644,7 +653,16 @@ fn expand(
         };
         out.extend(inlined);
         match (s, result) {
-            (Stmt::Local { name, ty, mutable, span, .. }, Some(value)) => out.push(Stmt::Local {
+            (
+                Stmt::Local {
+                    name,
+                    ty,
+                    mutable,
+                    span,
+                    ..
+                },
+                Some(value),
+            ) => out.push(Stmt::Local {
                 name,
                 ty,
                 value,

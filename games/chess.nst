@@ -33,7 +33,10 @@ const KNIGHT_DIRS: [u8; 8] = [33, 31, 18, 14, 223, 225, 238, 242];
 const PROMOTIONS: [u8; 4] = [5, 2, 4, 3];
 const PHASE_WEIGHT: [u8; 8] = [0, 0, 1, 1, 2, 4, 0, 0];
 const PHASE_32: [u8; 25] = [
-    0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 17, 19, 20, 21, 23, 24, 25, 27, 28, 29, 31, 32,
+    0, 1, 3, 4, 5, 7, 8, 9,
+    11, 12, 13, 15, 16, 17, 19, 20,
+    21, 23, 24, 25, 27, 28, 29, 31,
+    32,
 ];
 // Material, with the pawn PST offsets folded in (see scripts/chess/tables.py).
 const MATERIAL_MG: [i16; 8] = [0, 92, 337, 365, 477, 1025, 0, 0];
@@ -68,14 +71,22 @@ const KNIGHT_DELTA: [u8; 256] = asset("assets/chess.lines.bin", 512);
 const SLIDES: [u8; 8] = [0, 0, 0, 2, 1, 3, 0, 0];
 // Castling rights kept when a move touches a square (a1, e1, h1, a8, e8, h8).
 const CASTLE_KEEP: [u8; 128] = [
-    13, 15, 15, 15, 12, 15, 15, 14, 15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
-    7, 15, 15, 15, 3, 15, 15, 11, 15, 15, 15, 15, 15, 15, 15, 15,
+    13, 15, 15, 15, 12, 15, 15, 14,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    7, 15, 15, 15, 3, 15, 15, 11,
+    15, 15, 15, 15, 15, 15, 15, 15,
 ];
 const START: [u8; 8] = [4, 2, 3, 5, 6, 3, 2, 4];
 // Opening book (scripts/chess/book.py): per position its key (h0, h1), a
@@ -111,6 +122,16 @@ var nodes: u16 = 0;
 @ram var root_to: u8 = 0;
 @ram var root_score: i16 = 0;
 @ram var done_depth: u8 = 0;
+// The search's root: 1 while pondering on top of a predicted move.
+var root_ply: u8 = 0;
+// Nodes between clock checks, minus one: frequent while pondering so a
+// button press ends it within a frame.
+var node_mask: u8 = 63;
+// The best reply found under the root's best move: the move to ponder on.
+@ram var child_from: u8 = 128;
+@ram var child_to: u8 = 0;
+@ram var reply_from: u8 = 128;
+@ram var reply_to: u8 = 0;
 @ram var perft_low: u16 = 0;
 @ram var perft_high: u16 = 0;
 
@@ -152,8 +173,7 @@ var io_arg: [u8; 8] = [0; 8];
 var io_out: [u8; 10] = [0; 10];
 
 // ---------------------------------------------------------------- hashing
-@inline
-fn hash_piece(p: u8, sq: u8) {
+@inline fn hash_piece(p: u8, sq: u8) {
     let i: u8 = sq | Z_OFFSET[p & 15];
     match Z_TABLE[p & 15] {
         0 => {
@@ -171,8 +191,28 @@ fn hash_piece(p: u8, sq: u8) {
     }
 }
 
-@inline
-fn hash_state() {
+// hash_piece(p, from) then hash_piece(p, to), with one table dispatch.
+@inline fn hash_move(p: u8, from: u8, to: u8) {
+    let offset: u8 = Z_OFFSET[p & 15];
+    let a: u8 = from | offset;
+    let b: u8 = to | offset;
+    match Z_TABLE[p & 15] {
+        0 => {
+            h0 ^= Z00[a] ^ Z00[b];
+            h1 ^= Z01[a] ^ Z01[b];
+        }
+        1 => {
+            h0 ^= Z10[a] ^ Z10[b];
+            h1 ^= Z11[a] ^ Z11[b];
+        }
+        _ => {
+            h0 ^= Z20[a] ^ Z20[b];
+            h1 ^= Z21[a] ^ Z21[b];
+        }
+    }
+}
+
+@inline fn hash_state() {
     let c: u8 = castle & 15;
     h0 ^= ZC0[c];
     h1 ^= ZC1[c];
@@ -183,8 +223,7 @@ fn hash_state() {
     }
 }
 
-@inline
-fn hash_side() {
+@inline fn hash_side() {
     h0 ^= ZS[0];
     h1 ^= ZS[1];
 }
@@ -198,14 +237,15 @@ fn place(p: u8, sq: u8, add: bool) {
         s = sq ^ 0x70;
     }
     let i: u8 = s + PST_OFFSET[t];
-    var vm: i16 = MATERIAL_MG[t];
-    var ve: i16 = MATERIAL_EG[t];
+    // The tables' +128 bias is folded into the material values.
+    var vm: i16 = MATERIAL_MG[t] - 128;
+    var ve: i16 = MATERIAL_EG[t] - 128;
     if t < QUEEN {
-        vm += i16(i8(PST_A_MG[i]));
-        ve += i16(i8(PST_A_EG[i]));
+        vm += i16(PST_A_MG[i]);
+        ve += i16(PST_A_EG[i]);
     } else {
-        vm += i16(i8(PST_B_MG[i]));
-        ve += i16(i8(PST_B_EG[i]));
+        vm += i16(PST_B_MG[i]);
+        ve += i16(PST_B_EG[i]);
     }
     if ((p & BLACK) != 0) == add {
         mg -= vm;
@@ -215,6 +255,52 @@ fn place(p: u8, sq: u8, add: bool) {
         eg += ve;
     }
 }
+
+// floor(x * x / 4), split in bytes: a * b = sq(a + b) - sq(a - b).
+const QSQ_LO: [u8; 160] = [
+    0, 0, 1, 2, 4, 6, 9, 12,
+    16, 20, 25, 30, 36, 42, 49, 56,
+    64, 72, 81, 90, 100, 110, 121, 132,
+    144, 156, 169, 182, 196, 210, 225, 240,
+    0, 16, 33, 50, 68, 86, 105, 124,
+    144, 164, 185, 206, 228, 250, 17, 40,
+    64, 88, 113, 138, 164, 190, 217, 244,
+    16, 44, 73, 102, 132, 162, 193, 224,
+    0, 32, 65, 98, 132, 166, 201, 236,
+    16, 52, 89, 126, 164, 202, 241, 24,
+    64, 104, 145, 186, 228, 14, 57, 100,
+    144, 188, 233, 22, 68, 114, 161, 208,
+    0, 48, 97, 146, 196, 246, 41, 92,
+    144, 196, 249, 46, 100, 154, 209, 8,
+    64, 120, 177, 234, 36, 94, 153, 212,
+    16, 76, 137, 198, 4, 66, 129, 192,
+    0, 64, 129, 194, 4, 70, 137, 204,
+    16, 84, 153, 222, 36, 106, 177, 248,
+    64, 136, 209, 26, 100, 174, 249, 68,
+    144, 220, 41, 118, 196, 18, 97, 176,
+];
+const QSQ_HI: [u8; 160] = [
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2,
+    3, 3, 3, 3, 3, 3, 3, 3,
+    4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 6,
+    6, 6, 6, 6, 6, 7, 7, 7,
+    7, 7, 7, 8, 8, 8, 8, 8,
+    9, 9, 9, 9, 9, 9, 10, 10,
+    10, 10, 10, 11, 11, 11, 11, 12,
+    12, 12, 12, 12, 13, 13, 13, 13,
+    14, 14, 14, 14, 15, 15, 15, 15,
+    16, 16, 16, 16, 17, 17, 17, 17,
+    18, 18, 18, 18, 19, 19, 19, 19,
+    20, 20, 20, 21, 21, 21, 21, 22,
+    22, 22, 23, 23, 23, 24, 24, 24,
+];
 
 // Tapers white-relative (m, e) by phase, from the side to move's view.
 fn taper(m: i16, e: i16) -> i16 {
@@ -228,32 +314,34 @@ fn taper(m: i16, e: i16) -> i16 {
     } else if d < -1000 {
         d = -1000;
     }
-    // e + (m - e) * phase / 32, by unrolled shift-and-add (phase <= 32).
+    // e + (m - e) * phase / 32, multiplying |m - e| by quarter squares.
     let w: u8 = PHASE_32[raw p];
-    var product: i16 = 0;
-    if (w & 32) != 0 {
-        product = d << 5;
-    } else {
-        if (w & 1) != 0 {
-            product = d;
-        }
-        d = d << 1;
-        if (w & 2) != 0 {
-            product += d;
-        }
-        d = d << 1;
-        if (w & 4) != 0 {
-            product += d;
-        }
-        d = d << 1;
-        if (w & 8) != 0 {
-            product += d;
-        }
-        if (w & 16) != 0 {
-            product += d << 1;
-        }
+    let negative: bool = d < 0;
+    if negative {
+        d = -d;
     }
-    let v: i16 = e + (product >> 5);
+    let a: u8 = u8(d);
+    let h: u8 = a >> 1;
+    var x: u8 = h - w;
+    if h < w {
+        x = w - h;
+    }
+    let y: u8 = h + w;
+    var product: u16 = ((u16(QSQ_HI[raw y]) << 8) | u16(QSQ_LO[raw y])) - ((u16(QSQ_HI[raw x]) << 8) | u16(QSQ_LO[raw x]));
+    product = product << 1;
+    if (a & 1) != 0 {
+        product += u16(w);
+    }
+    var high: u8 = u8(d >> 8);
+    while high != 0 {
+        product += u16(w) << 8;
+        high -= 1;
+    }
+    var scaled: i16 = i16(product >> 5);
+    if negative {
+        scaled = -scaled;
+    }
+    let v: i16 = e + scaled;
     if side == 0 {
         return v + 10;
     }
@@ -362,8 +450,7 @@ const ALL: u8 = 0;
 const TACTICAL: u8 = 1;
 const QUIET: u8 = 2;
 
-@inline
-fn add_move(from: u8, to: u8) {
+@inline fn add_move(from: u8, to: u8) {
     if msp < 224 {
         move_from[raw msp] = from;
         move_to[raw msp] = to;
@@ -371,8 +458,7 @@ fn add_move(from: u8, to: u8) {
     }
 }
 
-@inline
-fn add_promotions(from: u8, to: u8) {
+@inline fn add_promotions(from: u8, to: u8) {
     add_move(from | 0x80, to);
     add_move(from | 0x80, to | 0x80);
     if all_promotions {
@@ -381,8 +467,7 @@ fn add_promotions(from: u8, to: u8) {
     }
 }
 
-@inline
-fn pawn_capture(from: u8, target: u8, last: bool) {
+@inline fn pawn_capture(from: u8, target: u8, last: bool) {
     if (target & 0x88) == 0 {
         let victim: u8 = board[raw target];
         if victim != 0 {
@@ -399,8 +484,7 @@ fn pawn_capture(from: u8, target: u8, last: bool) {
     }
 }
 
-@inline
-fn gen_pawn(from: u8, mode: u8) {
+@inline fn gen_pawn(from: u8, mode: u8) {
     var forward: u8 = 16;
     var home: u8 = 1;
     if side != 0 {
@@ -428,8 +512,7 @@ fn gen_pawn(from: u8, mode: u8) {
     }
 }
 
-@inline
-fn gen_step(from: u8, to: u8, mode: u8) {
+@inline fn gen_step(from: u8, to: u8, mode: u8) {
     if (to & 0x88) == 0 {
         let q: u8 = board[raw to];
         if q == 0 {
@@ -442,22 +525,19 @@ fn gen_step(from: u8, to: u8, mode: u8) {
     }
 }
 
-@inline
-fn gen_knight(from: u8, mode: u8) {
+@inline fn gen_knight(from: u8, mode: u8) {
     for k in 0..8 {
         gen_step(from, from + KNIGHT_DIRS[k], mode);
     }
 }
 
-@inline
-fn gen_king(from: u8, mode: u8) {
+@inline fn gen_king(from: u8, mode: u8) {
     for k in 0..8 {
         gen_step(from, from + DIRS[k], mode);
     }
 }
 
-@inline
-fn gen_slider(from: u8, first: u8, last: u8, mode: u8) {
+@inline fn gen_slider(from: u8, first: u8, last: u8, mode: u8) {
     for d in first..last {
         let step: u8 = DIRS[raw d];
         var to: u8 = from + step;
@@ -487,19 +567,14 @@ fn gen_castles() {
             add_move(base + 4, base + 6);
         }
     }
-    if (rights & 2) != 0
-        && board[raw base + 1] == 0
-        && board[raw base + 2] == 0
-        && board[raw base + 3] == 0
-    {
+    if (rights & 2) != 0 && board[raw base + 1] == 0 && board[raw base + 2] == 0 && board[raw base + 3] == 0 {
         if !attacked(base + 3, enemy) {
             add_move(base + 4, base + 2);
         }
     }
 }
 
-@inline
-fn generate(mode: u8) {
+@inline fn generate(mode: u8) {
     let base: u8 = side << 1;
     let end: u8 = base + piece_count[raw side >> 3];
     for k in base..end {
@@ -544,21 +619,18 @@ fn generate_quiet() {
 }
 
 // ---------------------------------------------------------------- make/unmake
-@inline
-fn move_piece(p: u8, from: u8, to: u8) {
+@inline fn move_piece(p: u8, from: u8, to: u8) {
     board[raw to] = p;
     board[raw from] = 0;
     let index: u8 = board[raw from | 8];
     board[raw to | 8] = index;
     plist[raw index] = to;
     pst_shift(p, from, to);
-    hash_piece(p, from);
-    hash_piece(p, to);
+    hash_move(p, from, to);
 }
 
 // Material is unchanged by a move: only the placement terms change.
-@inline
-fn pst_shift(p: u8, from: u8, to: u8) {
+@inline fn pst_shift(p: u8, from: u8, to: u8) {
     let t: u8 = p & 7;
     var a: u8 = from;
     var b: u8 = to;
@@ -569,14 +641,15 @@ fn pst_shift(p: u8, from: u8, to: u8) {
     let offset: u8 = PST_OFFSET[t];
     a += offset;
     b += offset;
+    // Biased bytes: the difference needs no sign extension.
     var dm: i16 = 0;
     var de: i16 = 0;
     if t < QUEEN {
-        dm = i16(i8(PST_A_MG[b])) - i16(i8(PST_A_MG[a]));
-        de = i16(i8(PST_A_EG[b])) - i16(i8(PST_A_EG[a]));
+        dm = i16(PST_A_MG[b]) - i16(PST_A_MG[a]);
+        de = i16(PST_A_EG[b]) - i16(PST_A_EG[a]);
     } else {
-        dm = i16(i8(PST_B_MG[b])) - i16(i8(PST_B_MG[a]));
-        de = i16(i8(PST_B_EG[b])) - i16(i8(PST_B_EG[a]));
+        dm = i16(PST_B_MG[b]) - i16(PST_B_MG[a]);
+        de = i16(PST_B_EG[b]) - i16(PST_B_EG[a]);
     }
     if (p & BLACK) != 0 {
         mg -= dm;
@@ -809,8 +882,7 @@ fn unmake(mf: u8, mt: u8) {
 }
 
 // Undoes a swap-remove: the captured piece retakes slot `index`.
-@inline
-fn restore_piece(color: u8, sq: u8, index: u8) {
+@inline fn restore_piece(color: u8, sq: u8, index: u8) {
     let c: u8 = color >> 3;
     let last: u8 = (c << 4) + piece_count[raw c];
     piece_count[raw c] += 1;
@@ -823,8 +895,7 @@ fn restore_piece(color: u8, sq: u8, index: u8) {
     board[raw sq | 8] = index;
 }
 
-@inline
-fn unmove_rook(at: u8, home: u8) {
+@inline fn unmove_rook(at: u8, home: u8) {
     board[raw home] = board[raw at];
     board[raw at] = 0;
     let index: u8 = board[raw at | 8];
@@ -866,8 +937,7 @@ fn unmake_null() {
 }
 
 // ---------------------------------------------------------------- ordering
-@inline
-fn swap_moves(a: u8, b: u8) {
+@inline fn swap_moves(a: u8, b: u8) {
     let f: u8 = move_from[raw a];
     let t: u8 = move_to[raw a];
     move_from[raw a] = move_from[raw b];
@@ -915,8 +985,7 @@ fn order_tactical(first: u8, last: u8) {
     }
 }
 
-@inline
-fn history_index(to: u8) -> u8 {
+@inline fn history_index(to: u8) -> u8 {
     return ((to & 0x70) >> 1) | (to & 7) | (side << 3);
 }
 
@@ -1012,18 +1081,17 @@ fn check_time() {
     let now: u8 = peek(0x037e);
     elapsed += u16(now - last_tick);
     last_tick = now;
-    if elapsed >= time_limit || (abort_search != 0 && done_depth != 0) {
+    if elapsed >= time_limit || (abort_search != 0 && (done_depth != 0 || pondering != 0)) {
         stop = true;
     }
 }
 
-@inline
-fn count_node() {
+@inline fn count_node() {
     nodes += 1;
     if nodes == 0 {
         nodes_high += 1;
     }
-    if (u8(nodes) & 63) == 0 {
+    if (u8(nodes) & node_mask) == 0 {
         check_time();
     }
 }
@@ -1068,15 +1136,13 @@ fn has_pieces() -> bool {
     return false;
 }
 
-@inline
-fn king_attacked() -> bool {
+@inline fn king_attacked() -> bool {
     return attacked(plist[raw side << 1], side ^ BLACK);
 }
 
 // Children leave msp at the end of their parent's list, so `msp` doubles as
 // the end of the current move list and is never saved across recursion.
-@recursive(20)
-fn qsearch(alpha_in: i16, beta: i16) -> i16 {
+@recursive(20) fn qsearch(alpha_in: i16, beta: i16) -> i16 {
     var alpha: i16 = alpha_in;
     count_node();
     if stop {
@@ -1111,8 +1177,7 @@ fn qsearch(alpha_in: i16, beta: i16) -> i16 {
         if (mf & 0x80) == 0 {
             let gain: i16 = DELTA_VALUE[board[raw mt & 0x77] & 7];
             // Too little to matter, or a bigger piece taking a defended one.
-            skip = gain < futile
-                || (DELTA_VALUE[board[raw mf & 0x77] & 7] > gain + 50 && pawn_defended(mt & 0x77));
+            skip = gain < futile || (DELTA_VALUE[board[raw mf & 0x77] & 7] > gain + 50 && pawn_defended(mt & 0x77));
         }
         if !skip && make(mf, mt) {
             let v: i16 = -qsearch(-beta, -alpha);
@@ -1147,8 +1212,7 @@ fn pawn_defended(sq: u8) -> bool {
     return ((a & 0x88) == 0 && board[raw a] == pawn) || ((b & 0x88) == 0 && board[raw b] == pawn);
 }
 
-@inline
-fn is_quiet(i: u8) -> bool {
+@inline fn is_quiet(i: u8) -> bool {
     return (move_from[raw i] & 0x80) == 0 && board[raw move_to[raw i] & 0x77] == 0;
 }
 
@@ -1156,7 +1220,7 @@ fn is_quiet(i: u8) -> bool {
 fn may_check(i: u8) -> bool {
     let from: u8 = move_from[raw i] & 0x77;
     let to: u8 = move_to[raw i] & 0x77;
-    let king: u8 = plist[raw (side ^ BLACK) << 1];
+    let king: u8 = plist[raw(side ^ BLACK) << 1];
     if LINE_KIND[from + 119 - king] != 0 {
         return true;
     }
@@ -1202,8 +1266,7 @@ const FLAG_FUTILE: u8 = 16;
 const FUTILITY: [i16; 4] = [0, 150, 320, 500];
 const REVERSE_FUTILITY: [i16; 4] = [0, 110, 230, 360];
 
-@recursive(20)
-fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
+@recursive(20) fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
     var alpha: i16 = alpha_in;
     var depth: u8 = depth_in;
     var flags: u8 = 0;
@@ -1218,7 +1281,7 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
     if stop {
         return 0;
     }
-    if ply != 0 && is_draw() {
+    if ply != root_ply && is_draw() {
         return 0;
     }
     if ply >= MAXPLY - 6 {
@@ -1259,7 +1322,10 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
         return evaluate();
     }
     in_check = (flags & FLAG_CHECK) != 0;
-    if ply == 0 {
+    if ply == root_ply + 1 {
+        child_from = NONE;
+    }
+    if ply == root_ply {
         order_root(first);
         flags |= FLAG_QUIETS;
     } else {
@@ -1334,10 +1400,15 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
                 tt_check[entry] = h1;
                 tt_from[entry] = move_from[raw i];
                 tt_to[entry] = move_to[raw i];
-                if ply == 0 {
+                if ply == root_ply {
                     root_from = move_from[raw i];
                     root_to = move_to[raw i];
                     root_score = v;
+                    reply_from = child_from;
+                    reply_to = child_to;
+                } else if ply == root_ply + 1 {
+                    child_from = move_from[raw i];
+                    child_to = move_to[raw i];
                 }
                 if v >= beta {
                     if is_quiet(i) {
@@ -1429,9 +1500,10 @@ fn think() {
     stop = false;
     elapsed = 0;
     last_tick = peek(0x037e);
-    ply = 0;
+    ply = root_ply;
     msp = 0;
     root_from = NONE;
+    reply_from = NONE;
     done_depth = 0;
     for k in 0..20 {
         killer1_from[raw k] = 0;
@@ -1449,17 +1521,12 @@ fn think() {
         }
         root_score = v;
         done_depth = depth;
-        if (max_depth != 0 && depth >= max_depth)
-            || depth >= MAXPLY - 8
-            || elapsed > (time_limit >> 1)
-            || v > MATE - 100
-            || v < 100 - MATE
-        {
+        if (max_depth != 0 && depth >= max_depth) || depth >= MAXPLY - 8 || elapsed > (time_limit >> 1) || v > MATE - 100 || v < 100 - MATE {
             break;
         }
         depth += 1;
     }
-    ply = 0;
+    ply = root_ply;
 }
 
 // ---------------------------------------------------------------- game setup
@@ -1534,6 +1601,9 @@ fn new_game() {
     }
     setup(0, 15, NONE);
     in_book = true;
+    reply_from = NONE;
+    ponder_ready = false;
+    ponder_valid = false;
 }
 
 // Plays a move from outside the search; returns false if it is not legal.
@@ -1566,8 +1636,7 @@ fn play(from: u8, to: u8, promotion: u8) -> bool {
     return false;
 }
 
-@recursive(10)
-fn perft(depth: u8) {
+@recursive(10) fn perft(depth: u8) {
     let first: u8 = msp;
     let checked: bool = in_check;
     all_promotions = true;
@@ -1659,7 +1728,8 @@ fn handle_io() {
             io_out[5] = u8(u16(eg) >> 8);
             io_out[6] = phase;
         }
-        _ => {}
+        _ => {
+        }
     }
     io_cmd = 0;
 }
@@ -1702,6 +1772,19 @@ var game_from: [u8; 16] = [0; 16];
 var game_to: [u8; 16] = [0; 16];
 @shared var searching: u8 = 0;
 @shared var abort_search: u8 = 0;
+// Thinking on the human's time; any button ends it.
+@shared var pondering: u8 = 0;
+var ponder_ready: bool = false;
+var ponder_valid: bool = false;
+// The expected human move, and the hash and best answer found after it.
+@ram var ponder_move: u8 = 0;
+@ram var ponder_target: u8 = 0;
+var ponder_h0: u8 = 0;
+var ponder_h1: u8 = 0;
+var ponder_from: u8 = 0;
+var ponder_to: u8 = 0;
+var ponder_depth: u8 = 0;
+var ponder_frames: u16 = 0;
 var spin: u8 = 0;
 // Promotion prompt: 0 closed, else 1 + index into PROMOTE_PIECES.
 var promoting: u8 = 0;
@@ -2181,11 +2264,21 @@ fn engine_turn() {
     time_limit = LEVEL_FRAMES[level & 7];
     max_depth = LEVEL_DEPTH[level & 7];
     abort_search = 0;
-    if game_plies >= 30 || !book_move() {
+    let hit: bool = ponder_valid && h0 == ponder_h0 && h1 == ponder_h1 && (ponder_frames >= (time_limit >> 1) || (max_depth != 0 && ponder_depth >= max_depth));
+    ponder_valid = false;
+    if game_plies < 30 && book_move() {
+        reply_from = NONE;
+    } else if hit {
+        // Pondering already searched this position for long enough; its
+        // expected reply is still in reply_from for the next ponder.
+        root_from = ponder_from;
+        root_to = ponder_to;
+    } else {
         searching = 1;
         think();
         searching = 0;
     }
+    ponder_ready = true;
     var promotion: u8 = 0;
     if (root_from & 0x80) != 0 {
         promotion = PROMOTIONS[((root_to >> 7) | ((root_from >> 2) & 2)) & 3];
@@ -2196,6 +2289,43 @@ fn engine_turn() {
         outcome = 2;
     }
     text_dirty |= TEXT_STATUS | TEXT_STATUS2;
+}
+
+// While the human thinks, search the position after their expected reply.
+// A press of any button stops it; engine_turn uses the result on a match.
+fn ponder() {
+    ponder_ready = false;
+    if reply_from == NONE || !legal_move(reply_from, reply_to) {
+        return;
+    }
+    in_check = king_attacked();
+    let mf: u8 = reply_from;
+    let mt: u8 = reply_to;
+    ponder_move = mf;
+    ponder_target = mt;
+    make(mf, mt);
+    ponder_h0 = h0;
+    ponder_h1 = h1;
+    root_ply = 1;
+    time_limit = 60000;
+    max_depth = LEVEL_DEPTH[level & 7];
+    abort_search = 0;
+    pondering = 1;
+    node_mask = 3;
+    think();
+    node_mask = 63;
+    pondering = 0;
+    abort_search = 0;
+    ply = 1;
+    unmake(mf, mt);
+    root_ply = 0;
+    ply = 0;
+    msp = 0;
+    ponder_from = root_from;
+    ponder_to = root_to;
+    ponder_depth = done_depth;
+    ponder_frames = elapsed;
+    ponder_valid = root_from != NONE;
 }
 
 fn promotion_input(edge: u8) {
@@ -2356,8 +2486,18 @@ fn open_menu() {
 
 // Every vblank, even while a search keeps the main loop busy: animate the
 // thinking indicator and let B stop the search.
-@vblank
-fn background() {
+@vblank fn background() {
+    if pondering != 0 {
+        poke(0x4016, 1);
+        poke(0x4016, 0);
+        var held: u8 = 0;
+        for k in 0..8 {
+            held |= peek(0x4016) & 1;
+        }
+        if held != 0 {
+            abort_search = 1;
+        }
+    }
     if searching != 0 {
         spin += 1;
         poke(0x4016, 1);
@@ -2404,6 +2544,9 @@ fn update() {
         return;
     }
     if human_to_move() {
+        if ponder_ready && sfx_timer == 0 && edge == 0 && screen_idle() {
+            ponder();
+        }
         human_turn(edge, held);
     } else {
         engine_turn();

@@ -140,7 +140,10 @@ impl Generator<'_> {
         if op.starts_with("st") {
             let prefix = format!("{}+", temporary_label(&self.function));
             if let Some(rest) = arg.as_ref().strip_prefix(&prefix) {
-                let offset: usize = rest.split('+').filter_map(|n| n.parse::<usize>().ok()).sum();
+                let offset: usize = rest
+                    .split('+')
+                    .filter_map(|n| n.parse::<usize>().ok())
+                    .sum();
                 self.written_temps.insert(offset);
             }
         }
@@ -1418,7 +1421,9 @@ impl Generator<'_> {
 fn y_free(body: &[Stmt]) -> bool {
     let mut ok = true;
     visit_block(body, &mut |e| match &e.kind {
-        ExprKind::Call(n, _) if !["u8", "i8", "u16", "i16", "bool"].contains(&n.as_str()) => ok = false,
+        ExprKind::Call(n, _) if !["u8", "i8", "u16", "i16", "bool"].contains(&n.as_str()) => {
+            ok = false
+        }
         ExprKind::Asm(..) | ExprKind::Match(..) => ok = false,
         ExprKind::Binary(op, _, r)
             if ["*", "/", "%"].contains(&op.as_str())
@@ -1826,7 +1831,10 @@ pub fn generate(
                 ram.alloc(size).ok_or_else(|| {
                     err(
                         global.span,
-                        format!("'{}' ({size} bytes) does not fit in free internal RAM", global.name),
+                        format!(
+                            "'{}' ({size} bytes) does not fit in free internal RAM",
+                            global.name
+                        ),
                     )
                 })?
             };

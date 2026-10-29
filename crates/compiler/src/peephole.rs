@@ -6,6 +6,8 @@
 //!   stores of a value memory already holds, and `cmp #0` after an instruction
 //!   whose flags already describe A.
 //! * Dead stores: overwritten stores and stores to never-read temporaries.
+//! * Dead loads: a load whose register and flags the next instruction
+//!   replaces without reading them.
 //! * `jsr f` + `rts` becomes `jmp f`.
 //!
 //! Hardware addresses (`$xxxx` operands), shared bytes inside `;@barrier`
@@ -68,7 +70,10 @@ fn canonical(arg: &str) -> String {
 }
 
 fn is_branch(op: &str) -> bool {
-    matches!(op, "bcc" | "bcs" | "beq" | "bne" | "bmi" | "bpl" | "bvc" | "bvs")
+    matches!(
+        op,
+        "bcc" | "bcs" | "beq" | "bne" | "bmi" | "bpl" | "bvc" | "bvs"
+    )
 }
 
 /// Compiler-owned memory whose value only changes through visible stores.
@@ -137,13 +142,15 @@ impl Program {
                 Line::Barrier(b) => opaque = *b,
                 Line::Label(_) => {}
                 Line::Instr { op, arg }
-                    if !opaque && (op == "jmp" || is_branch(op)) && self.labels.contains_key(arg) =>
+                    if !opaque
+                        && (op == "jmp" || is_branch(op))
+                        && self.labels.contains_key(arg) =>
                 {
                     jumps.entry(arg.clone()).or_default().push(i);
                 }
                 _ => {
-                    for word in self.lines[i]
-                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    for word in
+                        self.lines[i].split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                     {
                         if self.labels.contains_key(word) {
                             other.insert(word.to_owned());
@@ -167,7 +174,13 @@ impl Program {
     }
     /// Does any path from `i` read the given flags before they are rewritten?
     /// `carry`: track C; otherwise N/Z.
-    fn reads_flag(&self, i: usize, carry: bool, budget: &mut usize, seen: &mut BTreeSet<usize>) -> bool {
+    fn reads_flag(
+        &self,
+        i: usize,
+        carry: bool,
+        budget: &mut usize,
+        seen: &mut BTreeSet<usize>,
+    ) -> bool {
         let mut i = i;
         loop {
             if *budget == 0 {
@@ -187,17 +200,45 @@ impl Program {
             let (reads, writes) = if carry {
                 (
                     matches!(op, "bcc" | "bcs" | "adc" | "sbc" | "rol" | "ror" | "php"),
-                    matches!(op, "clc" | "sec" | "cmp" | "cpx" | "cpy" | "asl" | "lsr" | "plp"),
+                    matches!(
+                        op,
+                        "clc" | "sec" | "cmp" | "cpx" | "cpy" | "asl" | "lsr" | "plp"
+                    ),
                 )
             } else {
                 (
                     matches!(op, "beq" | "bne" | "bmi" | "bpl" | "php"),
                     matches!(
                         op,
-                        "lda" | "ldx" | "ldy" | "and" | "ora" | "eor" | "adc" | "sbc" | "cmp"
-                            | "cpx" | "cpy" | "bit" | "inc" | "dec" | "inx" | "iny" | "dex"
-                            | "dey" | "tax" | "tay" | "txa" | "tya" | "tsx" | "pla" | "asl"
-                            | "lsr" | "rol" | "ror" | "plp"
+                        "lda"
+                            | "ldx"
+                            | "ldy"
+                            | "and"
+                            | "ora"
+                            | "eor"
+                            | "adc"
+                            | "sbc"
+                            | "cmp"
+                            | "cpx"
+                            | "cpy"
+                            | "bit"
+                            | "inc"
+                            | "dec"
+                            | "inx"
+                            | "iny"
+                            | "dex"
+                            | "dey"
+                            | "tax"
+                            | "tay"
+                            | "txa"
+                            | "tya"
+                            | "tsx"
+                            | "pla"
+                            | "asl"
+                            | "lsr"
+                            | "rol"
+                            | "ror"
+                            | "plp"
                     ),
                 )
             };
@@ -261,6 +302,7 @@ pub fn optimize(source: &str) -> (String, usize) {
         lines = jumps(lines, &mut changes);
         lines = registers(lines, &mut changes);
         lines = dead_stores(lines, &mut changes);
+        lines = dead_loads(lines, &mut changes);
         if changes == before {
             break;
         }
@@ -320,11 +362,20 @@ fn jumps(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
                 while j < p.parsed.len() {
                     match &p.parsed[j] {
                         Line::Label(l) if !referenced(l) => j += 1,
-                        Line::Other if p.lines[j].trim().is_empty() || p.lines[j].trim().starts_with(';') => j += 1,
+                        Line::Other
+                            if p.lines[j].trim().is_empty()
+                                || p.lines[j].trim().starts_with(';') =>
+                        {
+                            j += 1
+                        }
                         _ => break,
                     }
                 }
-                let Some(Line::Instr { op: jop, arg: target }) = p.parsed.get(j) else {
+                let Some(Line::Instr {
+                    op: jop,
+                    arg: target,
+                }) = p.parsed.get(j)
+                else {
                     continue;
                 };
                 if jop != "jmp" || target.starts_with('(') || skip[j] {
@@ -340,7 +391,12 @@ fn jumps(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
                             }
                             k += 1;
                         }
-                        Line::Other if p.lines[k].trim().is_empty() || p.lines[k].trim().starts_with(';') => k += 1,
+                        Line::Other
+                            if p.lines[k].trim().is_empty()
+                                || p.lines[k].trim().starts_with(';') =>
+                        {
+                            k += 1
+                        }
                         _ => break,
                     }
                 }
@@ -466,7 +522,11 @@ fn registers(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
                     "lda" | "ldx" | "ldy" => {
                         let reg = op.chars().nth(2).unwrap();
                         // A value just stored from A: transfer instead of load.
-                        if reg != 'a' && trackable(arg) && r.a.contains(arg) && !r.reg(reg).contains(arg) {
+                        if reg != 'a'
+                            && trackable(arg)
+                            && r.a.contains(arg)
+                            && !r.reg(reg).contains(arg)
+                        {
                             out_text[i] = Some(format!("  ta{reg}"));
                             *changes += 1;
                             let a = r.a.clone();
@@ -632,6 +692,58 @@ fn dead_stores(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
                 *changes += 1;
             }
             _ => {}
+        }
+    }
+    p.lines
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(l, k)| k.then_some(l))
+        .collect()
+}
+
+/// Removes `lda`/`ldx`/`ldy` of side-effect-free operands (immediates and
+/// compiler-owned memory, possibly indexed) when the next instruction, on
+/// the same straight-line path, reloads that register without reading it.
+fn dead_loads(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
+    let p = Program::new(lines);
+    let mut keep = vec![true; p.lines.len()];
+    let mut opaque = false;
+    for (i, line) in p.parsed.iter().enumerate() {
+        let Line::Instr { op, arg } = line else {
+            if let Line::Barrier(b) = line {
+                opaque = *b;
+            }
+            continue;
+        };
+        if opaque || !matches!(op.as_str(), "lda" | "ldx" | "ldy") {
+            continue;
+        }
+        if !(arg.starts_with('#') || arg.trim_start_matches('(').starts_with("__")) {
+            continue;
+        }
+        let reg = op.chars().nth(2).unwrap();
+        // The very next line must be the replacing instruction: a label in
+        // between could be entered with the first load's value.
+        let Some(Line::Instr {
+            op: next,
+            arg: next_arg,
+        }) = p.parsed.get(i + 1)
+        else {
+            continue;
+        };
+        let replaces = match reg {
+            'a' => matches!(next.as_str(), "lda" | "pla" | "txa" | "tya"),
+            'x' => matches!(next.as_str(), "ldx" | "tax" | "tsx"),
+            _ => matches!(next.as_str(), "ldy" | "tay"),
+        };
+        let reads_self = match reg {
+            'x' => next_arg.contains(",x"),
+            'y' => next_arg.contains(",y"),
+            _ => false,
+        };
+        if replaces && !reads_self {
+            keep[i] = false;
+            *changes += 1;
         }
     }
     p.lines

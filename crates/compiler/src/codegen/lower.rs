@@ -264,7 +264,18 @@ impl Generator<'_> {
                 self.op("adc", "#1");
             }
             ExprKind::Call(n, args) if cast_name(n) && n != "bool" => {
-                if args[0].ty.wide() {
+                if let Some((w, n, signed)) = self.high_byte(&args[0]) {
+                    // The low byte of a wide value shifted right by 8 or more.
+                    self.op("lda", &w.hi);
+                    for _ in 8..n {
+                        if signed {
+                            self.op("cmp", "#128");
+                            self.op("ror", "a");
+                        } else {
+                            self.op("lsr", "a");
+                        }
+                    }
+                } else if args[0].ty.wide() {
                     // Truncation: the low byte.
                     match self.wide_operand(&args[0]) {
                         Some(w) => self.op("lda", &w.lo),
@@ -362,6 +373,9 @@ impl Generator<'_> {
         let saved = self.temp;
         let hi = format!("{dst}+1");
         if let Some(w) = self.wide_operand(e) {
+            if w.lo == dst {
+                return Ok(());
+            }
             self.op("lda", &w.lo);
             self.op("sta", dst);
             self.op("lda", &w.hi);
@@ -379,8 +393,43 @@ impl Generator<'_> {
             self.temp = saved;
             return Ok(());
         }
+        if let Some((high, low)) = byte_pair(e) {
+            // (u16(high) << 8) | u16(low): each byte straight into place.
+            self.byte_expr(low)?;
+            self.op("sta", dst);
+            self.byte_expr(high)?;
+            self.op("sta", &hi);
+            self.temp = saved;
+            return Ok(());
+        }
         match &e.kind {
             ExprKind::Binary(op, l, r) if ["+", "-", "&", "|", "^"].contains(&op.as_str()) => {
+                // Two widened unsigned bytes: one byte operation, then the
+                // carry or borrow becomes the high byte.
+                if op == "+" || op == "-" {
+                    let pair = widened_byte(l)
+                        .zip(widened_byte(r))
+                        .filter(|(a, b)| !a.ty.signed() && !b.ty.signed());
+                    if let Some((a, b)) = pair {
+                        if let Some(operand) = self.byte_operand(b, 'x') {
+                            self.byte_expr(a)?;
+                            let inst = if op == "+" {
+                                self.op("clc", "");
+                                "adc"
+                            } else {
+                                self.op("sec", "");
+                                "sbc"
+                            };
+                            self.apply(inst, &operand);
+                            self.op("sta", dst);
+                            self.op("lda", "#0");
+                            self.op(inst, "#0");
+                            self.op("sta", &hi);
+                            self.temp = saved;
+                            return Ok(());
+                        }
+                    }
+                }
                 // Adding a widened byte: add A, then propagate carry/sign.
                 if op == "+" || op == "-" {
                     if let Some(byte) = widened_byte(r) {
@@ -477,8 +526,38 @@ impl Generator<'_> {
                 if !(0..16).contains(&n) {
                     return self.wide_fallback(e, dst);
                 }
-                self.wide_to(l, dst)?;
                 let mut n = n;
+                let source = if n >= 8 && op == "<<" {
+                    widened_byte(l).filter(|b| !b.ty.wide())
+                } else {
+                    None
+                };
+                if let Some(byte) = source {
+                    self.byte_expr(byte)?;
+                    self.op("sta", &hi);
+                    self.op("lda", "#0");
+                    self.op("sta", dst);
+                    n -= 8;
+                } else if let (true, Some(w)) = (n >= 8, self.wide_operand(l)) {
+                    n -= 8;
+                    if op == "<<" {
+                        self.op("lda", &w.lo);
+                        self.op("sta", &hi);
+                        self.op("lda", "#0");
+                        self.op("sta", dst);
+                    } else {
+                        self.op("lda", &w.hi);
+                        self.op("sta", dst);
+                        if l.ty.signed() {
+                            self.sign_byte();
+                        } else {
+                            self.op("lda", "#0");
+                        }
+                        self.op("sta", &hi);
+                    }
+                } else {
+                    self.wide_to(l, dst)?;
+                }
                 if n >= 8 {
                     n -= 8;
                     if op == "<<" {
@@ -527,6 +606,18 @@ impl Generator<'_> {
         }
         self.temp = saved;
         Ok(())
+    }
+
+    /// `x >> n` with 8 <= n < 16 and `x` a plain wide operand.
+    fn high_byte(&self, e: &Expr) -> Option<(Wide, i64, bool)> {
+        let ExprKind::Binary(op, l, r) = &e.kind else {
+            return None;
+        };
+        let n = eval_const(r, &self.constants)?;
+        if op != ">>" || !(8..16).contains(&n) || !l.ty.wide() {
+            return None;
+        }
+        Some((self.wide_operand(l)?, n, l.ty.signed()))
     }
 
     /// A = $FF if A is negative, else 0.
@@ -591,7 +682,10 @@ impl Generator<'_> {
         }
         let saved = self.temp;
         let (mut op, mut l, mut r) = (op, l, r);
-        if self.byte_operand(r, 'x').is_none() && self.byte_operand(l, 'x').is_some() && !has_call(r) {
+        if self.byte_operand(r, 'x').is_none()
+            && self.byte_operand(l, 'x').is_some()
+            && !has_call(r)
+        {
             (op, l, r) = (swapped(op), r, l);
         }
         let signed = l.ty.signed() && op != "==" && op != "!=";
@@ -741,7 +835,11 @@ impl Generator<'_> {
 
     /// `target = value` for byte and 16-bit names and byte-indexed arrays.
     /// Returns false if the form is left to the general lowering.
-    pub(super) fn assign_direct(&mut self, target: &Expr, value: &Expr) -> Result<bool, Diagnostic> {
+    pub(super) fn assign_direct(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+    ) -> Result<bool, Diagnostic> {
         let saved = self.temp;
         match &target.kind {
             ExprKind::Name(n) => {
@@ -766,7 +864,10 @@ impl Generator<'_> {
                     return Ok(false);
                 };
                 // Source order: a call in the value may change the index.
-                let ordered = has_call(value) && !self.byte_operand(index, 'x').is_some_and(|o| o.text.starts_with('#'));
+                let ordered = has_call(value)
+                    && !self
+                        .byte_operand(index, 'x')
+                        .is_some_and(|o| o.text.starts_with('#'));
                 let in_y = matches!(&index.kind, ExprKind::Name(n) if self.y_counter.as_deref() == Some(n.as_str()));
                 if t.size() == 1 {
                     if in_y {
@@ -847,6 +948,38 @@ impl Generator<'_> {
     }
 }
 
+/// `(u16(high) << 8) | u16(low)` (or `+`), in either order: its two bytes.
+fn byte_pair(e: &Expr) -> Option<(&Expr, &Expr)> {
+    let ExprKind::Binary(op, l, r) = &e.kind else {
+        return None;
+    };
+    if op != "|" && op != "+" {
+        return None;
+    }
+    fn shifted(x: &Expr) -> Option<&Expr> {
+        let ExprKind::Binary(op, inner, by) = &x.kind else {
+            return None;
+        };
+        let ExprKind::Number(8) = by.kind else {
+            return None;
+        };
+        if op != "<<" {
+            return None;
+        }
+        widened_byte(inner).filter(|b| !b.ty.signed())
+    }
+    fn unsigned(x: &Expr) -> Option<&Expr> {
+        widened_byte(x).filter(|b| !b.ty.signed())
+    }
+    if let (Some(h), Some(lo)) = (shifted(l), unsigned(r)) {
+        return Some((h, lo));
+    }
+    if let (Some(h), Some(lo)) = (shifted(r), unsigned(l)) {
+        return Some((h, lo));
+    }
+    None
+}
+
 fn widened_byte(e: &Expr) -> Option<&Expr> {
     match &e.kind {
         ExprKind::Call(n, args) if (n == "u16" || n == "i16") && !args[0].ty.wide() => {
@@ -860,9 +993,7 @@ fn widened_byte(e: &Expr) -> Option<&Expr> {
 pub(super) fn has_call(e: &Expr) -> bool {
     let mut found = false;
     super::visit_expr(e, &mut |e| match &e.kind {
-        ExprKind::Call(n, _) if !cast_name(n) && n != "buttons" && n != "pressed" => {
-            found = true
-        }
+        ExprKind::Call(n, _) if !cast_name(n) && n != "buttons" && n != "pressed" => found = true,
         ExprKind::Asm(..) | ExprKind::Match(..) => found = true,
         ExprKind::Binary(op, _, _) if ["*", "/", "%"].contains(&op.as_str()) => found = true,
         _ => {}

@@ -1169,7 +1169,15 @@ pub fn analyze(source: &str) -> Analysis {
         });
         for attr in f.attrs.keys() {
             if ![
-                "nmi", "irq", "reset", "export", "inline", "noinline", "cold", "budget", "recursive",
+                "nmi",
+                "irq",
+                "reset",
+                "export",
+                "inline",
+                "noinline",
+                "cold",
+                "budget",
+                "recursive",
                 "vblank",
             ]
             .contains(&attr.as_str())

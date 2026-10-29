@@ -2,6 +2,7 @@
 //! one-byte publication marker. NMI never touches runtime scratch before a
 //! completed frame is published. DMC playback is disabled by this runtime.
 use crate::{codegen::Mapper, frontend::Program};
+#[allow(clippy::too_many_arguments)]
 pub fn runtime(
     mapper: Mapper,
     p: &Program,

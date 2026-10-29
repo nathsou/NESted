@@ -191,7 +191,11 @@ impl Cartridge {
     pub fn think_book(&mut self, frames: u16, depth: u8, book: bool) -> Result<Thought, String> {
         let start = self.m.cycles;
         let [lo, hi] = frames.to_le_bytes();
-        self.command(CMD_THINK, &[lo, hi, depth, u8::from(book)], u64::from(frames) * 4 + 1_000_000)?;
+        self.command(
+            CMD_THINK,
+            &[lo, hi, depth, u8::from(book)],
+            u64::from(frames) * 4 + 1_000_000,
+        )?;
         Ok(Thought {
             from: self.out(0),
             to: self.out(1),
@@ -227,7 +231,10 @@ const PERFT_SUITE: &[(&str, &[u32])] = &[
         "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
         &[48, 2039, 97862],
     ),
-    ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", &[14, 191, 2812, 43238]),
+    (
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        &[14, 191, 2812, 43238],
+    ),
     (
         "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
         &[6, 264, 9467],
@@ -345,7 +352,7 @@ fn run() -> Result<(), String> {
                 let cycles: u64 = profile[*start as usize..end as usize].iter().sum();
                 rows.push((cycles, name.clone(), counts[*start as usize]));
             }
-            rows.sort_by(|a, b| b.0.cmp(&a.0));
+            rows.sort_by_key(|r| std::cmp::Reverse(r.0));
             if let Some(function) = args.next() {
                 // Instruction-level view of one function.
                 let start = c.symbols[&format!("__fn_{function}")];
@@ -396,7 +403,13 @@ fn run() -> Result<(), String> {
                 let fen = line.map_err(|e| e.to_string())?;
                 c.setup_fen(&fen)?;
                 let t = c.think(frames, depth)?;
-                println!("{} {} {} {}", uci_move(t.from, t.to), t.depth, t.score, t.nodes);
+                println!(
+                    "{} {} {} {}",
+                    uci_move(t.from, t.to),
+                    t.depth,
+                    t.score,
+                    t.nodes
+                );
             }
         }
         "moves" => {
@@ -409,9 +422,15 @@ fn run() -> Result<(), String> {
                 let from = c.symbol("move_from");
                 let to = c.symbol("move_to");
                 let list = |a: u16, b: u16| -> Vec<String> {
-                    (a..b).map(|i| uci_move(c.m.peek(from + i), c.m.peek(to + i))).collect()
+                    (a..b)
+                        .map(|i| uci_move(c.m.peek(from + i), c.m.peek(to + i)))
+                        .collect()
                 };
-                println!("{}|{}", list(0, split).join(" "), list(split, end).join(" "));
+                println!(
+                    "{}|{}",
+                    list(0, split).join(" "),
+                    list(split, end).join(" ")
+                );
             }
         }
         "eval" => {
@@ -442,7 +461,11 @@ fn uci(c: &mut Cartridge) -> Result<(), String> {
             Some("uci") => {
                 writeln!(out, "id name NESted Chess").ok();
                 writeln!(out, "id author NESted").ok();
-                writeln!(out, "option name Frames type spin default 600 min 1 max 60000").ok();
+                writeln!(
+                    out,
+                    "option name Frames type spin default 600 min 1 max 60000"
+                )
+                .ok();
                 writeln!(out, "option name Depth type spin default 0 min 0 max 64").ok();
                 writeln!(out, "option name OwnBook type check default true").ok();
                 writeln!(out, "uciok").ok();

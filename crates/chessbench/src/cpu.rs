@@ -121,11 +121,7 @@ impl Machine {
             0x4014 => self.cycles += 513,
             0x4016 => {
                 self.strobe = v & 1 != 0;
-                if self.strobe {
-                    self.shift = self.buttons;
-                } else {
-                    self.shift = self.buttons;
-                }
+                self.shift = self.buttons;
             }
             _ => {}
         }
@@ -260,6 +256,7 @@ impl Machine {
         }
     }
 
+    #[rustfmt::skip]
     pub fn step(&mut self) {
         if self.nmi_pending {
             self.nmi_pending = false;

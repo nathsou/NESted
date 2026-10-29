@@ -389,8 +389,8 @@ fn update() {}
 "#;
     let mut a = [0u8; 32];
     let mut b = [0u8; 32];
-    for k in 0..32 {
-        a[k] = k as u8 + 1;
+    for (k, v) in a.iter_mut().enumerate() {
+        *v = k as u8 + 1;
     }
     for k in 3..20 {
         b[k] = a[k].wrapping_mul(2).wrapping_add(k as u8);
