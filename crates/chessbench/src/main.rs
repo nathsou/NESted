@@ -186,9 +186,12 @@ impl Cartridge {
         ]))
     }
     pub fn think(&mut self, frames: u16, depth: u8) -> Result<Thought, String> {
+        self.think_book(frames, depth, false)
+    }
+    pub fn think_book(&mut self, frames: u16, depth: u8, book: bool) -> Result<Thought, String> {
         let start = self.m.cycles;
         let [lo, hi] = frames.to_le_bytes();
-        self.command(CMD_THINK, &[lo, hi, depth], u64::from(frames) * 4 + 1_000_000)?;
+        self.command(CMD_THINK, &[lo, hi, depth, u8::from(book)], u64::from(frames) * 4 + 1_000_000)?;
         Ok(Thought {
             from: self.out(0),
             to: self.out(1),
@@ -435,6 +438,20 @@ fn run() -> Result<(), String> {
                 println!("{} {}", uci_move(c.out(2), c.out(3)), i16::from_le_bytes([c.out(0), c.out(1)]));
             }
         }
+        "hash" => {
+            // Lines of UCI moves from the initial position.
+            for line in io::stdin().lock().lines() {
+                let line = line.map_err(|e| e.to_string())?;
+                c.new_game()?;
+                for m in line.split_whitespace() {
+                    if !c.play(m)? {
+                        return Err(format!("illegal {m}"));
+                    }
+                }
+                c.command(10, &[], 10)?;
+                println!("{} {} {}", c.out(0), c.out(1), c.out(2));
+            }
+        }
         "eval" => {
             for line in io::stdin().lock().lines() {
                 let fen = line.map_err(|e| e.to_string())?;
@@ -455,6 +472,7 @@ fn uci(c: &mut Cartridge) -> Result<(), String> {
     let mut out = io::stdout();
     let mut frames: u16 = 600;
     let mut depth: u8 = 0;
+    let mut book = true;
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
         let mut words = line.split_whitespace();
@@ -464,6 +482,7 @@ fn uci(c: &mut Cartridge) -> Result<(), String> {
                 writeln!(out, "id author NESted").ok();
                 writeln!(out, "option name Frames type spin default 600 min 1 max 60000").ok();
                 writeln!(out, "option name Depth type spin default 0 min 0 max 64").ok();
+                writeln!(out, "option name OwnBook type check default true").ok();
                 writeln!(out, "uciok").ok();
             }
             Some("isready") => {
@@ -480,6 +499,7 @@ fn uci(c: &mut Cartridge) -> Result<(), String> {
                     match name.as_str() {
                         "Frames" => frames = value.parse().unwrap_or(600),
                         "Depth" => depth = value.parse().unwrap_or(0),
+                        "OwnBook" => book = value == "true",
                         _ => {}
                     }
                 }
@@ -503,7 +523,7 @@ fn uci(c: &mut Cartridge) -> Result<(), String> {
                 }
             }
             Some("go") => {
-                let t = c.think(frames, depth)?;
+                let t = c.think_book(frames, depth, book)?;
                 writeln!(
                     out,
                     "info depth {} score cp {} nodes {} time {}",

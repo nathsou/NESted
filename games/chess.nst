@@ -23,7 +23,7 @@ const QUEEN: u8 = 5;
 const KING: u8 = 6;
 const BLACK: u8 = 8;
 const NONE: u8 = 128;
-const MAXPLY: u8 = 24;
+const MAXPLY: u8 = 20;
 const INF: i16 = 32000;
 const MATE: i16 = 30000;
 
@@ -83,6 +83,10 @@ const CASTLE_KEEP: [u8; 128] = [
     7, 15, 15, 15, 3, 15, 15, 11, 15, 15, 15, 15, 15, 15, 15, 15,
 ];
 const START: [u8; 8] = [4, 2, 3, 5, 6, 3, 2, 4];
+// Opening book (scripts/chess/book.py): 5-byte entries of position key
+// (h0, h1, h2) and move (0x88 from, to).
+const BOOK_BYTES: u16 = 3000;
+const BOOK: [u8; 3000] = asset("assets/chess.book.bin");
 // Piece-list order: king first, then the order quiet moves are tried in.
 const LIST_ORDER: [u8; 6] = [6, 2, 3, 4, 5, 1];
 
@@ -126,26 +130,29 @@ var plist: [u8; 32] = [128; 32];
 var piece_count: [u8; 2] = [0; 2];
 var move_from: [u8; 224] = [0; 224];
 var move_to: [u8; 224] = [0; 224];
+// Transposition table for move ordering: best or refuting move by h0 & 31,
+// verified by h1.
+var tt_check: [u8; 32] = [0; 32];
+var tt_from: [u8; 32] = [0; 32];
+var tt_to: [u8; 32] = [0; 32];
 // Per-ply undo records.
-var undo_moved: [u8; 24] = [0; 24];
-var undo_captured: [u8; 24] = [0; 24];
-var undo_index: [u8; 24] = [0; 24];
-var undo_castle: [u8; 24] = [0; 24];
-var undo_ep: [u8; 24] = [0; 24];
-var undo_fifty: [u8; 24] = [0; 24];
-var undo_h2: [u8; 24] = [0; 24];
-var undo_mg: [i16; 24] = [0; 24];
-var undo_eg: [i16; 24] = [0; 24];
+var undo_moved: [u8; 20] = [0; 20];
+var undo_captured: [u8; 20] = [0; 20];
+var undo_index: [u8; 20] = [0; 20];
+var undo_castle: [u8; 20] = [0; 20];
+var undo_ep: [u8; 20] = [0; 20];
+var undo_fifty: [u8; 20] = [0; 20];
+var undo_h2: [u8; 20] = [0; 20];
 // Hash of recent positions in the game and search path, by game ply & 31.
 var history0: [u8; 32] = [0; 32];
 var history1: [u8; 32] = [0; 32];
 // Quiet-move history: cutoff credit by side and destination square.
 var cutoffs: [u8; 128] = [0; 128];
 var sort_keys: [u8; 64] = [0; 64];
-var killer1_from: [u8; 24] = [0; 24];
-var killer1_to: [u8; 24] = [0; 24];
-var killer2_from: [u8; 24] = [0; 24];
-var killer2_to: [u8; 24] = [0; 24];
+var killer1_from: [u8; 20] = [0; 20];
+var killer1_to: [u8; 20] = [0; 20];
+var killer2_from: [u8; 20] = [0; 20];
+var killer2_to: [u8; 20] = [0; 20];
 
 // Harness mailbox: commands are never issued by the console itself.
 var io_cmd: u8 = 0;
@@ -538,7 +545,14 @@ fn move_piece(p: u8, from: u8, to: u8) {
     let index: u8 = board[raw from | 8];
     board[raw to | 8] = index;
     plist[raw index] = to;
-    // Material is unchanged: only the placement terms move.
+    pst_shift(p, from, to);
+    hash_piece(p, from);
+    hash_piece(p, to);
+}
+
+// Material is unchanged by a move: only the placement terms change.
+@inline
+fn pst_shift(p: u8, from: u8, to: u8) {
     let t: u8 = p & 7;
     var a: u8 = from;
     var b: u8 = to;
@@ -565,8 +579,10 @@ fn move_piece(p: u8, from: u8, to: u8) {
         mg += dm;
         eg += de;
     }
-    hash_piece(p, from);
-    hash_piece(p, to);
+}
+
+fn unshift(p: u8, from: u8, to: u8) {
+    pst_shift(p, to, from);
 }
 
 fn remove_piece(p: u8, sq: u8) {
@@ -653,8 +669,6 @@ fn make(mf: u8, mt: u8) -> bool {
     undo_ep[raw u] = ep;
     undo_fifty[raw u] = fifty;
     undo_h2[raw u] = h2;
-    undo_mg[raw u] = mg;
-    undo_eg[raw u] = eg;
     history0[g] = h0;
     history1[g] = h1;
     if ep != NONE {
@@ -745,6 +759,12 @@ fn unmake(mf: u8, mt: u8) {
     let u: u8 = ply;
     let p: u8 = undo_moved[raw u];
     let captured: u8 = undo_captured[raw u];
+    if (mf & 0x80) != 0 {
+        // Undo the promotion's evaluation change.
+        place(board[raw to], to, false);
+        place(p, to, true);
+    }
+    unshift(p, from, to);
     board[raw from] = p;
     let index: u8 = board[raw to | 8];
     board[raw from | 8] = index;
@@ -752,19 +772,24 @@ fn unmake(mf: u8, mt: u8) {
     if captured == 0x40 {
         board[raw to] = 0;
         let victim: u8 = to ^ 16;
-        board[raw victim] = PAWN | (side ^ BLACK);
+        let pawn: u8 = PAWN | (side ^ BLACK);
+        board[raw victim] = pawn;
         restore_piece(side ^ BLACK, victim, undo_index[raw u]);
+        place(pawn, victim, true);
     } else {
         board[raw to] = captured;
         if captured != 0 {
             restore_piece(side ^ BLACK, to, undo_index[raw u]);
+            place(captured, to, true);
         }
     }
     if (p & 7) == KING {
         if to == from + 2 {
             unmove_rook(from + 1, from + 3);
+            unshift(ROOK | (p & BLACK), from + 3, from + 1);
         } else if from == to + 2 {
             unmove_rook(from - 1, from - 4);
+            unshift(ROOK | (p & BLACK), from - 4, from - 1);
         }
     }
     castle = undo_castle[raw u];
@@ -775,9 +800,7 @@ fn unmake(mf: u8, mt: u8) {
     }
     if (mf & 0x80) != 0 {
         phase -= PHASE_WEIGHT[PROMOTIONS[((mt >> 7) | ((mf >> 2) & 2)) & 3] & 7];
-    }    mg = undo_mg[raw u];
-    eg = undo_eg[raw u];
-    h2 = undo_h2[raw u];
+    }    h2 = undo_h2[raw u];
     let g: u8 = gply & 31;
     h0 = history0[g];
     h1 = history1[g];
@@ -930,6 +953,22 @@ fn order_quiet(first: u8, last: u8) {
     }
 }
 
+// Moves the move from -> to within [first, msp) to `first`, if present.
+fn to_front(first: u8, from: u8, to: u8) -> bool {
+    var h: u8 = first;
+    while h < msp {
+        if move_from[raw h] == from && move_to[raw h] == to {
+            while h > first {
+                swap_moves(h - 1, h);
+                h -= 1;
+            }
+            return true;
+        }
+        h += 1;
+    }
+    return false;
+}
+
 // The root searches everything; the previous iteration's best move first.
 fn order_root(first: u8) {
     generate_tactical();
@@ -1021,7 +1060,7 @@ fn king_attacked() -> bool {
 
 // Children leave msp at the end of their parent's list, so `msp` doubles as
 // the end of the current move list and is never saved across recursion.
-@recursive(24)
+@recursive(20)
 fn qsearch(alpha_in: i16, beta: i16) -> i16 {
     var alpha: i16 = alpha_in;
     count_node();
@@ -1148,7 +1187,7 @@ const FLAG_FUTILE: u8 = 16;
 const FUTILITY: [i16; 4] = [0, 150, 320, 500];
 const REVERSE_FUTILITY: [i16; 4] = [0, 110, 230, 360];
 
-@recursive(24)
+@recursive(20)
 fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
     var alpha: i16 = alpha_in;
     var depth: u8 = depth_in;
@@ -1211,6 +1250,19 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
     } else {
         generate_tactical();
         order_tactical(first, msp);
+        let slot: u8 = h0 & 31;
+        if tt_check[slot] == h1 {
+            let hf: u8 = tt_from[slot];
+            let ht: u8 = tt_to[slot];
+            if !to_front(first, hf, ht) {
+                // A quiet hash move: generate quiet moves now to try it first.
+                flags |= FLAG_QUIETS;
+                let quiet_start: u8 = msp;
+                generate_quiet();
+                order_quiet(quiet_start, msp);
+                to_front(first, hf, ht);
+            }
+        }
     }
     var legal: u8 = 0;
     var i: u8 = first;
@@ -1263,6 +1315,10 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
             }
             if v > alpha {
                 alpha = v;
+                let entry: u8 = h0 & 31;
+                tt_check[entry] = h1;
+                tt_from[entry] = move_from[raw i];
+                tt_to[entry] = move_to[raw i];
                 if ply == 0 {
                     root_from = move_from[raw i];
                     root_to = move_to[raw i];
@@ -1289,6 +1345,43 @@ fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
     return alpha;
 }
 
+// Picks a book move for this position, uniformly among the listed ones.
+fn book_move() -> bool {
+    var count: u8 = 0;
+    var i: u16 = 0;
+    while i < BOOK_BYTES {
+        if BOOK[raw i] == h0 && BOOK[raw i + 1] == h1 && BOOK[raw i + 2] == h2 {
+            count += 1;
+        }
+        i += 5;
+    }
+    if count == 0 {
+        return false;
+    }
+    var pick: u8 = rand();
+    while pick >= count {
+        pick -= count;
+    }
+    i = 0;
+    while i < BOOK_BYTES {
+        if BOOK[raw i] == h0 && BOOK[raw i + 1] == h1 && BOOK[raw i + 2] == h2 {
+            if pick == 0 {
+                root_from = BOOK[raw i + 3];
+                root_to = BOOK[raw i + 4];
+                root_score = 0;
+                done_depth = 0;
+                nodes = 0;
+                nodes_high = 0;
+                elapsed = 0;
+                return true;
+            }
+            pick -= 1;
+        }
+        i += 5;
+    }
+    return false;
+}
+
 fn think() {
     nodes = 0;
     nodes_high = 0;
@@ -1299,7 +1392,7 @@ fn think() {
     msp = 0;
     root_from = NONE;
     done_depth = 0;
-    for k in 0..24 {
+    for k in 0..20 {
         killer1_from[raw k] = 0;
         killer2_from[raw k] = 0;
     }
@@ -1474,7 +1567,9 @@ fn handle_io() {
         3 => {
             time_limit = u16(io_arg[0]) | (u16(io_arg[1]) << 8);
             max_depth = io_arg[2];
-            think();
+            if io_arg[3] == 0 || !book_move() {
+                think();
+            }
             io_out[0] = root_from;
             io_out[1] = root_to;
             io_out[2] = u8(root_score);
@@ -1551,6 +1646,11 @@ fn handle_io() {
             }
             io_out[0] = u8(best);
             io_out[1] = u8(u16(best) >> 8);
+        }
+        10 => {
+            io_out[0] = h0;
+            io_out[1] = h1;
+            io_out[2] = h2;
         }
         6 => {
             let v: i16 = evaluate();
@@ -2076,9 +2176,11 @@ fn engine_turn() {
     time_limit = LEVEL_FRAMES[level & 7];
     max_depth = LEVEL_DEPTH[level & 7];
     abort_search = 0;
-    searching = 1;
-    think();
-    searching = 0;
+    if game_plies >= 30 || !book_move() {
+        searching = 1;
+        think();
+        searching = 0;
+    }
     var promotion: u8 = 0;
     if (root_from & 0x80) != 0 {
         promotion = PROMOTIONS[((root_to >> 7) | ((root_from >> 2) & 2)) & 3];
@@ -2159,6 +2261,8 @@ fn human_turn(edge: u8, held: u8) {
 }
 
 fn menu_input(edge: u8) {
+    // Waiting time seeds the book's choices.
+    let r: u8 = rand();
     if (edge & 16) != 0 {
         menu_item = (menu_item + 3) & 3;
         list_dirty = 255;
