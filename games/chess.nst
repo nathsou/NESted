@@ -1312,8 +1312,8 @@ const FLAG_REDUCED: u8 = 4;
 const FLAG_QUIETS: u8 = 8;
 const FLAG_FUTILE: u8 = 16;
 // Frontier margins by remaining depth.
-const FUTILITY: [i16; 4] = [0, 150, 320, 500];
-const REVERSE_FUTILITY: [i16; 4] = [0, 110, 230, 360];
+const FUTILITY: [i16; 4] = [0, 110, 240, 400];
+const REVERSE_FUTILITY: [i16; 4] = [0, 85, 180, 290];
 
 @recursive(20) fn search(depth_in: u8, alpha_in: i16, beta: i16, can_null: bool) -> i16 {
     var alpha: i16 = alpha_in;
