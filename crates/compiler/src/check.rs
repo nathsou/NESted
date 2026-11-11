@@ -512,6 +512,10 @@ impl<'p> Checker<'p> {
         if r.module as usize == from {
             return;
         }
+        // The standard library may call the program's hooks (`main::init`).
+        if r.module == self.root && self.modules[from].path.starts_with("std/") {
+            return;
+        }
         let item = &self.modules[r.module as usize].ast.items[r.item as usize];
         if !item.public {
             let name = item.name().map(|n| n.name.clone()).unwrap_or_default();

@@ -95,6 +95,9 @@ dependencies = [
 [[package]]
 name = "nested-compiler"
 version = "0.1.0"
+dependencies = [
+ "nested-runtime",
+]
 
 [[package]]
 name = "nested-runtime"

@@ -1798,6 +1798,18 @@ impl Checker<'_> {
             StmtKind::If { cond, then, otherwise } => {
                 let c = self.expr(s, cond, Some(&Type::Bool));
                 let c = self.coerce(s, c, &Type::Bool);
+                // Compile-time conditions (such as `defined(...)`) skip the
+                // other branch entirely, so it may name missing items.
+                match c.constant() {
+                    Some(0) => {
+                        return Some(Stmt::Block(match otherwise {
+                            Some(b) => self.block(s, &b.stmts),
+                            None => Vec::new(),
+                        }));
+                    }
+                    Some(_) => return Some(Stmt::Block(self.block(s, &then.stmts))),
+                    None => {}
+                }
                 let mark = (s.facts.len(), s.slice_facts.len());
                 self.facts_from(s, &c, true);
                 let yes = self.block(s, &then.stmts);
