@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/compiler", "crates/runtime", "crates/cli", "crates/wasm", "crates/chessbench"]
+members = ["crates/emulator", "crates/compiler", "crates/runtime", "crates/cli", "crates/wasm", "crates/chessbench"]
 resolver = "2"
 
 [workspace.package]
@@ -10,7 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 nested-compiler = { path = "crates/compiler" }
 nested-runtime = { path = "crates/runtime" }
-nessy = { git = "https://github.com/nathsou/nessy", rev = "05cf17ca37fcded5856e80fbb9ebf10ede0bfad8" }
+nessy = { path = "crates/emulator" }
 
 [profile.release]
 opt-level = 3
