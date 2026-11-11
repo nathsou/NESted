@@ -904,8 +904,11 @@ impl Gen<'_> {
                 let h = helper_label(name, self.inst.ctx);
                 let x = Opnd::label(format!("{h}_a"));
                 let y = Opnd::label(format!("{h}_b"));
-                self.eval16(a, &x);
-                self.eval16(b, &y);
+                // Operands first: nested helper calls reuse the scratch.
+                let a = self.spill16(a);
+                let b = self.spill16(b);
+                self.eval16(&a, &x);
+                self.eval16(&b, &y);
                 self.jump(Op::Jsr, &h);
                 // Result in A (low) and X (high).
                 self.store_byte(dst, 0);
@@ -1343,6 +1346,10 @@ impl Gen<'_> {
                 let dst = self.var(*v);
                 self.eval16(e, &dst);
             }
+            Place::Mem(o, None) if self.obj(*o).len.is_none() && !self.is_operand16(e) => {
+                let dst = self.obj_byte(*o, 0);
+                self.eval16(e, &dst);
+            }
             Place::Mem(o, idx) => {
                 let big = self.obj(*o).len.unwrap_or(0) > 256;
                 let simple_idx = idx.as_ref().is_none_or(|i| i.konst().is_some() || self.is_index_simple(i));
@@ -1528,7 +1535,13 @@ impl Gen<'_> {
         // Results.
         let ret_scs: Vec<Sc> = callee.rets.iter().map(|r| callee.vars[r.0 as usize].sc).collect();
         let callee_rets = callee.rets.clone();
-        if ret_scs.len() == 1 && !rets.is_empty() {
+        if let ([sc], [Place::Var(v)], false) = (ret_scs.as_slice(), rets, recursive && !saved.is_empty()) {
+            let dst = self.var(*v);
+            self.ins(Op::Sta, Arg::Mem(dst.clone()));
+            if sc.wide() {
+                self.ins(Op::Stx, Arg::Mem(dst.plus(1)));
+            }
+        } else if ret_scs.len() == 1 && !rets.is_empty() {
             let sc = ret_scs[0];
             let t = self.new_var(sc, false);
             let dst = self.var(t);
@@ -1633,6 +1646,14 @@ impl Gen<'_> {
             reachable[b.0 as usize] = true;
             stack.extend(self.inst.successors(b));
         }
+        let mut preds = vec![0usize; n];
+        for b in 0..n {
+            if reachable[b] {
+                for s in self.inst.successors(BlockId(b as u32)) {
+                    preds[s.0 as usize] += 1;
+                }
+            }
+        }
         let mut placed = vec![false; n];
         let mut order = Vec::new();
         let mut next = Some(self.inst.entry);
@@ -1650,10 +1671,14 @@ impl Gen<'_> {
             next = match &self.inst.blocks[b.0 as usize].term {
                 Term::Goto(t) => Some(*t),
                 Term::Branch(_, t, f) => {
-                    if !placed[f.0 as usize] {
-                        Some(*f)
-                    } else {
-                        Some(*t)
+                    let (t, f) = (*t, *f);
+                    match (placed[t.0 as usize], placed[f.0 as usize]) {
+                        (false, false) => {
+                            // A private successor first; joins come later.
+                            if preds[t.0 as usize] < preds[f.0 as usize] { Some(t) } else { Some(f) }
+                        }
+                        (false, true) => Some(t),
+                        _ => Some(f),
                     }
                 }
                 _ => None,
@@ -1682,10 +1707,44 @@ impl Gen<'_> {
             self.label(&l);
             self.data_bank = None;
             let block = &self.inst.blocks[b.0 as usize];
-            for s in &block.stmts.clone() {
+            let mut stmts = block.stmts.clone();
+            // `ret = e; return`: compute e straight into A (and X).
+            let mut direct_ret = None;
+            if let (Term::Goto(t), [r]) = (&block.term, self.inst.rets.as_slice()) {
+                if self.is_return_block(*t) && !interrupt && self.saved_bank.is_none() && !self.inst.reset {
+                    if let Some(pos) = stmts.iter().rposition(|s| !matches!(s, St::Line(_))) {
+                        if let St::Assign(Place::Var(v), e) = &stmts[pos] {
+                            if v == r && pos + 1 == stmts.len() || v == r && stmts[pos + 1..].iter().all(|s| matches!(s, St::Line(_))) {
+                                direct_ret = Some(e.clone());
+                                stmts.truncate(pos);
+                            }
+                        }
+                    }
+                }
+            }
+            for s in &stmts {
                 self.stmt(s);
             }
             self.release();
+            if let Some(e) = direct_ret {
+                self.prepare_banks(&[&e]);
+                if e.sc().wide() {
+                    let x = self.spill16(&e);
+                    let lo = self.operand(&x, 0).unwrap();
+                    self.ins(Op::Lda, lo);
+                    let hi = self.operand(&x, 1).unwrap();
+                    self.ins(Op::Ldx, match hi {
+                        Arg::MemY(o) => Arg::MemY(o),
+                        a => a,
+                    });
+                } else {
+                    self.load_a(&e);
+                }
+                self.imp(Op::Rts);
+                self.release();
+                continue;
+            }
+            let block = &self.inst.blocks[b.0 as usize];
             match block.term.clone() {
                 Term::Goto(t) => {
                     let tl = self.block_label(t);

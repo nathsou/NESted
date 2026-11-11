@@ -61,6 +61,13 @@ impl Scope {
     }
 }
 
+fn n_of(k: &AK) -> &i64 {
+    match k {
+        AK::Int(n) => n,
+        _ => &0,
+    }
+}
+
 fn err(span: Span) -> Expr {
     Expr::new(ExprKind::Const(Value::Void), Type::Error, span)
 }
@@ -492,8 +499,20 @@ impl Checker<'_> {
         let span = e.span;
         match &e.kind {
             AK::Error => err(span),
-            AK::Int(n) => int(*n, Type::Int, span),
-            AK::Char(c) => int(*c as i64, Type::Int, span),
+            AK::Int(_) | AK::Char(_) => {
+                let n = match &e.kind {
+                    AK::Char(c) => *c as i64,
+                    _ => *n_of(&e.kind),
+                };
+                // Literals take a machine type from context, as in `~0` for u8.
+                if let Some(t) = expected.filter(|t| t.is_machine_int()) {
+                    let (lo, hi) = self.types.bounds(t);
+                    if n >= lo && n <= hi {
+                        return int(n, t.clone(), span);
+                    }
+                }
+                int(n, Type::Int, span)
+            }
             AK::Bool(b) => int(*b as i64, Type::Bool, span),
             AK::Str(bytes) => {
                 let v = Value::aggregate(bytes.iter().map(|b| Value::Int(*b as i64)).collect());
@@ -819,7 +838,12 @@ impl Checker<'_> {
         }
         let arith_expected = if op.is_compare() { None } else { expected };
         let x = self.expr(s, a, arith_expected);
-        let hint = if op.is_compare() && x.ty != Type::Int {
+        let hint = if x.ty != Type::Int && self.types.is_integer(&x.ty) {
+            Some(match &x.ty {
+                Type::Range(_) => self.types.base(&x.ty),
+                t => t.clone(),
+            })
+        } else if op.is_compare() && x.ty != Type::Int {
             Some(x.ty.clone())
         } else {
             arith_expected.cloned()
