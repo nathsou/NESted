@@ -58,7 +58,7 @@ pub struct PPU {
     clock: u64,
     skip_rendering: bool,
     suppress_vblank: bool,
-    scanline: u16,
+    pub scanline: u16,
     frame: u64,
     data_buffer: u8,
     nmi_triggered: bool,

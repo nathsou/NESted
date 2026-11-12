@@ -23,6 +23,8 @@ pub var dropped: u8 = 0;
 
 /// Set by the main thread when a frame is ready to publish; cleared by NMI.
 @shared pub var ready: u8 = 0;
+/// True during an NMI that published a frame (for `main::vblank`).
+@shared pub var published: bool = false;
 /// PPUCTRL, PPUMASK and scroll shadows applied in each published frame.
 @zp pub var ctrl: u8 = 0x88;
 @zp pub var mask: u8 = 0x1e;
@@ -97,8 +99,9 @@ pub fn flicker(on: bool) {
 
 // --------------------------------------------------------------- background
 
-/// Queue `count` bytes at a PPU address; returns the data offset, or 255 if full.
-fn reserve(address: u16, count: u8, vertical: bool) -> u8 {
+/// Queue `count` bytes at a PPU address; returns the data offset in `queue`,
+/// or 255 if full. Write the bytes into `queue` right after.
+pub fn reserve(address: u16, count: u8, vertical: bool) -> u8 {
     let start = queue_end;
     if count > 150 || start > 156 - count {
         dropped += 1;
@@ -506,10 +509,14 @@ pub fn next_frame() {
 /// Called by the runtime's NMI handler: publish a prepared frame.
 pub fn publish() {
     asm {
+        lda #0
+        sta {published}
         lda {ready}
         bne go
         jmp skip
     go:
+        lda #1
+        sta {published}
         lda {direct}
         bne regs
         ; Sprites.

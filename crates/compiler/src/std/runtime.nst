@@ -31,6 +31,10 @@ use std::input;
         main::init();
     }
     video::on();
+    // Mapper and APU interrupts are disabled until a program enables them.
+    asm {
+        cli
+    }
     loop {
         input::poll();
         if defined(main::update) {
