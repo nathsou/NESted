@@ -1102,7 +1102,6 @@ impl<'p> Checker<'p> {
                 "irq" => attrs.interrupt = Some(Context::Irq),
                 "reset" => attrs.reset = true,
                 "export" => attrs.export = true,
-                "cold" => attrs.cold = true,
                 "recursive" => match int(self) {
                     Some(n) if (1..=64).contains(&n) => attrs.recursive = Some(n as u32),
                     _ => self

@@ -133,6 +133,18 @@ impl Formatter<'_> {
                 self.space();
                 self.push(&c.text);
                 self.newline();
+            } else if c.trailing
+                && self.line.trim().is_empty()
+                && self.out.ends_with('\n')
+                && !self.out.ends_with("\n\n")
+                && !self.out.ends_with("{\n")
+            {
+                // The line it trailed was already ended (after `;` or `,`):
+                // put the comment back at its end.
+                self.out.pop();
+                self.out.push(' ');
+                self.out.push_str(&c.text);
+                self.out.push('\n');
             } else {
                 if !self.line.trim().is_empty() {
                     self.newline();

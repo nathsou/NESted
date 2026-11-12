@@ -169,7 +169,7 @@ pub fn build(p: &Program, diags: &mut Diagnostics) -> Mir {
                 blocks: Vec::new(),
                 entry: BlockId(0),
                 inline: func.attrs.inline,
-                noinline: func.attrs.noinline,
+                noinline: func.attrs.noinline || func.attrs.budget.is_some(),
                 recursive: func.attrs.recursive,
                 interrupt: func.attrs.interrupt,
                 reset: func.attrs.reset,

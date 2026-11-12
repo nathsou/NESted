@@ -43,3 +43,11 @@ fn shapes() {
     let out = format(src, &Style::default());
     assert_eq!(out, "struct P {\n    x: u8,\n    y: u8,\n}\nenum K: u8 {\n    A = 1,\n    B,\n}\nfn f(a: u8) -> u8 {\n    let p = P { x: 1, y: a };\n    if a > 3 && -a < 2 {\n        return p.x;\n    } else {\n        return match a {\n            0 => 1,\n            1 | 2 => 2,\n            _ => 3,\n        };\n    }\n}\n");
 }
+
+#[test]
+fn trailing_comments_stay_on_their_line() {
+    let src = "var a: u8 = 0;   // counter\nenum E {\n    A, // first\n    B,\n}\nfn f() {\n    a += 1; // step\n    // own line\n    a = 2;\n}\n";
+    let out = format(src, &Style::default());
+    assert_eq!(out, "var a: u8 = 0; // counter\nenum E {\n    A, // first\n    B,\n}\nfn f() {\n    a += 1; // step\n    // own line\n    a = 2;\n}\n");
+    assert_eq!(format(&out, &Style::default()), out);
+}

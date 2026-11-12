@@ -940,7 +940,6 @@ fn completion(a: &Analysis, file: crate::source::FileId, text: &str, offset: usi
             "recursive",
             "budget",
             "export",
-            "cold",
         ] {
             items.push(completion_item(at, 14.0, "attribute".into()));
         }

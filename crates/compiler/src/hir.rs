@@ -119,7 +119,6 @@ pub struct FnAttrs {
     pub budget: Option<u32>,
     pub bank: Option<u32>,
     pub export: bool,
-    pub cold: bool,
 }
 
 #[derive(Clone, Debug)]

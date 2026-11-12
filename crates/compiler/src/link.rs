@@ -1493,6 +1493,7 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         out.listing
             .extend(e.listing.into_iter().map(|l| (Some(b), l)));
     }
+    errors.extend(check_budgets(mir, &out.listing, &all_labels));
     out.fixed_used = fixed_enc.bytes.len();
     out.fixed_size = fixed_cap;
     out.bank_size = if board.whole() {
@@ -1530,4 +1531,124 @@ fn place_obj(map: &mut BTreeMap<(ObjId, bool), u16>, id: ObjId, o: &Obj, addr: u
             },
         );
     }
+}
+
+/// Verify `@budget(n)` functions: the worst case is the sum of every
+/// instruction's longest timing (each runs at most once on a path through
+/// acyclic code) plus the bounds of the functions it calls. Loops, indirect
+/// jumps, recursion and calls to code without a known bound are rejected.
+fn check_budgets(
+    mir: &Mir,
+    listing: &[(Option<u32>, asm::ListItem)],
+    labels: &BTreeMap<String, u16>,
+) -> Vec<String> {
+    let range = |i: usize| -> Option<(Option<u32>, u16, u16)> {
+        let start = *labels.get(&fn_label(InstId(i as u32)))?;
+        let end = *labels.get(&format!("{}_end", fn_label(InstId(i as u32))))?;
+        Some((mir.insts[i].bank, start, end))
+    };
+    fn bound(
+        i: usize,
+        mir: &Mir,
+        listing: &[(Option<u32>, asm::ListItem)],
+        range: &dyn Fn(usize) -> Option<(Option<u32>, u16, u16)>,
+        memo: &mut BTreeMap<usize, Result<u32, String>>,
+        active: &mut BTreeSet<usize>,
+    ) -> Result<u32, String> {
+        if let Some(r) = memo.get(&i) {
+            return r.clone();
+        }
+        let name = &mir.insts[i].name;
+        if !active.insert(i) {
+            return Err(format!("'{name}' is recursive"));
+        }
+        let result = (|| {
+            let (bank, start, end) = range(i).ok_or_else(|| format!("'{name}' was not placed"))?;
+            let callee = |target: u16, bank_now: Option<u32>| {
+                (0..mir.insts.len()).find(|&j| {
+                    range(j).is_some_and(|(b, s, _)| s == target && (b == bank_now || b.is_none()))
+                })
+            };
+            let mut total = 0u32;
+            for (b, item) in listing
+                .iter()
+                .filter(|(b, l)| *b == bank && l.address >= start && l.address < end)
+            {
+                total += item.cycles.1 as u32;
+                let Some(&op) = item.bytes.first() else {
+                    continue;
+                };
+                let word = || {
+                    item.bytes.get(1).copied().unwrap_or(0) as u16
+                        | (item.bytes.get(2).copied().unwrap_or(0) as u16) << 8
+                };
+                match op {
+                    // Relative branches: a backward one closes a loop.
+                    0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0 => {
+                        let target = item
+                            .address
+                            .wrapping_add(2)
+                            .wrapping_add(item.bytes[1] as i8 as u16);
+                        if target <= item.address {
+                            return Err(format!("'{name}' has a loop at ${:04X}", item.address));
+                        }
+                    }
+                    0x4C => {
+                        let target = word();
+                        if target <= item.address && target >= start {
+                            return Err(format!("'{name}' has a loop at ${:04X}", item.address));
+                        }
+                        if target >= end || target < start {
+                            match callee(target, *b) {
+                                Some(j) => total += bound(j, mir, listing, range, memo, active)?,
+                                None => {
+                                    return Err(format!(
+                                        "'{name}' jumps to ${target:04X}, which has no known bound"
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                    0x6C => return Err(format!("'{name}' uses an indirect jump")),
+                    0x20 => {
+                        let target = word();
+                        match callee(target, *b) {
+                            Some(j) => total += bound(j, mir, listing, range, memo, active)?,
+                            None => {
+                                let what = item
+                                    .text
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .unwrap_or("?")
+                                    .to_owned();
+                                return Err(format!("'{name}' calls {what}, which has no known bound (helpers for multiplication, division and bank switching loop)"));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(total)
+        })();
+        active.remove(&i);
+        memo.insert(i, result.clone());
+        result
+    }
+    let mut errors = Vec::new();
+    let mut memo = BTreeMap::new();
+    for (i, inst) in mir.insts.iter().enumerate() {
+        let Some(limit) = inst.budget else { continue };
+        match bound(i, mir, listing, &range, &mut memo, &mut BTreeSet::new()) {
+            Ok(c) if c > limit => errors.push(format!(
+                "'{}' may take up to {c} cycles, over its @budget({limit})",
+                inst.name
+            )),
+            Ok(_) => {}
+            Err(e) => errors.push(format!(
+                "Cannot verify @budget({limit}) of '{}': {e}",
+                inst.name
+            )),
+        }
+    }
+    errors
 }
