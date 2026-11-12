@@ -170,26 +170,51 @@ fn execute(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let mut frames = 120;
     let mut shot = None;
     let mut hold = 0;
+    let mut watch: Vec<String> = Vec::new();
+    let mut script: Vec<(u64, u8)> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--input" => {
+                for part in args.next().ok_or("--input needs button@frame,...")?.split(',') {
+                    let (b, f) = part.split_once('@').ok_or("expected button@frame")?;
+                    script.push((f.parse().map_err(|_| "bad frame")?, buttons(b)));
+                }
+            }
+            "--watch" => watch = args.next().ok_or("--watch needs names")?.split(',').map(str::to_owned).collect(),
             "--shot" => shot = Some(PathBuf::from(args.next().ok_or("--shot needs a path")?)),
             "--hold" => hold = buttons(&args.next().ok_or("--hold needs buttons")?),
             n => frames = n.parse().map_err(|_| format!("Unknown argument '{n}'"))?,
         }
     }
+    let mut symbols = Vec::new();
     let rom = if path.extension().is_some_and(|e| e == "nes") {
         fs::read(&path).map_err(|e| e.to_string())?
     } else {
         let (project, _) = load_project(&path)?;
-        compile(&project, Options::default()).map_err(|f| f.render())?.rom
+        let out = compile(&project, Options::default()).map_err(|f| f.render())?;
+        symbols = out.linked.symbols.clone();
+        out.rom
     };
     let mut emu = nested_runtime::Emulator::new(rom, 48000.0)?;
     let mut energy = 0.0f64;
-    for _ in 0..frames {
-        let audio = emu.frame(hold)?;
+    for f in 0..frames {
+        let extra = script.iter().filter(|(at, _)| *at == f).fold(0, |a, (_, b)| a | b);
+        let audio = emu.frame(hold | extra)?;
         energy += audio.iter().map(|s| (*s as f64).abs()).sum::<f64>();
     }
     println!("ran {frames} frames, PC ${:04X}, audio energy {energy:.1}", emu.pc());
+    for name in &watch {
+        match symbols.iter().find(|s| s.name == *name || s.name.ends_with(&format!("::{name}"))) {
+            Some(s) => {
+                let bytes: Vec<String> = (0..s.size.clamp(1, 16)).map(|i| format!("{:02X}", emu.read_ram(s.address + i as u16))).collect();
+                println!("  {} @ ${:04X}: {}", s.name, s.address, bytes.join(" "));
+            }
+            None => println!("  {name}: no such symbol"),
+        }
+    }
+    if let Some(s) = symbols.iter().rev().find(|s| s.kind.starts_with("fn") && s.address <= emu.pc()) {
+        println!("  PC in {}", s.name);
+    }
     if let Some(p) = shot {
         fs::write(&p, emu.png(2)).map_err(|e| e.to_string())?;
         println!("wrote {}", p.display());

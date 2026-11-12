@@ -8,14 +8,24 @@ use crate::source::Span;
 use crate::types::*;
 use std::collections::BTreeSet;
 
+/// What a fact is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Local(LocalId),
+    Global(GlobalId),
+    /// Kill marker for every global (a call or assembly ran).
+    AllGlobals,
+}
+
 /// Lexical environment of the expression being checked.
 pub struct Scope {
     pub module: usize,
     pub fn_id: Option<FnId>,
     pub locals: Vec<LocalDecl>,
     pub blocks: Vec<Vec<(String, LocalId)>>,
-    /// Proven inclusive bounds of immutable locals.
-    pub facts: Vec<(LocalId, i64, i64)>,
+    /// Proven inclusive bounds of variables. An entry with lo > hi kills
+    /// earlier facts about its key (the variable was assigned).
+    pub facts: Vec<(Key, i64, i64)>,
     /// `index < len(slice)` facts for immutable locals.
     pub slice_facts: Vec<(LocalId, LocalId)>,
     /// Immutable locals bound to `len(slice)`.
@@ -179,15 +189,8 @@ impl Checker<'_> {
         };
         match &e.kind {
             ExprKind::Const(Value::Int(n)) => (*n, *n),
-            ExprKind::Local(id) => {
-                let mut r = full;
-                for (l, lo, hi) in &s.facts {
-                    if l == id {
-                        r = (r.0.max(*lo), r.1.min(*hi));
-                    }
-                }
-                r
-            }
+            ExprKind::Local(id) => self.fact_bounds(s, Key::Local(*id), full),
+            ExprKind::Global(g) if self.trackable(*g) => self.fact_bounds(s, Key::Global(*g), full),
             ExprKind::Cast(x) => {
                 let (lo, hi) = self.interval(s, x);
                 if lo >= blo && hi <= bhi {
@@ -251,6 +254,80 @@ impl Checker<'_> {
             }
             ExprKind::Intrinsic(Intrinsic::Lo | Intrinsic::Hi, _) => (0, 255),
             _ => full,
+        }
+    }
+
+    /// Globals whose value only this thread changes.
+    fn trackable(&self, g: GlobalId) -> bool {
+        let gl = &self.globals[g.0 as usize];
+        matches!(gl.kind, GlobalKind::Var) && !gl.shared
+    }
+
+    fn fact_bounds(&self, s: &Scope, key: Key, full: (i64, i64)) -> (i64, i64) {
+        let mut r = full;
+        for (k, lo, hi) in s.facts.iter().rev() {
+            let global = matches!(key, Key::Global(_));
+            if *k == key || (global && *k == Key::AllGlobals) {
+                if lo > hi {
+                    break;
+                }
+                if *k == key {
+                    r = (r.0.max(*lo), r.1.min(*hi));
+                }
+            }
+        }
+        if r.0 > r.1 {
+            full
+        } else {
+            r
+        }
+    }
+
+    fn kill(&self, s: &mut Scope, key: Key) {
+        s.facts.push((key, 1, 0));
+    }
+
+    /// Before a loop body: forget facts about anything the loop assigns.
+    fn kill_loop(&mut self, s: &mut Scope, body: &[ast::Stmt], cond: Option<&ast::Expr>) {
+        let mut names = Vec::new();
+        let mut calls = false;
+        for st in body {
+            assigned(st, &mut names, &mut calls);
+        }
+        if let Some(c) = cond {
+            calls |= has_call(c);
+        }
+        for n in names {
+            match n {
+                Some(n) => {
+                    if let Some(id) = s.lookup(&n) {
+                        self.kill(s, Key::Local(id));
+                    } else {
+                        self.kill(s, Key::AllGlobals);
+                    }
+                }
+                None => self.kill(s, Key::AllGlobals),
+            }
+        }
+        if calls {
+            self.kill(s, Key::AllGlobals);
+        }
+    }
+
+    /// Facts about a variable after `place = value`.
+    fn assigned_fact(&mut self, s: &mut Scope, place: &Expr, value: Option<&Expr>) {
+        let key = match &place.kind {
+            ExprKind::Local(id) => Key::Local(*id),
+            ExprKind::Global(g) => Key::Global(*g),
+            _ => return,
+        };
+        self.kill(s, key);
+        if let Some(v) = value {
+            let (lo, hi) = self.interval(s, v);
+            let full = self.types.bounds(&place.ty);
+            if (lo, hi) != full && lo <= hi {
+                s.facts.push((key, lo, hi));
+            }
         }
     }
 
@@ -725,8 +802,22 @@ impl Checker<'_> {
             AK::If(c, a, b) => {
                 let c = self.expr(s, c, Some(&Type::Bool));
                 let c = self.coerce(s, c, &Type::Bool);
-                let a = self.expr(s, a, expected);
-                let b = self.expr(s, b, expected);
+                let mark = (s.facts.len(), s.slice_facts.len());
+                let target = expected.filter(|t| **t != Type::Void).cloned();
+                self.facts_from(s, &c, true);
+                let mut a = self.expr(s, a, expected);
+                if let Some(t) = &target {
+                    a = self.coerce(s, a, t);
+                }
+                s.facts.truncate(mark.0);
+                s.slice_facts.truncate(mark.1);
+                self.facts_from(s, &c, false);
+                let mut b = self.expr(s, b, expected);
+                if let Some(t) = &target {
+                    b = self.coerce(s, b, t);
+                }
+                s.facts.truncate(mark.0);
+                s.slice_facts.truncate(mark.1);
                 let (a, b, t) = if let Some(t) = expected.filter(|t| **t != Type::Void) {
                     let a = self.coerce(s, a, t);
                     let b = self.coerce(s, b, t);
@@ -1227,9 +1318,7 @@ impl Checker<'_> {
                     let x = self.expr(s, a, Some(t));
                     out.push(self.coerce(s, x, t));
                 }
-                if s.fn_id == Some(f) {
-                    // Self-recursion is validated in the call-graph pass.
-                }
+                self.kill(s, Key::AllGlobals);
                 Expr::new(ExprKind::Call(f, out), result, span)
             }
             _ => {
@@ -1388,6 +1477,12 @@ impl Checker<'_> {
             rest = &rest[open + close + 1..];
         }
         text.push_str(rest);
+        self.kill(s, Key::AllGlobals);
+        for r in &refs {
+            if let AsmRef::Local(id) = r {
+                self.kill(s, Key::Local(*id));
+            }
+        }
         if let Err((line, message)) = crate::asm::validate(&text) {
             self.diags.error(body_span, format!("Assembly line {line}: {message}"));
         }
@@ -1492,10 +1587,10 @@ impl Checker<'_> {
             }
             let mark = (s.facts.len(), s.slice_facts.len());
             if let ExprKind::Local(id) = &x.kind {
-                if s.immutable(*id) && !pats.is_empty() {
+                if !pats.is_empty() {
                     let lo = pats.iter().map(|p| p.0).min().unwrap();
                     let hi = pats.iter().map(|p| p.1).max().unwrap();
-                    s.facts.push((*id, lo, hi));
+                    s.facts.push((Key::Local(*id), lo, hi));
                 }
             }
             let body = match &arm.body {
@@ -1600,10 +1695,22 @@ impl Checker<'_> {
                 self.facts_from(s, b, false);
             }
             ExprKind::Binary(op, a, b) if op.is_compare() => {
-                let (local, k, op) = match (&a.kind, &b.kind) {
-                    (ExprKind::Local(id), _) => (Some(*id), b, *op),
-                    (_, ExprKind::Local(id)) => (
-                        Some(*id),
+                let var = |e: &Expr| {
+                    // A range viewed as its base type is the same variable.
+                    let e = match &e.kind {
+                        ExprKind::Cast(x) if self.types.base(&x.ty) == self.types.base(&e.ty) => x.as_ref(),
+                        _ => e,
+                    };
+                    match &e.kind {
+                        ExprKind::Local(id) => Some(Key::Local(*id)),
+                        ExprKind::Global(g) if self.trackable(*g) => Some(Key::Global(*g)),
+                        _ => None,
+                    }
+                };
+                let (local, k, op) = match (var(a), var(b)) {
+                    (Some(id), _) => (Some(id), b, *op),
+                    (_, Some(id)) => (
+                        Some(id),
                         a,
                         match op {
                             BinOp::Lt => BinOp::Gt,
@@ -1615,10 +1722,7 @@ impl Checker<'_> {
                     ),
                     _ => (None, b, *op),
                 };
-                let Some(id) = local else { return };
-                if !s.immutable(id) {
-                    return;
-                }
+                let Some(key) = local else { return };
                 let op = if truth {
                     op
                 } else {
@@ -1632,21 +1736,31 @@ impl Checker<'_> {
                         o => o,
                     }
                 };
-                if let ExprKind::Intrinsic(Intrinsic::SliceLen, args) = &k.kind {
-                    if let (ExprKind::Local(sl), BinOp::Lt) = (&args[0].kind, op) {
-                        s.slice_facts.push((id, *sl));
-                    }
-                    return;
-                }
-                if let ExprKind::Local(n) = &k.kind {
-                    if let Some((_, sl)) = s.len_alias.iter().find(|(a, _)| a == n).copied() {
-                        if op == BinOp::Lt {
-                            s.slice_facts.push((id, sl));
+                if let Key::Local(id) = key {
+                    if s.immutable(id) {
+                        if let ExprKind::Intrinsic(Intrinsic::SliceLen, args) = &k.kind {
+                            if let (ExprKind::Local(sl), BinOp::Lt) = (&args[0].kind, op) {
+                                s.slice_facts.push((id, *sl));
+                            }
+                            return;
+                        }
+                        if let ExprKind::Local(n) = &k.kind {
+                            if let Some((_, sl)) = s.len_alias.iter().find(|(a, _)| a == n).copied() {
+                                if op == BinOp::Lt {
+                                    s.slice_facts.push((id, sl));
+                                }
+                            }
                         }
                     }
                 }
                 let (klo, khi) = self.interval(s, k);
+                let current = {
+                    let e = if matches!(var(a), Some(_)) { a } else { b };
+                    self.interval(s, e)
+                };
                 let fact = match op {
+                    BinOp::Ne if klo == khi && klo == current.0 => Some((klo + 1, i64::MAX)),
+                    BinOp::Ne if klo == khi && klo == current.1 => Some((i64::MIN, khi - 1)),
                     BinOp::Lt => Some((i64::MIN, khi - 1)),
                     BinOp::Le => Some((i64::MIN, khi)),
                     BinOp::Gt => Some((klo + 1, i64::MAX)),
@@ -1655,7 +1769,7 @@ impl Checker<'_> {
                     _ => None,
                 };
                 if let Some((lo, hi)) = fact {
-                    s.facts.push((id, lo, hi));
+                    s.facts.push((key, lo, hi));
                 }
             }
             _ => {}
@@ -1711,6 +1825,23 @@ impl Checker<'_> {
         }
     }
 
+    /// Check a block and report `probe` evaluated at its end.
+    fn block_probe(&mut self, s: &mut Scope, stmts: &[ast::Stmt], probe: &dyn Fn(&Self, &Scope) -> Vec<(i64, i64)>) -> (Vec<Stmt>, Vec<(i64, i64)>) {
+        s.blocks.push(Vec::new());
+        let mark = (s.facts.len(), s.slice_facts.len());
+        let mut out = Vec::new();
+        for st in stmts {
+            if let Some(x) = self.stmt(s, st) {
+                out.push(x);
+            }
+        }
+        let bounds = probe(self, s);
+        s.facts.truncate(mark.0);
+        s.slice_facts.truncate(mark.1);
+        s.blocks.pop();
+        (out, bounds)
+    }
+
     fn block(&mut self, s: &mut Scope, stmts: &[ast::Stmt]) -> Vec<Stmt> {
         s.blocks.push(Vec::new());
         let mark = (s.facts.len(), s.slice_facts.len());
@@ -1732,6 +1863,8 @@ impl Checker<'_> {
         s.facts.truncate(mark.0);
         s.slice_facts.truncate(mark.1);
         s.blocks.pop();
+        // What the block assigned is unknown afterwards.
+        self.kill_loop(s, stmts, None);
         out
     }
 
@@ -1768,6 +1901,13 @@ impl Checker<'_> {
                 let id = s.declare(&name.name, t, *mutable, name.span);
                 if let Some(f) = s.fn_id {
                     self.defs.insert(Def::Local(f, id), name.span);
+                }
+                {
+                    let (lo, hi) = self.interval(s, &e);
+                    let full = self.types.bounds(&s.locals[id.0 as usize].ty);
+                    if (lo, hi) != full && lo <= hi && self.types.is_scalar(&s.locals[id.0 as usize].ty) {
+                        s.facts.push((Key::Local(id), lo, hi));
+                    }
                 }
                 if !*mutable {
                     if let ExprKind::Intrinsic(Intrinsic::SliceLen, args) = &e.kind {
@@ -1809,13 +1949,19 @@ impl Checker<'_> {
                             if !self.types.is_integer(&t.ty) && !t.ty.is_error() {
                                 self.diags.error(span, format!("'{op}' needs an integer target"));
                             }
-                            if matches!(t.ty, Type::Range(_)) {
-                                self.diags.error(
-                                    span,
-                                    format!("Compound assignment cannot keep {} in range; assign a proven value", self.ty_name(&t.ty)),
-                                );
-                            }
                             let v = self.expr(s, value, Some(&base));
+                            if matches!(t.ty, Type::Range(_)) {
+                                let v2 = self.coerce(s, v.clone(), &base);
+                                let probe = Expr::new(ExprKind::Binary(b, Box::new(Expr::new(ExprKind::Cast(Box::new(t.clone())), base.clone(), span)), Box::new(v2)), base.clone(), span);
+                                let (lo, hi) = self.interval(s, &probe);
+                                let (tlo, thi) = self.types.bounds(&t.ty);
+                                if lo < tlo || hi > thi {
+                                    self.diags.error(
+                                        span,
+                                        format!("Cannot prove the result stays within {} ({tlo}..={thi}); its bounds are {lo}..={hi}", self.ty_name(&t.ty)),
+                                    );
+                                }
+                            }
                             if matches!(b, BinOp::Div | BinOp::Rem) && v.constant() == Some(0) {
                                 self.diags.error(v.span, "Division by zero");
                             }
@@ -1828,6 +1974,25 @@ impl Checker<'_> {
                         self.coerce(s, v, &ty)
                     }
                 };
+                if bin.is_none() {
+                    self.assigned_fact(s, &t, Some(&v));
+                } else {
+                    let new = bin.map(|b| Expr::new(ExprKind::Binary(b, Box::new(t.clone()), Box::new(v.clone())), t.ty.clone(), span));
+                    // Compound assignment: bounds from the old value, when they cannot wrap.
+                    let fact = new.as_ref().map(|n| self.interval(s, n));
+                    self.assigned_fact(s, &t, None);
+                    if let (Some((lo, hi)), ExprKind::Local(_) | ExprKind::Global(_)) = (fact, &t.kind) {
+                        let full = self.types.bounds(&t.ty);
+                        if (lo, hi) != full && lo <= hi && matches!(bin, Some(BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Shr)) {
+                            let key = match &t.kind {
+                                ExprKind::Local(id) => Key::Local(*id),
+                                ExprKind::Global(g) => Key::Global(*g),
+                                _ => unreachable!(),
+                            };
+                            s.facts.push((key, lo, hi));
+                        }
+                    }
+                }
                 Stmt::Assign(t, bin, v, span)
             }
             StmtKind::Expr(e) => {
@@ -1859,25 +2024,78 @@ impl Checker<'_> {
                     Some(_) => return Some(Stmt::Block(self.block(s, &then.stmts))),
                     None => {}
                 }
+                // Variables whose bounds are merged where the branches join.
+                let mut keys: Vec<(Key, Type)> = Vec::new();
+                {
+                    let mut names = Vec::new();
+                    let mut calls = false;
+                    for st in then.stmts.iter().chain(otherwise.iter().flat_map(|b| b.stmts.iter())) {
+                        assigned(st, &mut names, &mut calls);
+                    }
+                    for n in names.into_iter().flatten() {
+                        if let Some(id) = s.lookup(&n) {
+                            let t = s.locals[id.0 as usize].ty.clone();
+                            if self.types.is_scalar(&t) && !keys.iter().any(|(k, _)| *k == Key::Local(id)) {
+                                keys.push((Key::Local(id), t));
+                            }
+                        }
+                    }
+                    let mut vars = Vec::new();
+                    cond_vars(&c, &mut vars);
+                    for e in vars {
+                        let key = match &e.kind {
+                            ExprKind::Local(id) => Key::Local(*id),
+                            ExprKind::Global(g) if self.trackable(*g) => Key::Global(*g),
+                            _ => continue,
+                        };
+                        if !keys.iter().any(|(k, _)| *k == key) {
+                            keys.push((key, e.ty.clone()));
+                        }
+                    }
+                }
+                let probe = |c: &Self, s: &Scope| -> Vec<(i64, i64)> {
+                    keys.iter().map(|(k, t)| c.fact_bounds(s, *k, c.types.bounds(t))).collect()
+                };
                 let mark = (s.facts.len(), s.slice_facts.len());
                 self.facts_from(s, &c, true);
-                let yes = self.block(s, &then.stmts);
+                let (yes, then_bounds) = self.block_probe(s, &then.stmts, &probe);
                 s.facts.truncate(mark.0);
                 s.slice_facts.truncate(mark.1);
                 self.facts_from(s, &c, false);
-                let no = match otherwise {
-                    Some(b) => self.block(s, &b.stmts),
-                    None => Vec::new(),
+                let (no, else_bounds) = match otherwise {
+                    Some(b) => self.block_probe(s, &b.stmts, &probe),
+                    None => (Vec::new(), probe(self, s)),
                 };
                 s.facts.truncate(mark.0);
                 s.slice_facts.truncate(mark.1);
-                // Early exits: what follows sees the other branch's facts.
                 let yes_exits = terminates(&yes);
                 let no_exits = otherwise.is_some() && terminates(&no);
+                // Forget what either branch assigned, then merge the bounds.
+                self.kill_loop(s, &then.stmts, None);
+                if let Some(b) = otherwise {
+                    self.kill_loop(s, &b.stmts, None);
+                }
+                for (i, (k, t)) in keys.iter().enumerate() {
+                    let (a, b) = (then_bounds[i], else_bounds[i]);
+                    let merged = match (yes_exits, no_exits) {
+                        (true, false) => b,
+                        (false, true) => a,
+                        (true, true) => continue,
+                        _ => (a.0.min(b.0), a.1.max(b.1)),
+                    };
+                    if merged != self.types.bounds(t) {
+                        s.facts.push((*k, merged.0, merged.1));
+                    }
+                }
+                // Slice facts from an early exit.
                 if yes_exits && !no_exits {
+                    let before = s.facts.len();
                     self.facts_from(s, &c, false);
+                    s.facts.truncate(before);
                 } else if no_exits && !yes_exits {
+                    let before = s.facts.len();
                     self.facts_from(s, &c, true);
+                    s.facts.truncate(before);
                 }
                 if let Some(n) = c.constant() {
                     return Some(Stmt::Block(if n != 0 { yes } else { no }));
@@ -1885,6 +2103,7 @@ impl Checker<'_> {
                 Stmt::If(c, yes, no)
             }
             StmtKind::While { cond, body } => {
+                self.kill_loop(s, &body.stmts, Some(cond));
                 let c = self.expr(s, cond, Some(&Type::Bool));
                 let c = self.coerce(s, c, &Type::Bool);
                 let mark = (s.facts.len(), s.slice_facts.len());
@@ -1897,6 +2116,7 @@ impl Checker<'_> {
                 Stmt::While(c, b)
             }
             StmtKind::Loop(body) => {
+                self.kill_loop(s, &body.stmts, None);
                 s.loops += 1;
                 let b = self.block(s, &body.stmts);
                 s.loops -= 1;
@@ -1945,13 +2165,14 @@ impl Checker<'_> {
                 if let Some(f) = s.fn_id {
                     self.defs.insert(Def::Local(f, id), var.span);
                 }
+                self.kill_loop(s, &body.stmts, None);
                 let mark = (s.facts.len(), s.slice_facts.len());
                 let (alo, _) = self.interval(s, &a);
                 let (_, bhi) = self.interval(s, &b);
                 let (_, ahi) = self.interval(s, &a);
                 let (blo, _) = self.interval(s, &b);
                 let _ = (ahi, blo);
-                s.facts.push((id, alo, bhi - !inclusive as i64));
+                s.facts.push((Key::Local(id), alo, bhi - !inclusive as i64));
                 if let ExprKind::Intrinsic(Intrinsic::SliceLen, args) = &b.kind {
                     if let (ExprKind::Local(sl), false) = (&args[0].kind, *inclusive) {
                         s.slice_facts.push((id, *sl));
@@ -2061,10 +2282,10 @@ impl Checker<'_> {
             }
             let mark = (s.facts.len(), s.slice_facts.len());
             if let ExprKind::Local(id) = &x.kind {
-                if s.immutable(*id) && !pats.is_empty() {
+                if !pats.is_empty() {
                     let lo = pats.iter().map(|p| p.0).min().unwrap();
                     let hi = pats.iter().map(|p| p.1).max().unwrap();
-                    s.facts.push((*id, lo, hi));
+                    s.facts.push((Key::Local(*id), lo, hi));
                 }
             }
             let body = match &arm.body {
@@ -2172,3 +2393,99 @@ fn breaks(body: &[Stmt]) -> bool {
 
 #[allow(dead_code)]
 fn unused(_: BTreeSet<u8>) {}
+
+/// Variables assigned in a statement (None: a non-local target).
+fn assigned(st: &ast::Stmt, out: &mut Vec<Option<String>>, calls: &mut bool) {
+    let root = |e: &ast::Expr| -> Option<String> {
+        let mut e = e;
+        loop {
+            match &e.kind {
+                AK::Index(b, _, _) | AK::Field(b, _) => e = b,
+                AK::Path(p) if p.is_single() => return Some(p.segments[0].name.clone()),
+                _ => return None,
+            }
+        }
+    };
+    let block = |b: &ast::Block, out: &mut Vec<Option<String>>, calls: &mut bool| {
+        for s in &b.stmts {
+            assigned(s, out, calls);
+        }
+    };
+    match &st.kind {
+        StmtKind::Let { value, .. } => *calls |= has_call(value),
+        StmtKind::Assign { target, value, .. } => {
+            // Element writes do not change scalar facts.
+            if matches!(target.kind, AK::Path(_)) {
+                out.push(root(target));
+            }
+            *calls |= has_call(value) || has_call(target);
+        }
+        StmtKind::Expr(e) => {
+            *calls |= has_call(e);
+            if let AK::Match(_, arms) = &e.kind {
+                for a in arms {
+                    if let ast::ArmBody::Block(b) = &a.body {
+                        block(b, out, calls);
+                    }
+                }
+            }
+        }
+        StmtKind::If { cond, then, otherwise } => {
+            *calls |= has_call(cond);
+            block(then, out, calls);
+            if let Some(o) = otherwise {
+                block(o, out, calls);
+            }
+        }
+        StmtKind::While { cond, body } => {
+            *calls |= has_call(cond);
+            block(body, out, calls);
+        }
+        StmtKind::For { body, start, end, .. } => {
+            *calls |= has_call(start) || has_call(end);
+            block(body, out, calls);
+        }
+        StmtKind::Loop(b) | StmtKind::Block(b) => block(b, out, calls),
+        StmtKind::Return(Some(e)) => *calls |= has_call(e),
+        _ => {}
+    }
+}
+
+fn has_call(e: &ast::Expr) -> bool {
+    match &e.kind {
+        AK::Call(_, _) | AK::Asm(..) => true,
+        AK::Unary(_, a) | AK::Cast(a, _) | AK::Field(a, _) => has_call(a),
+        AK::Binary(_, a, b) | AK::Index(a, b, _) | AK::Repeat(a, b) | AK::Range(a, b, _) => has_call(a) || has_call(b),
+        AK::StructLit(_, f) => f.iter().any(|(_, v)| has_call(v)),
+        AK::Array(v) => v.iter().any(has_call),
+        AK::Match(x, arms) => has_call(x) || arms.iter().any(|a| match &a.body {
+            ast::ArmBody::Expr(e) => has_call(e),
+            ast::ArmBody::Block(_) => true,
+        }),
+        AK::If(c, a, b) => has_call(c) || has_call(a) || has_call(b),
+        _ => false,
+    }
+}
+
+/// Variables compared in a condition.
+fn cond_vars<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match &e.kind {
+        ExprKind::Unary(UnOp::Not, x) => cond_vars(x, out),
+        ExprKind::Binary(BinOp::LogicAnd | BinOp::LogicOr, a, b) => {
+            cond_vars(a, out);
+            cond_vars(b, out);
+        }
+        ExprKind::Binary(op, a, b) if op.is_compare() => {
+            for x in [a, b] {
+                let x = match &x.kind {
+                    ExprKind::Cast(inner) => inner.as_ref(),
+                    _ => x.as_ref(),
+                };
+                if matches!(x.kind, ExprKind::Local(_) | ExprKind::Global(_)) {
+                    out.push(x);
+                }
+            }
+        }
+        _ => {}
+    }
+}

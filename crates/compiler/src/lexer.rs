@@ -189,7 +189,6 @@ pub fn lex(file: FileId, src: &str, diags: &mut Diagnostics) -> Lexed {
                         closed = true;
                         break;
                     }
-                    b'\n' => break,
                     b'\\' => {
                         let (b, n) = escape(&bytes[i..]);
                         match b {

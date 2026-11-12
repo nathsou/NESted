@@ -316,7 +316,7 @@ impl Gen<'_> {
                 Ex::Bin(BinOp::Shr, w, k, _) if k.konst() == Some(8) && b == 0 => self.operand(w, 1),
                 _ => None,
             },
-            Ex::Bin(BinOp::Shr, w, k, sc) if k.konst() == Some(8) && !sc.signed() => {
+            Ex::Bin(BinOp::Shr, w, k, sc) if k.konst() == Some(8) && !sc.signed() && sc.wide() => {
                 if b == 0 {
                     self.operand(w, 1)
                 } else {
@@ -532,7 +532,7 @@ impl Gen<'_> {
                     matches!(**x, Ex::Const(..))
                 }
             }
-            Ex::Bin(BinOp::Shr, w, k, sc) if k.konst() == Some(8) && !sc.signed() => self.is_operand(w),
+            Ex::Bin(BinOp::Shr, w, k, sc) if k.konst() == Some(8) && !sc.signed() && sc.wide() => self.is_operand16(w),
             _ => false,
         }
     }

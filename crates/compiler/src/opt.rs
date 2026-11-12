@@ -216,6 +216,8 @@ pub fn simplify(e: &mut Ex) {
                         (BinOp::Mul, Some(1), _) => Some((**b).clone()),
                         (BinOp::Mul | BinOp::And, _, Some(0)) => Some(Ex::Const(0, sc)),
                         (BinOp::Mul | BinOp::And, Some(0), _) => Some(Ex::Const(0, sc)),
+                        (BinOp::Shl | BinOp::Shr, _, Some(k)) if !sc.signed() && k >= (sc.size() * 8) as i64 => Some(Ex::Const(0, sc)),
+                        (BinOp::Shl, _, Some(k)) if k >= (sc.size() * 8) as i64 => Some(Ex::Const(0, sc)),
                         (BinOp::And, _, Some(k)) if k == all => Some((**a).clone()),
                         (BinOp::And, Some(k), _) if k == all => Some((**b).clone()),
                         _ => None,
@@ -286,11 +288,9 @@ fn clobbers(s: &St, e: &Ex, objs: &[Obj]) -> bool {
     }
 }
 
-/// Within a block: constant/copy propagation and forward substitution of
-/// temporaries used once.
-fn propagate(inst: &mut Inst, b: usize, objs: &[Obj]) -> bool {
-    let mut changed = false;
-    // Single-use counts of temporaries across the function.
+
+/// Uses and definitions of every variable in a function.
+fn use_counts(inst: &Inst) -> (BTreeMap<VarId, usize>, BTreeMap<VarId, usize>) {
     let mut count: BTreeMap<VarId, usize> = BTreeMap::new();
     let mut defs: BTreeMap<VarId, usize> = BTreeMap::new();
     for block in &inst.blocks {
@@ -341,6 +341,13 @@ fn propagate(inst: &mut Inst, b: usize, objs: &[Obj]) -> bool {
     for r in &inst.rets {
         *count.entry(*r).or_default() += 100;
     }
+    (count, defs)
+}
+
+/// Within a block: constant/copy propagation and forward substitution of
+/// temporaries used once.
+fn propagate(inst: &mut Inst, b: usize, objs: &[Obj]) -> bool {
+    let mut changed = false;
     let pointers: BTreeSet<VarId> = inst
         .vars
         .iter()
@@ -412,6 +419,10 @@ fn propagate(inst: &mut Inst, b: usize, objs: &[Obj]) -> bool {
         }
         k += 1;
     }
+    // Counts after copy propagation, which may have added uses.
+    let block_index = b;
+    let (count, defs) = use_counts(inst);
+    let block = &mut inst.blocks[block_index];
     // Forward substitution: `t = e; ... use(t)` where t is a single-use
     // temporary defined once, and nothing in between changes e's inputs.
     let mut k = 0;

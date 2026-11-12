@@ -6,6 +6,7 @@
 //! writes go straight to the PPU and have no size limit.
 
 use std::nes;
+use std::board;
 
 /// Shadow sprite memory, copied to the PPU by DMA in each published frame.
 @at(0x0200) pub var oam: [u8; 256];
@@ -23,7 +24,7 @@ pub var dropped: u8 = 0;
 /// Set by the main thread when a frame is ready to publish; cleared by NMI.
 @shared pub var ready: u8 = 0;
 /// PPUCTRL, PPUMASK and scroll shadows applied in each published frame.
-@zp pub var ctrl: u8 = 0x90;
+@zp pub var ctrl: u8 = 0x88;
 @zp pub var mask: u8 = 0x1e;
 @zp pub var scroll_x: u8 = 0;
 @zp pub var scroll_y: u8 = 0;
@@ -168,7 +169,7 @@ pub fn put(address: u16, data: &[u8], vertical: bool) {
         for i in 0..n {
             nes::PPUDATA = data[i];
         }
-        nes::PPUCTRL = ctrl & 0x7b;
+        nes::PPUCTRL = ctrl;
         return;
     }
     if n > 150 {
@@ -182,6 +183,49 @@ pub fn put(address: u16, data: &[u8], vertical: bool) {
     for i in 0..u8(n) {
         queue[raw at + i] = data[raw i];
     }
+}
+
+/// Draw a 16x16 metatile at tile (x, y): tiles t, t+1 on top and t+2, t+3 below.
+pub fn metatile(x: u8, y: u8, t: u8) {
+    let top = address(x, y);
+    let bottom = top + 32;
+    if direct {
+        asm {
+            bit $2002
+        }
+        nes::PPUADDR = hi(top);
+        nes::PPUADDR = lo(top);
+        nes::PPUDATA = t;
+        nes::PPUDATA = t + 1;
+        nes::PPUADDR = hi(bottom);
+        nes::PPUADDR = lo(bottom);
+        nes::PPUDATA = t + 2;
+        nes::PPUDATA = t + 3;
+        return;
+    }
+    let a = reserve(top, 2, false);
+    if a == 255 {
+        return;
+    }
+    queue[raw a] = t;
+    queue[raw a + 1] = t + 1;
+    let b = reserve(bottom, 2, false);
+    if b == 255 {
+        return;
+    }
+    queue[raw b] = t + 2;
+    queue[raw b + 1] = t + 3;
+}
+
+/// Bytes still free in this frame's background queue.
+pub fn room() -> u8 {
+    if direct {
+        return 255;
+    }
+    if queue_end > 150 {
+        return 0;
+    }
+    return 150 - queue_end;
 }
 
 /// Draw text: each byte is a tile number (ASCII when the font is placed so).
@@ -240,16 +284,20 @@ pub fn attribute(x: u8, y: u8, palette: u8) {
     if y >= 30 {
         base += 0x800;
     }
-    let slot = (u16(y >= 30) << 1) | u16(x >= 32);
-    let k = u8(slot) * 64 + index;
+    // Two physical nametables: the mirroring decides which half is which.
+    var second = x >= 32;
+    if board::HORIZONTAL {
+        second = y >= 30;
+    }
+    let k = if second { 64 + index } else { index };
     let old = attribute_shadow[raw k];
     let new = (old & ~(3 << shift)) | ((palette & 3) << shift);
     attribute_shadow[raw k] = new;
     write(base + u16(index), new);
 }
 
-/// Attribute tables as last written through `attribute`, for nametables 0-3.
-pub var attribute_shadow: [u8; 256];
+/// The two physical attribute tables as last written through `attribute`.
+pub var attribute_shadow: [u8; 128];
 
 /// Copy a full nametable (960 tiles and 64 attribute bytes) while
 /// rendering is off.
@@ -303,7 +351,11 @@ pub fn clear(table: u8, t: u8) {
     for i in 0..64 {
         nes::PPUDATA = 0;
     }
-    let s = (table & 3) * 64;
+    var second = (table & 1) != 0;
+    if board::HORIZONTAL {
+        second = (table & 2) != 0;
+    }
+    let s: u8 = if second { 64 } else { 0 };
     for i in 0..64 {
         attribute_shadow[raw s + i] = 0;
     }

@@ -43,6 +43,11 @@ fn literal(r: &mut Rng, t: &str) -> String {
 }
 
 fn expr(r: &mut Rng, t: &str, depth: u32) -> String {
+    if depth > 1 && r.below(9) == 0 {
+        // Calls to the helper functions (small ones are inlined).
+        let k = r.below(3);
+        return format!("{t}(h{k}_{}({}, {}))", "x", expr(r, "u8", depth - 1), expr(r, "u16", depth - 1));
+    }
     if depth == 0 || r.below(4) == 0 {
         return match r.below(4) {
             0 => format!("{t}({})", literal(r, t)),
@@ -97,6 +102,10 @@ fn program(seed: u64) -> (String, usize) {
         src.push_str(&format!("var g_{t}: [{t}; 4] = [{}];\n", vals.join(", ")));
     }
     let n = 24;
+    // Helpers: h0 is tiny, h1 has control flow, h2 writes a global.
+    src.push_str("fn h0_x(a: u8, b: u16) -> u16 { return u16(a) + b; }\n");
+    src.push_str("fn h1_x(a: u8, b: u16) -> u16 { if a > 100 { return b - u16(a); } var t = b; for k in 0..(a & 3) { t = t * 3 + u16(k); } return t; }\n");
+    src.push_str("fn h2_x(a: u8, b: u16) -> u16 { g_u8[a & 3] += 1; return b ^ u16(g_u8[0]); }\n");
     src.push_str(&format!("var out: [u16; {n}] = [0; {n}];\nfn run() {{\n"));
     for t in TYPES {
         src.push_str(&format!("    var l_{t}: {t} = {};\n", literal(&mut r, t)));
@@ -149,8 +158,13 @@ fn emulate(src: &str, n: usize, optimize: bool) -> Vec<u16> {
 #[test]
 fn random_programs() {
     let count: u64 = std::env::var("FUZZ").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-    for seed in 0..count {
+    let first: u64 = std::env::var("FUZZ_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    for seed in first..count {
+        eprintln!("seed {seed}");
         let (src, n) = program(seed);
+        if std::env::var("FUZZ_SHOW").is_ok_and(|v| v == seed.to_string()) {
+            println!("{src}");
+        }
         let expected = reference(&src, n);
         for optimize in [false, true] {
             let got = emulate(&src, n, optimize);

@@ -1,0 +1,66 @@
+//! Glide's music and sound effects, as streams for std::audio.
+use std::audio:: * ;
+
+const Q: u8 = 24;
+const E: u8 = 12;
+
+/// Melody: a calm loop in A minor.
+pub const MELODY: [u8; _] = [
+    INSTRUMENT, 0,
+    E5, Q, G5, Q, A5, Q * 2,
+    G5, Q, E5, Q, D5, Q * 2,
+    C5, Q, D5, Q, E5, Q, G5, Q,
+    A4, Q * 3, REST, Q,
+    E5, Q, G5, Q, A5, Q, C6, Q,
+    B5, Q, A5, Q, G5, Q * 2,
+    F5, Q, E5, Q, D5, Q, E5, Q,
+    C5, Q * 3, REST, Q,
+    LOOP,
+];
+
+/// Broken chords under the melody: Am G C Am Am Em F C.
+pub const CHORDS: [u8; _] = [
+    INSTRUMENT, 7,
+    A4, E, C5, E, E5, E, C5, E, A4, E, C5, E, E5, E, C5, E,
+    G4, E, B4, E, D5, E, B4, E, G4, E, B4, E, D5, E, B4, E,
+    C4, E, E4, E, G4, E, E4, E, C4, E, E4, E, G4, E, E4, E,
+    A4, E, C5, E, E5, E, C5, E, A4, E, C5, E, E5, E, C5, E,
+    A4, E, C5, E, E5, E, C5, E, A4, E, C5, E, E5, E, C5, E,
+    E4, E, G4, E, B4, E, G4, E, E4, E, G4, E, B4, E, G4, E,
+    F4, E, A4, E, C5, E, A4, E, F4, E, A4, E, C5, E, A4, E,
+    C4, E, E4, E, G4, E, E4, E, C4, E, E4, E, G4, E, C5, E,
+    LOOP,
+];
+
+pub const BASS: [u8; _] = [
+    INSTRUMENT, 3,
+    A2, Q, E3, Q, A2, Q, E3, Q,
+    G2, Q, D3, Q, G2, Q, D3, Q,
+    C3, Q, G3, Q, C3, Q, G3, Q,
+    A2, Q, E3, Q, A2, Q, E3, Q,
+    A2, Q, E3, Q, A2, Q, E3, Q,
+    E2, Q, B2, Q, E2, Q, B2, Q,
+    F2, Q, C3, Q, F2, Q, C3, Q,
+    C3, Q, G3, Q, C3, Q, G2, Q,
+    LOOP,
+];
+
+pub const DRUMS: [u8; _] = [
+    INSTRUMENT, 4, 12, E, INSTRUMENT, 5, 2, E, 2, E, 2, E,
+    INSTRUMENT, 4, 7, E, INSTRUMENT, 5, 2, E, 2, E, 2, E,
+    LOOP,
+];
+
+// Effects. Channel 1 (pulse) unless noted.
+pub const BUMP: [u8; _] = [INSTRUMENT, 1, C3, 6, END];
+pub const STAR: [u8; _] = [INSTRUMENT, 1, E6, 3, G6, 3, C7, 8, END];
+pub const OPEN: [u8; _] = [INSTRUMENT, 0, C5, 4, E5, 4, G5, 4, C6, 14, END];
+pub const UNDO: [u8; _] = [INSTRUMENT, 1, A4, 3, E4, 6, END];
+pub const BLIP: [u8; _] = [INSTRUMENT, 1, C6, 4, END];
+/// Channel 0, over the melody.
+pub const CLEAR: [u8; _] = [INSTRUMENT, 0, C5, 6, E5, 6, G5, 6, C6, 6, E6, 6, G6, 30, END];
+pub const FALL: [u8; _] = [INSTRUMENT, 1, G4, 4, Fs4, 4, F4, 4, E4, 4, Ds4, 4, D4, 10, END];
+// Noise channel.
+pub const SLIDE: [u8; _] = [INSTRUMENT, 5, 5, 3, 4, 3, 3, 4, END];
+pub const PUSH: [u8; _] = [INSTRUMENT, 4, 10, 10, END];
+pub const SPLASH: [u8; _] = [INSTRUMENT, 4, 13, 6, 9, 6, 5, 12, END];

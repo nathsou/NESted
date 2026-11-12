@@ -1,531 +1,180 @@
-use nested_compiler::{compile, Assets, Compilation, Options};
+//! Play the example cartridges through controller input.
+use nested_compiler::{compile, Output, Options, Project};
 use nested_runtime::Emulator;
-use std::{collections::VecDeque, fs, path::PathBuf};
-struct Game {
-    c: Compilation,
-    n: Emulator,
+use std::path::{Path, PathBuf};
+
+pub const A: u8 = 1;
+pub const B: u8 = 2;
+pub const SELECT: u8 = 4;
+pub const START: u8 = 8;
+pub const UP: u8 = 16;
+pub const DOWN: u8 = 32;
+pub const LEFT: u8 = 64;
+pub const RIGHT: u8 = 128;
+
+pub struct Game {
+    pub out: Output,
+    pub emu: Emulator,
+    pub frames: u64,
 }
-impl Game {
-    fn load(name: &str) -> Self {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut assets = Assets::new();
-        for entry in fs::read_dir(root.join("games/assets")).unwrap() {
-            let path = entry.unwrap().path();
-            assets.insert(
-                format!("assets/{}", path.file_name().unwrap().to_str().unwrap()),
-                fs::read(path).unwrap(),
-            );
+
+pub fn root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+pub fn project(dir: &Path) -> Project {
+    let mut p = Project {
+        entry: "main.nst".into(),
+        ..Default::default()
+    };
+    fn walk(dir: &Path, base: &Path, p: &mut Project) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                walk(&path, base, p);
+                continue;
+            }
+            let rel = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+            if rel.ends_with(".nst") {
+                p.sources.insert(rel, std::fs::read_to_string(&path).unwrap());
+            } else if rel.starts_with("assets/") {
+                p.assets.insert(rel, std::fs::read(&path).unwrap());
+            }
         }
-        let c = compile(
-            &fs::read_to_string(root.join(format!("games/{name}.nst"))).unwrap(),
-            &assets,
-            Options::default(),
-        )
-        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        let n = Emulator::new(c.rom.clone(), 48000.0).unwrap();
-        let mut g = Self { c, n };
-        g.frames(0, 120);
+    }
+    walk(dir, dir, &mut p);
+    p
+}
+
+impl Game {
+    pub fn load(name: &str) -> Game {
+        let out = compile(&project(&root().join("games").join(name)), Options::default()).unwrap_or_else(|e| panic!("{}", e.render()));
+        let emu = Emulator::new(out.rom.clone(), 44100.0).unwrap();
+        let mut g = Game { out, emu, frames: 0 };
+        g.wait(30);
         g
     }
-    fn frames(&mut self, input: u8, count: usize) {
-        for _ in 0..count {
-            self.n.frame(input).unwrap();
-            assert_eq!(self.n.read_ram(0x37f), 0, "VRAM queue overflow");
-            let mut rows = [0u8; 240];
-            for slot in 0..64 {
-                let y = self.n.read_ram(0x200 + slot * 4);
-                if y < 239 {
-                    for row in rows.iter_mut().skip(y as usize + 1).take(8) {
-                        *row += 1;
-                    }
-                }
-            }
-            // Programs without sprites use page 2 as ordinary RAM.
-            let sprites = self.c.generated.assembly.contains("__rt_hide_sprites");
-            assert!(
-                !sprites || self.n.read_ram(0x0c) == 0 || rows.iter().all(|n| *n <= 8),
-                "NES sprite scanline limit exceeded: {}",
-                rows.iter().max().unwrap()
-            );
-            if let Some(address) = self.c.assembly.symbols.get("__v_cells").copied() {
-                for i in 0..64 {
-                    assert!(
-                        self.n.read_ram(address + i) <= 2,
-                        "Nonogram cell storage corrupted"
-                    );
-                }
-            }
-        }
-        assert_eq!(self.n.read_ram(0x37f), 0, "VRAM queue overflow");
+    pub fn frame(&mut self, buttons: u8) {
+        self.emu.frame(buttons).unwrap();
+        self.frames += 1;
+        let dropped = self.byte("std::video::dropped");
+        assert_eq!(dropped, 0, "background updates were dropped (frame {})", self.frames);
     }
-    fn tap(&mut self, input: u8) {
-        self.frames(input, 3);
-        self.frames(0, 3);
-    }
-    fn byte(&mut self, name: &str) -> u8 {
-        self.at(name, 0)
-    }
-    fn at(&mut self, name: &str, index: u16) -> u8 {
-        self.n
-            .read_ram(self.c.assembly.symbols[&format!("__v_{name}")] + index)
-    }
-    fn set(&mut self, name: &str, index: u16, value: u8) {
-        let address = self.c.assembly.symbols[&format!("__v_{name}")] + index;
-        self.n.write_ram(address, value);
-    }
-}
-#[test]
-fn nonogram_solves_with_controller_and_undo() {
-    let mut g = Game::load("bloom");
-    g.tap(1);
-    assert_eq!(g.at("cells", 0), 1);
-    g.tap(4);
-    assert_eq!(g.at("cells", 0), 0);
-    let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../games/assets/bloom.puzzles.bin");
-    let solution = fs::read(root).unwrap();
-    for y in 0..8 {
-        for step in 0..8 {
-            let x = if y % 2 == 0 { step } else { 7 - step };
-            if solution[y * 8 + x] != 0 {
-                g.tap(1);
-            }
-            if step < 7 {
-                g.tap(if y % 2 == 0 { 128 } else { 64 });
-            }
-        }
-        if y < 7 {
-            g.tap(32);
+    pub fn wait(&mut self, n: usize) {
+        for _ in 0..n {
+            self.frame(0);
         }
     }
-    assert_eq!(g.byte("solved"), 1);
-    g.tap(8);
-    assert_eq!(g.byte("level"), 1);
-    assert_eq!(g.byte("solved"), 0);
-}
-#[test]
-fn rhythm_chart_can_be_completed_without_misses() {
-    for difficulty in 0..3 {
-        let mut g = Game::load("starstring");
-        for _ in 0..((difficulty + 2) % 3) {
-            g.tap(4);
+    /// Press for three frames (a quick human tap), then release.
+    pub fn tap(&mut self, buttons: u8) {
+        for _ in 0..3 {
+            self.frame(buttons);
         }
-        assert_eq!(g.byte("difficulty"), difficulty);
-        g.tap(8);
-        let mut last = 0u8;
-        for _ in 0..4300 {
-            if g.byte("mode") == 2 {
-                break;
-            }
-            let mut input = 0;
-            for i in 0..12 {
-                let y = g.at("note_y", i);
-                if (188..=190).contains(&y) {
-                    input |= g.at("note_mask", i);
-                }
-                if g.at("sustain", i) > 0 {
-                    input |= g.at("sustain_mask", i);
-                }
-            } // Avoid held-lane edge suppression for consecutive notes.
-            if input == last && input != 0 {
-                let mut sustained = 0;
-                for i in 0..12 {
-                    if g.at("sustain", i) > 0 {
-                        sustained |= g.at("sustain_mask", i);
-                    }
-                }
-                input = sustained;
-            }
-            let pad =
-                ((input & 1) << 6) | ((input & 2) << 4) | ((input & 4) << 2) | ((input & 8) << 4);
-            g.frames(pad, 1);
-            last = input;
-        }
-        assert_eq!(g.byte("chart_step"), 192);
-        assert_eq!(g.byte("mode"), 2);
-        assert_eq!(g.byte("misses"), 0);
-        assert!(g.byte("perfect") > 100);
+        self.frame(0);
     }
-}
-#[test]
-fn platformer_jump_dash_death_and_restart() {
-    let mut g = Game::load("skythread");
-    let ground = g.byte("player_y");
-    g.frames(1, 8);
-    assert!(g.byte("player_y") < ground - 10);
-    g.frames(0, 2);
-    g.frames(130, 3);
-    assert!(g.byte("dash_time") > 0);
-    assert_eq!(g.byte("can_dash"), 0);
-    g.frames(128, 90);
-    g.tap(8);
-    assert_eq!(g.byte("room"), 0);
-    assert_eq!(g.byte("deaths"), 0);
-    assert_eq!(g.byte("finished"), 0);
-}
-#[test]
-fn dungeon_is_connected_and_keys_advance_all_six_floors() {
-    let mut g = Game::load("emberkeep");
-    for floor in 0..6 {
-        assert_eq!(g.byte("floor"), floor);
-        let cells = (0..192).map(|i| g.at("dungeon", i)).collect::<Vec<_>>();
-        let start = (g.byte("player_y") as usize) * 16 + g.byte("player_x") as usize;
-        let mut seen = [false; 192];
-        let mut q = VecDeque::from([start]);
-        seen[start] = true;
-        while let Some(i) = q.pop_front() {
-            for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
-                let x = (i % 16) as i32 + dx;
-                let y = (i / 16) as i32 + dy;
-                if (0..16).contains(&x) && (0..12).contains(&y) {
-                    let j = y as usize * 16 + x as usize;
-                    if cells[j] != 0 && !seen[j] {
-                        seen[j] = true;
-                        q.push_back(j);
-                    }
-                }
-            }
-        }
-        for (i, c) in cells.iter().enumerate() {
-            if *c != 0 {
-                assert!(seen[i]);
-            }
-        }
-        // A targeted map fixture tests transitions separately from controller playability.
-        for e in 0..6 {
-            g.set("enemy_hp", e, 0);
-        }
-        let stair = cells.iter().position(|v| *v == 2).unwrap();
-        let x = stair % 16;
-        let y = stair / 16;
-        g.set("player_x", 0, (x - 1) as u8);
-        g.set("player_y", 0, y as u8);
-        g.set("dungeon", (stair - 1) as u16, 1);
-        g.set("key_found", 0, 1);
-        g.tap(128);
-        g.frames(0, 100);
+    pub fn addr(&self, name: &str) -> u16 {
+        self.out
+            .linked
+            .symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("no symbol {name}"))
+            .address
     }
-    assert_eq!(g.byte("victory"), 1);
-    g.tap(8);
-    g.frames(0, 80);
-    assert_eq!(g.byte("floor"), 0);
-    assert_eq!(g.byte("over"), 0);
+    pub fn byte(&mut self, name: &str) -> u8 {
+        let a = self.addr(name);
+        self.emu.read_ram(a)
+    }
+    pub fn word(&mut self, name: &str) -> u16 {
+        let a = self.addr(name);
+        self.emu.read_ram(a) as u16 | (self.emu.read_ram(a + 1) as u16) << 8
+    }
+    /// Wait until a byte has a value; panics after `limit` frames.
+    pub fn until(&mut self, name: &str, value: u8, limit: usize) {
+        for _ in 0..limit {
+            if self.byte(name) == value {
+                return;
+            }
+            self.frame(0);
+        }
+        panic!("{name} never became {value} (is {})", self.byte(name));
+    }
+    pub fn shot(&self, name: &str) {
+        if let Ok(dir) = std::env::var("NESTED_SHOTS") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(Path::new(&dir).join(format!("{name}.png")), self.emu.png(2)).unwrap();
+        }
+    }
 }
 
-#[test]
-fn dungeon_controller_can_win_a_complete_run() {
-    let mut g = Game::load("emberkeep");
-    for _ in 0..500 {
-        if g.byte("over") != 0 {
-            break;
-        }
-        if g.byte("health") <= 6 && g.byte("potions") > 0 {
-            g.tap(2);
-            continue;
-        }
-        let cells = (0..192).map(|i| g.at("dungeon", i)).collect::<Vec<_>>();
-        let target = if g.byte("key_found") == 0 { 3 } else { 2 };
-        let goal = cells.iter().position(|c| *c == target).unwrap();
-        let start = g.byte("player_y") as usize * 16 + g.byte("player_x") as usize;
-        let mut parent = vec![None; 192];
-        let mut q = VecDeque::from([start]);
-        parent[start] = Some((start, 0));
-        while let Some(i) = q.pop_front() {
-            if i == goal {
-                break;
-            }
-            for (dx, dy, pad) in [(0, 1, 32), (0, -1, 16), (1, 0, 128), (-1, 0, 64)] {
-                let x = (i % 16) as i32 + dx;
-                let y = (i / 16) as i32 + dy;
-                if (0..16).contains(&x) && (0..12).contains(&y) {
-                    let j = y as usize * 16 + x as usize;
-                    if cells[j] != 0 && parent[j].is_none() {
-                        parent[j] = Some((i, pad));
-                        q.push_back(j);
-                    }
-                }
-            }
-        }
-        let mut next = goal;
-        while parent[next].unwrap().0 != start {
-            next = parent[next].unwrap().0;
-        }
-        let before = g.byte("floor");
-        g.tap(parent[next].unwrap().1);
-        if before != g.byte("floor") {
-            g.frames(0, 100);
-        }
-    }
-    assert_eq!(
-        g.byte("victory"),
-        1,
-        "controller navigation and combat should finish all floors"
-    );
-}
+mod glide {
+    use super::*;
+    const PLAY: u8 = 1;
+    const CLEAR: u8 = 5;
 
-#[test]
-fn platformer_authored_rooms_have_controller_routes() {
-    let mut g = Game::load("skythread");
-    let routes: &[&[(u8, u8)]] = &[
-        &[(64, 177), (112, 145), (160, 113), (192, 81), (208, 49)],
-        &[(56, 129), (104, 97), (152, 65), (216, 33)],
-        &[(56, 129), (88, 97), (144, 49), (208, 33)],
-        &[(40, 129), (80, 97), (136, 65), (208, 33)],
-        &[(88, 129), (56, 97), (136, 65), (208, 33)],
-        &[(40, 129), (64, 97), (136, 65), (224, 33)],
-    ];
-    for (room, route) in routes.iter().enumerate() {
-        g.frames(0, 60);
-        if room == 3 || room == 5 {
-            g.frames(64, 12);
-            g.frames(0, 3);
-        }
-        for &(goal_x, goal_y) in *route {
-            let mut last = 0;
-            for _ in 0..240 {
-                if g.byte("room") as usize != room || g.byte("finished") != 0 {
-                    break;
-                }
-                let x = g.byte("player_x");
-                let y = g.byte("player_y");
-                let ground = g.byte("grounded") != 0;
-                if x.abs_diff(goal_x) <= 3 && y.abs_diff(goal_y) <= 2 && ground {
-                    break;
-                }
-                // Rise beside the upper ledge before moving over it.
-                let mut pad = if y > goal_y.saturating_add(10) {
-                    0
-                } else if x + 2 < goal_x {
-                    128
-                } else if x > goal_x + 2 {
-                    64
-                } else {
-                    0
-                };
-                if !ground || last & 1 == 0 || g.byte("velocity_y") >= 128 {
-                    pad |= 1;
-                }
-                if !ground
-                    && g.byte("velocity_y") < 128
-                    && g.byte("can_dash") != 0
-                    && y >= goal_y.saturating_sub(15)
-                {
-                    pad = 19;
-                } else if !ground
-                    && g.byte("velocity_y") < 128
-                    && g.byte("can_dash") != 0
-                    && x.abs_diff(goal_x) > 32
-                {
-                    pad = 3 | if x < goal_x { 128 } else { 64 };
-                }
-                if room == 2 && goal_x == 144 && x >= 120 && y > 52 {
-                    pad |= 128;
-                    if !ground && g.byte("velocity_y") < 128 && last & 1 != 0 {
-                        pad &= !1;
-                    }
-                }
-                g.frames(pad, 1);
-                last = pad;
-            }
-            g.frames(0, 2);
-        }
-        // Walk across the exit tile after landing on its platform.
-        for _ in 0..60 {
-            if g.byte("room") as usize != room || g.byte("finished") != 0 {
-                break;
-            }
-            g.frames(128, 1);
-        }
-        assert_eq!(
-            g.byte("room") as usize,
-            room + 1,
-            "room {room}, x={}, y={}, deaths={}",
-            g.byte("player_x"),
-            g.byte("player_y"),
-            g.byte("deaths")
-        );
+    fn solutions() -> Vec<String> {
+        std::fs::read_to_string(root().join("games/glide/solutions.txt"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
-    assert_eq!(g.byte("finished"), 1);
-}
 
-#[test]
-fn rhythm_and_dungeon_pause_freeze_gameplay_and_resume() {
-    let mut rhythm = Game::load("starstring");
-    rhythm.tap(8);
-    rhythm.frames(0, 90);
-    rhythm.tap(8);
-    assert_eq!(rhythm.byte("mode"), 3);
-    let notes: Vec<_> = (0..12).map(|i| rhythm.at("note_y", i)).collect();
-    let step = rhythm.byte("chart_step");
-    rhythm.frames(0xf3, 80);
-    assert_eq!(rhythm.byte("chart_step"), step);
-    assert_eq!(
-        (0..12).map(|i| rhythm.at("note_y", i)).collect::<Vec<_>>(),
-        notes
-    );
-    rhythm.tap(8);
-    assert_eq!(rhythm.byte("mode"), 1);
-    let mut dungeon = Game::load("emberkeep");
-    dungeon.tap(8);
-    assert_eq!(dungeon.byte("paused"), 1);
-    let position = (dungeon.byte("player_x"), dungeon.byte("player_y"));
-    let health = dungeon.byte("health");
-    dungeon.frames(128 | 1 | 2, 60);
-    assert_eq!(
-        (dungeon.byte("player_x"), dungeon.byte("player_y")),
-        position
-    );
-    assert_eq!(dungeon.byte("health"), health);
-    dungeon.tap(8);
-    assert_eq!(dungeon.byte("paused"), 0);
-}
-
-#[test]
-fn every_nonogram_puzzle_completes_and_navigation_wraps() {
-    let mut game = Game::load("bloom");
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../games/assets/bloom.puzzles.bin");
-    let solutions = fs::read(path).unwrap();
-    assert_eq!(solutions.len(), 16 * 64);
-    for level in 0..16 {
-        assert_eq!(game.byte("level"), level as u8);
-        for y in 0..8 {
-            for step in 0..8 {
-                let x = if y % 2 == 0 { step } else { 7 - step };
-                if solutions[level * 64 + y * 8 + x] != 0 {
-                    game.tap(1);
-                }
-                if step < 7 {
-                    game.tap(if y % 2 == 0 { 128 } else { 64 });
-                }
-            }
-            if y < 7 {
-                game.tap(32);
-            }
-        }
-        assert_eq!(game.byte("solved"), 1, "Puzzle {}", level + 1);
-        assert_eq!(game.byte("errors"), 0);
-        game.tap(8);
-        game.frames(0, 20); // Allow bulk scene upload and controller release sampling.
-    }
-    assert_eq!(game.byte("level"), 0);
-    game.tap(4 | 8);
-    assert_eq!(game.byte("level"), 15);
-}
-
-#[test]
-fn chess_plays_a_controller_move_and_the_engine_replies() {
-    let mut g = Game::load("chess");
-    // Menu: Black to NES level 1 (a fast, depth-limited reply), then start.
-    g.tap(16);
-    for _ in 0..4 {
-        g.tap(64);
-    }
-    g.tap(8);
-    g.frames(0, 30);
-    assert_eq!(g.byte("screen_state"), 1, "game started");
-    // The cursor starts on e2: select, two squares up, move.
-    g.tap(1);
-    g.tap(16);
-    g.tap(16);
-    g.tap(1);
-    g.frames(0, 240);
-    let board = g.c.assembly.symbols["__v_board"];
-    assert_eq!(g.n.read_ram(board + 0x34), 1, "white pawn on e4");
-    assert_eq!(g.byte("game_plies"), 2, "1.e4 and the engine's reply");
-    assert_eq!(g.byte("side"), 0, "white to move again");
-}
-
-#[test]
-fn chess_ponders_on_the_humans_time_and_stops_on_a_button() {
-    let mut g = Game::load("chess");
-    // Default level (an unlimited-depth search), out of book from the start.
-    g.tap(8);
-    g.frames(0, 30);
-    let in_book = g.c.assembly.symbols["__v_in_book"];
-    g.n.write_ram(in_book, 0);
-    g.tap(1);
-    g.tap(16);
-    g.tap(16);
-    g.tap(1);
-    let board = g.c.assembly.symbols["__v_board"];
-    let mut frames = 0;
-    while g.byte("game_plies") < 2 {
-        g.frames(0, 1);
-        frames += 1;
-        assert!(frames < 2000, "the engine replies");
-    }
-    let before: Vec<u8> = (0..128).map(|i| g.n.read_ram(board + i)).collect();
-    g.frames(0, 400);
-    assert_eq!(g.byte("pondering"), 1, "pondering while the human thinks");
-    let cursor = g.byte("cursor");
-    g.tap(128);
-    g.frames(0, 30);
-    assert_eq!(g.byte("pondering"), 0, "a button stops pondering");
-    assert_eq!(g.byte("ponder_valid"), 1);
-    let after: Vec<u8> = (0..128).map(|i| g.n.read_ram(board + i)).collect();
-    // Files 8..15 hold piece-list indices, stale on empty squares.
-    let occupied = |i: usize| i & 8 == 0 || before[i & !8] != 0;
-    let diff: Vec<usize> = (0..128)
-        .filter(|&i| occupied(i) && before[i] != after[i])
-        .collect();
-    assert!(
-        diff.is_empty(),
-        "pondering leaves the position as it was: {diff:?}"
-    );
-    g.frames(0, 6);
-    assert_ne!(
-        g.byte("cursor"),
-        cursor,
-        "the button still moves the cursor"
-    );
-    // Play the expected move: the reply comes at once, from the ponder.
-    let from = g.byte("ponder_move") & 0x77;
-    let to = g.byte("ponder_target") & 0x77;
-    for target in [from, to] {
-        loop {
-            let at = g.byte("cursor");
-            let step = if at >> 4 < target >> 4 {
-                16
-            } else if at >> 4 > target >> 4 {
-                32
-            } else if at & 7 < target & 7 {
-                128
-            } else if at & 7 > target & 7 {
-                64
-            } else {
-                break;
+    fn play(g: &mut Game, moves: &str) {
+        for m in moves.chars() {
+            g.until("mode", PLAY, 120);
+            let b = match m {
+                'U' => UP,
+                'D' => DOWN,
+                'L' => LEFT,
+                _ => RIGHT,
             };
-            g.tap(step);
+            g.tap(b);
         }
-        g.tap(1);
     }
-    assert_eq!(g.byte("game_plies"), 3, "the expected move was played");
-    g.frames(0, 20);
-    assert_eq!(g.byte("game_plies"), 4, "the pondered answer is instant");
-}
 
-#[test]
-fn chess_bots_play_each_other_at_their_own_levels() {
-    let mut g = Game::load("chess");
-    // White: human -> NES 1 (one step right). Black: NES 5 -> NES 2.
-    g.tap(16);
-    g.tap(16);
-    g.tap(128);
-    g.tap(32);
-    for _ in 0..3 {
-        g.tap(64);
+    #[test]
+    fn every_level_is_solved_by_its_par_route() {
+        let mut g = Game::load("glide");
+        g.shot("glide-title");
+        g.tap(START);
+        g.until("mode", PLAY, 200);
+        g.wait(10);
+        let sols = solutions();
+        assert_eq!(sols.len(), 25);
+        for (level, sol) in sols.iter().enumerate() {
+            assert_eq!(g.byte("level") as usize, level);
+            if level == 18 {
+                g.wait(20);
+                g.shot("glide-level");
+            }
+            play(&mut g, sol);
+            g.until("mode", CLEAR, 200);
+            assert_eq!(g.word("moves") as usize, sol.len(), "level {} moves", level + 1);
+            g.wait(70);
+            if level == 0 {
+                g.shot("glide-clear");
+            }
+            g.tap(A);
+            if level < 24 {
+                g.until("mode", PLAY, 200);
+            }
+        }
     }
-    assert_eq!(g.at("players", 0), 1);
-    assert_eq!(g.at("players", 1), 2);
-    g.tap(8);
-    let in_book = g.c.assembly.symbols["__v_in_book"];
-    g.n.write_ram(in_book, 0);
-    let mut frames = 0;
-    while g.byte("game_plies") < 6 {
-        g.frames(0, 1);
-        frames += 1;
-        assert!(frames < 3000, "the bots keep moving without input");
+
+    #[test]
+    fn undo_restores_stars_and_moves() {
+        let mut g = Game::load("glide");
+        g.tap(START);
+        g.until("mode", PLAY, 200);
+        // Level 1: R collects the star.
+        g.tap(RIGHT);
+        g.until("mode", PLAY, 120);
+        assert_eq!(g.byte("stars_left"), 0);
+        assert_eq!(g.word("moves"), 1);
+        g.tap(B);
+        g.wait(5);
+        assert_eq!(g.byte("stars_left"), 1);
+        assert_eq!(g.word("moves"), 0);
     }
-    assert_eq!(g.byte("screen_state"), 1, "still playing");
 }

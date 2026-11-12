@@ -88,6 +88,7 @@ dependencies = [
 name = "nested-cli"
 version = "0.1.0"
 dependencies = [
+ "nessy",
  "nested-compiler",
  "nested-runtime",
 ]
