@@ -387,6 +387,14 @@ impl Gen<'_> {
                     self.ins(Op::Lda, Arg::MemX(base));
                 }
             }
+            Ex::Deref(p, i, _) if i.sc().wide() => {
+                // Word index: add it to the pointer.
+                let t = self.tmp16();
+                let sum = Ex::Bin(BinOp::Add, p.clone(), i.clone(), Sc::U16);
+                self.eval16(&sum, &t);
+                self.imm(Op::Ldy, 0);
+                self.ins(Op::Lda, Arg::IndY(t));
+            }
             Ex::Deref(p, i, _) => {
                 let ptr = match &**p {
                     Ex::Var(v, _) if self.var_is_pointer(*v) => self.var(*v),

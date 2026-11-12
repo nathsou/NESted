@@ -331,10 +331,34 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     let mut extra_ram: BTreeMap<String, u16> = BTreeMap::new();
     let mut symbols = Vec::new();
 
+    // Objects referenced by any instruction or data.
+    let mut used_objs: BTreeSet<u32> = BTreeSet::new();
+    for u in &units {
+        for l in &u.lines {
+            match l {
+                Line::Ins(ins) => {
+                    if let Some(Opnd { sym: Sym::Obj(o, _), .. }) = ins.arg.opnd() {
+                        used_objs.insert(o.0);
+                    }
+                }
+                Line::Bytes(v) | Line::Words(v) => {
+                    for o in v {
+                        if let Sym::Obj(id, _) = o.sym {
+                            used_objs.insert(id.0);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     // Fixed placements first.
     for (i, o) in mir.objs.iter().enumerate() {
         let id = ObjId(i as u32);
         if let ObjKind::Ram(Placement::At(addr)) = o.kind {
+            if !used_objs.contains(&(i as u32)) {
+                continue;
+            }
             let size = o.bytes() as u16;
             if !ram.take_at(addr, size) {
                 errors.push(format!("'{}' at ${addr:04X} overlaps other memory", o.name));
@@ -378,7 +402,7 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     // @zp globals.
     for (i, o) in mir.objs.iter().enumerate() {
         let id = ObjId(i as u32);
-        if o.kind == ObjKind::Ram(Placement::ZeroPage) {
+        if o.kind == ObjKind::Ram(Placement::ZeroPage) && used_objs.contains(&(i as u32)) {
             match ram.alloc(o.bytes() as u16, 0, 0x100) {
                 Some(a) => place_obj(&mut obj_addr, id, o, a),
                 None => errors.push(format!("Zero page is full; cannot place '{}'", o.name)),
@@ -607,7 +631,7 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         }
     }
     let mut pending: Vec<usize> = (0..mir.objs.len())
-        .filter(|i| matches!(mir.objs[*i].kind, ObjKind::Ram(Placement::Auto | Placement::Ram)) && !obj_addr.contains_key(&(ObjId(*i as u32), false)))
+        .filter(|i| matches!(mir.objs[*i].kind, ObjKind::Ram(Placement::Auto | Placement::Ram)) && !obj_addr.contains_key(&(ObjId(*i as u32), false)) && used_objs.contains(&(*i as u32)))
         .collect();
     pending.sort_by_key(|i| std::cmp::Reverse((global_uses.get(&(*i as u32)).copied().unwrap_or(0) * 4) / mir.objs[*i].bytes().max(1)));
     // Recursion save stack.

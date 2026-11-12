@@ -18,6 +18,8 @@ pub struct Scope {
     pub facts: Vec<(LocalId, i64, i64)>,
     /// `index < len(slice)` facts for immutable locals.
     pub slice_facts: Vec<(LocalId, LocalId)>,
+    /// Immutable locals bound to `len(slice)`.
+    pub len_alias: Vec<(LocalId, LocalId)>,
     pub loops: u32,
     pub result: Type,
     pub has_asm: bool,
@@ -32,6 +34,7 @@ impl Scope {
             blocks: vec![Vec::new()],
             facts: Vec::new(),
             slice_facts: Vec::new(),
+            len_alias: Vec::new(),
             loops: 0,
             result: Type::Void,
             has_asm: false,
@@ -358,14 +361,6 @@ impl Checker<'_> {
                         return err(span);
                     }
                 };
-                let len = match &self.globals[g.0 as usize].ty {
-                    Type::Array(_, n) => *n,
-                    _ => 0,
-                };
-                if len > 255 {
-                    self.diags.error(span, format!("Slices hold at most 255 elements; this array has {len}"));
-                    return err(span);
-                }
                 Expr::new(ExprKind::SliceOf(g), target.clone(), span)
             }
             _ => mismatch(self, &e),
@@ -1142,10 +1137,10 @@ impl Checker<'_> {
                         Type::Slice(_) => {
                             if let ExprKind::SliceOf(g) = &x.kind {
                                 if let Type::Array(_, n) = &self.globals[g.0 as usize].ty {
-                                    return int(*n as i64, Type::U8, span);
+                                    return int(*n as i64, Type::Int, span);
                                 }
                             }
-                            Expr::new(ExprKind::Intrinsic(Intrinsic::SliceLen, vec![x]), Type::U8, span)
+                            Expr::new(ExprKind::Intrinsic(Intrinsic::SliceLen, vec![x]), Type::U16, span)
                         }
                         Type::Error => err(span),
                         t => {
@@ -1180,6 +1175,22 @@ impl Checker<'_> {
                     Expr::new(ExprKind::Intrinsic(Intrinsic::Poke, vec![a, v]), Type::Void, span)
                 }
                 "asset" => self.asset(s, args, expected, span),
+                "addr" => {
+                    if !arity(self, 1) {
+                        return err(span);
+                    }
+                    let x = self.expr(s, &args[0], None);
+                    match (&x.kind, &x.ty) {
+                        (_, Type::Slice(_)) | (ExprKind::Global(_), _) => {
+                            Expr::new(ExprKind::Intrinsic(Intrinsic::Addr, vec![x]), Type::U16, span)
+                        }
+                        _ if x.ty.is_error() => err(span),
+                        _ => {
+                            self.diags.error(span, "addr() takes a global or a slice");
+                            err(span)
+                        }
+                    }
+                }
                 _ => {
                     self.diags.error(span, format!("'{name}' cannot be called"));
                     err(span)
@@ -1627,6 +1638,13 @@ impl Checker<'_> {
                     }
                     return;
                 }
+                if let ExprKind::Local(n) = &k.kind {
+                    if let Some((_, sl)) = s.len_alias.iter().find(|(a, _)| a == n).copied() {
+                        if op == BinOp::Lt {
+                            s.slice_facts.push((id, sl));
+                        }
+                    }
+                }
                 let (klo, khi) = self.interval(s, k);
                 let fact = match op {
                     BinOp::Lt => Some((i64::MIN, khi - 1)),
@@ -1750,6 +1768,13 @@ impl Checker<'_> {
                 let id = s.declare(&name.name, t, *mutable, name.span);
                 if let Some(f) = s.fn_id {
                     self.defs.insert(Def::Local(f, id), name.span);
+                }
+                if !*mutable {
+                    if let ExprKind::Intrinsic(Intrinsic::SliceLen, args) = &e.kind {
+                        if let ExprKind::Local(sl) = &args[0].kind {
+                            s.len_alias.push((id, *sl));
+                        }
+                    }
                 }
                 Stmt::Let(id, e)
             }
@@ -1930,6 +1955,11 @@ impl Checker<'_> {
                 if let ExprKind::Intrinsic(Intrinsic::SliceLen, args) = &b.kind {
                     if let (ExprKind::Local(sl), false) = (&args[0].kind, *inclusive) {
                         s.slice_facts.push((id, *sl));
+                    }
+                }
+                if let (ExprKind::Local(n), false) = (&b.kind, *inclusive) {
+                    if let Some((_, sl)) = s.len_alias.iter().find(|(a, _)| a == n).copied() {
+                        s.slice_facts.push((id, sl));
                     }
                 }
                 s.loops += 1;

@@ -113,7 +113,6 @@ pub(crate) struct Checker<'p> {
     /// Hidden constant globals for string literals, deduplicated.
     pub strings: BTreeMap<Vec<u8>, GlobalId>,
     pub root: u32,
-    pub fuel: u64,
 }
 
 pub fn std_source(path: &str) -> Option<&'static str> {
@@ -132,6 +131,7 @@ pub const BUILTIN_FNS: &[(&str, &str)] = &[
     ("poke", "poke(address: u16, value: u8): volatile write to any CPU address."),
     ("asset", "asset(\"path\") or asset(\"path\", start..end): bytes of a project asset, at compile time."),
     ("defined", "defined(path) -> bool: whether a name resolves, at compile time."),
+    ("addr", "addr(x) -> u16: CPU address of a global or of a slice's first element."),
 ];
 
 pub fn analyze(project: &Project) -> Analysis {
@@ -156,7 +156,6 @@ pub fn analyze(project: &Project) -> Analysis {
         cartridge: Cartridge::default(),
         strings: BTreeMap::new(),
         root: 0,
-        fuel: 0,
     };
     c.load_all();
     c.collect();
@@ -176,7 +175,9 @@ impl<'p> Checker<'p> {
         if let Some(i) = self.modules.iter().position(|m| m.path == path) {
             return Some(i as u32);
         }
-        let text = if let Some(rest) = path.strip_prefix("std/") {
+        let text = if path == "std/board.nst" {
+            Some(self.board_source())
+        } else if let Some(rest) = path.strip_prefix("std/") {
             std_source(&format!("std/{rest}")).map(str::to_owned)
         } else {
             self.project.sources.get(path).cloned()
@@ -218,6 +219,42 @@ impl<'p> Checker<'p> {
         Some(id)
     }
 
+    /// `std::board`: constants describing the declared cartridge.
+    fn board_source(&self) -> String {
+        let mut mapper = "nrom".to_owned();
+        let mut mirroring = "vertical".to_owned();
+        let mut chr_ram = false;
+        if let Some(root) = self.modules.get(self.root as usize) {
+            for item in &root.ast.items {
+                if let ItemKind::Cartridge(fields) = &item.kind {
+                    for (name, value) in fields {
+                        if let ast::ExprKind::Path(p) = &value.kind {
+                            let w = p.last().name.clone();
+                            match name.name.as_str() {
+                                "mapper" => mapper = w,
+                                "mirroring" => mirroring = w,
+                                "chr" if w == "ram" => chr_ram = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let board = crate::link::Board::from_name(&mapper).unwrap_or(crate::link::Board::Nrom);
+        let chr_ram = chr_ram || !board.chr_rom();
+        let mut out = String::from("//! Constants describing this program's cartridge board.\n");
+        out.push_str(&format!("/// iNES mapper number.\npub const MAPPER: u16 = {};\n", board.ines()));
+        for n in crate::link::Board::NAMES {
+            let b = crate::link::Board::from_name(n).unwrap();
+            out.push_str(&format!("pub const {}: bool = {};\n", n.to_uppercase(), b == board));
+        }
+        out.push_str(&format!("/// Pattern tables are RAM (uploaded by the program).\npub const CHR_RAM: bool = {chr_ram};\n"));
+        out.push_str(&format!("pub const HORIZONTAL: bool = {};\n", mirroring == "horizontal"));
+        out.push_str(&format!("pub const PRG_BANKING: bool = {};\n", board.banking() != crate::codegen::Banking::None));
+        out
+    }
+
     /// File for a module path; `use a::b::item` may name an item in `a/b.nst`.
     fn module_file(&self, path: &ast::Path, exact: bool) -> Option<String> {
         let segs: Vec<&str> = path.segments.iter().map(|s| s.name.as_str()).collect();
@@ -232,7 +269,7 @@ impl<'p> Checker<'p> {
             }
             let file = format!("{}.nst", segs[..n].join("/"));
             let exists = if file.starts_with("std/") {
-                std_source(&file).is_some()
+                std_source(&file).is_some() || file == "std/board.nst"
             } else {
                 self.project.sources.contains_key(&file)
             };

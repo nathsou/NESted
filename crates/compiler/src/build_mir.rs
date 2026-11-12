@@ -22,7 +22,7 @@ pub fn sc_of(types: &crate::types::TypeTable, t: &Type) -> Sc {
 fn leaves(types: &crate::types::TypeTable, t: &Type) -> Vec<(String, Sc)> {
     match t {
         Type::Array(e, _) => leaves(types, e),
-        Type::Slice(_) => vec![(".ptr".into(), Sc::U16), (".len".into(), Sc::U8)],
+        Type::Slice(_) => vec![(".ptr".into(), Sc::U16), (".len".into(), Sc::U16)],
         Type::Void | Type::Never | Type::Error => vec![],
         t => types
             .leaves(t)
@@ -504,7 +504,7 @@ impl Builder<'_, '_> {
         match &e.kind {
             ExprKind::Const(v) => {
                 if let Type::Slice(_) = e.ty {
-                    return vec![Ex::Const(0, Sc::U16), Ex::Const(0, Sc::U8)];
+                    return vec![Ex::Const(0, Sc::U16), Ex::Const(0, Sc::U16)];
                 }
                 let mut flat = Vec::new();
                 flat_values(v, &mut flat);
@@ -553,7 +553,7 @@ impl Builder<'_, '_> {
             ExprKind::SliceOf(g) => {
                 let objs = &self.mir.global_objs[g];
                 let len = self.mir.objs[objs[0].0 as usize].len.unwrap_or(1);
-                vec![Ex::Addr(objs[0], false), Ex::Const(len as i64, Sc::U8)]
+                vec![Ex::Addr(objs[0], false), Ex::Const(len as i64, Sc::U16)]
             }
             ExprKind::Unary(op, x) => {
                 let sc = self.sc(&e.ty);
@@ -637,9 +637,19 @@ impl Builder<'_, '_> {
                     self.emit(St::Assign(Place::Poke(a), v));
                     vec![]
                 }
+                Intrinsic::Addr => match &args[0].kind {
+                    ExprKind::Global(g) => match self.mir.global_objs.get(g).and_then(|o| o.first()) {
+                        Some(o) => vec![Ex::Addr(*o, false)],
+                        None => vec![Ex::Const(0, Sc::U16)],
+                    },
+                    _ => {
+                        let v = self.expr(&args[0]);
+                        vec![v.into_iter().next().unwrap_or(Ex::Const(0, Sc::U16))]
+                    }
+                },
                 Intrinsic::SliceLen => {
                     let v = self.expr(&args[0]);
-                    vec![v.get(1).cloned().unwrap_or(Ex::Const(0, Sc::U8))]
+                    vec![v.get(1).cloned().unwrap_or(Ex::Const(0, Sc::U16))]
                 }
             },
             ExprKind::Match(x, arms) => {
@@ -692,9 +702,12 @@ impl Builder<'_, '_> {
         };
         let parts = self.expr(s);
         let idx = self.scalar(i);
-        let idx = self.convert(idx, Sc::U8);
         match parts.first() {
-            Some(Ex::Addr(o, false)) => Ex::Load(*o, Some(Box::new(idx)), sc),
+            Some(Ex::Addr(o, false)) => {
+                let small = self.mir.objs[o.0 as usize].len.unwrap_or(1) <= 256;
+                let idx = if small { self.convert(idx, Sc::U8) } else { self.convert(idx, Sc::U16) };
+                Ex::Load(*o, Some(Box::new(idx)), sc)
+            }
             Some(Ex::Var(v, _)) => {
                 self.inst.vars[v.0 as usize].pointer = true;
                 Ex::Deref(Box::new(Ex::Var(*v, Sc::U16)), Box::new(idx), sc)

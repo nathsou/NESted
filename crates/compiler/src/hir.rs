@@ -239,6 +239,7 @@ pub enum Intrinsic {
     Peek,
     Poke,
     SliceLen,
+    Addr,
 }
 
 #[derive(Clone, Debug)]

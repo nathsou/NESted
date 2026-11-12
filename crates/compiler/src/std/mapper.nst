@@ -1,0 +1,97 @@
+//! Board features: CHR bank switching, mirroring and the MMC3 scanline IRQ.
+//! Unsupported operations do nothing on boards without them.
+use std::board;
+
+/// Select a CHR bank. MMC3: slots 0-1 take 2 KiB banks (even numbers),
+/// slots 2-5 take 1 KiB banks. MMC1: slots 0-1 take 4 KiB banks.
+/// CNROM, GxROM and Color Dreams switch all 8 KiB (slot ignored).
+pub fn chr_bank(slot: u8, bank: u8) {
+    if board::MMC3 {
+        mmc3(slot & 7, bank);
+    } else if board::MMC1 {
+        if slot == 0 {
+            asm(a = bank) {
+                jsr __mmc1_chr0
+            }
+        } else {
+            asm(a = bank) {
+                jsr __mmc1_chr1
+            }
+        }
+    } else if board::CNROM {
+        asm(a = bank) {
+            tay
+            sta __bank_table,y
+        }
+    } else if board::GXROM {
+        asm(a = bank) {
+            and #3
+            sta __chr_shadow
+            lda __bank_shadow
+            jsr __bank_data
+        }
+    } else if board::COLORDREAMS {
+        asm(a = bank) {
+            asl a
+            asl a
+            asl a
+            asl a
+            sta __chr_shadow
+            lda __bank_shadow
+            jsr __bank_data
+        }
+    }
+}
+
+/// Write an MMC3 bank register (R0-R7).
+fn mmc3(register: u8, value: u8) {
+    poke(0x8000, register);
+    poke(0x8001, value);
+}
+
+/// Nametable mirroring on boards that switch it: 0 vertical, 1 horizontal,
+/// 2 single screen A, 3 single screen B.
+pub fn mirroring(mode: u8) {
+    if board::MMC3 {
+        poke(0xa000, if mode == 1 { 1 } else { 0 });
+    } else if board::AXROM {
+        asm(a = mode) {
+            cmp #3
+            lda #0
+            bcc low
+            lda #$10
+        low:
+            sta __chr_shadow
+            lda __bank_shadow
+            jsr __bank_data
+        }
+    }
+}
+
+/// Request an IRQ after `lines` scanlines of the next frame (MMC3).
+pub fn irq_after(lines: u8) {
+    if board::MMC3 {
+        poke(0xc000, lines);
+        poke(0xc001, 0);
+        poke(0xe001, 0);
+        asm {
+            cli
+        }
+    }
+}
+
+/// Acknowledge the MMC3 IRQ; `again` re-arms it with the same count.
+pub fn irq_ack(again: bool) {
+    if board::MMC3 {
+        poke(0xe000, 0);
+        if again {
+            poke(0xe001, 0);
+        }
+    }
+}
+
+pub fn irq_off() {
+    if board::MMC3 {
+        poke(0xe000, 0);
+    }
+}

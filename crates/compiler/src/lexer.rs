@@ -105,7 +105,7 @@ pub fn lex(file: FileId, src: &str, diags: &mut Diagnostics) -> Lexed {
                 trailing: line_has_code,
             });
             if !line_has_code {
-                newlines = newlines.min(1);
+                newlines = 0;
             }
             continue;
         }

@@ -1,36 +1,198 @@
-use nested_compiler::{asset_paths, compile, json::Json, lsp::LanguageServer, Options};
+//! The `nested` command line: build, check, run and format cartridges, and
+//! serve the language server over stdio.
+use nested_compiler::{compile, Options, Project};
 use std::{
-    collections::BTreeMap,
     env, fs,
-    io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
     process,
 };
+
+const HELP: &str = "NESted — a programming language and toolchain for the NES
+
+  nested build <project> [-o game.nes] [--emit dir] [--no-opt]
+  nested check <project>
+  nested run <project|game.nes> [frames] [--shot out.png] [--hold buttons]
+  nested fmt [--check] <file.nst>...
+  nested lsp
+  nested --version
+
+A project is a directory containing main.nst (with any other modules and
+assets beneath it), or a single .nst file. Buttons: a b select start up down
+left right, joined with '+'.";
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("nested: {e}");
         process::exit(1);
     }
 }
-const HELP: &str = "NESted — NES-only Rust/WASM toolchain
-
-  nested build game.nst [-o game.nes] [--emit dir] [--no-opt]
-  nested check game.nst
-  nested fmt [--check] game.nst...
-  nested lsp
-  nested run game.nes [frames] [screenshot.ppm]
-  nested --version";
 
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     match args.next().as_deref().unwrap_or("help") {
-        "build" => build(&mut args, true)?,
-        "check" => build(&mut args, false)?,
-        "lsp" => lsp()?,
-        "fmt" => format_files(&mut args)?,
-        "run" => execute_rom(&mut args)?,
-        "--version" | "version" => println!("NESted {}", env!("CARGO_PKG_VERSION")),
-        _ => println!("{HELP}"),
+        "build" => build(&mut args, true),
+        "check" => build(&mut args, false),
+        "run" => execute(&mut args),
+        "fmt" => format_files(&mut args),
+        "lsp" => nested_compiler::lsp::serve_stdio(),
+        "--version" | "version" => {
+            println!("NESted {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        _ => {
+            println!("{HELP}");
+            Ok(())
+        }
+    }
+}
+
+/// Load a project directory (or a single file) into memory.
+pub fn load_project(path: &Path) -> Result<(Project, PathBuf), String> {
+    let (root, entry) = if path.is_dir() {
+        (path.to_path_buf(), "main.nst".to_owned())
+    } else {
+        let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        (root, path.file_name().unwrap().to_string_lossy().into_owned())
+    };
+    let mut project = Project {
+        entry: entry.clone(),
+        ..Default::default()
+    };
+    fn walk(dir: &Path, base: &Path, p: &mut Project, depth: usize) -> Result<(), String> {
+        if depth > 6 {
+            return Ok(());
+        }
+        let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for e in entries.flatten() {
+            let path = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, base, p, depth + 1)?;
+                continue;
+            }
+            let rel = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+            if rel.ends_with(".nst") {
+                p.sources.insert(rel, fs::read_to_string(&path).map_err(|e| e.to_string())?);
+            } else if fs::metadata(&path).map(|m| m.len() <= 1 << 20).unwrap_or(false) {
+                p.assets.insert(rel, fs::read(&path).map_err(|e| e.to_string())?);
+            }
+        }
+        Ok(())
+    }
+    if path.is_dir() {
+        walk(&root, &root, &mut project, 0)?;
+    } else {
+        project.sources.insert(entry, fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?);
+        // Assets next to a single file.
+        if let Ok(entries) = fs::read_dir(&root) {
+            for e in entries.flatten() {
+                if e.path().is_dir() {
+                    let _ = walk(&e.path(), &root, &mut project, 1);
+                }
+            }
+        }
+    }
+    Ok((project, root))
+}
+
+fn build(args: &mut impl Iterator<Item = String>, write: bool) -> Result<(), String> {
+    let path = PathBuf::from(args.next().ok_or("Expected a project path")?);
+    let mut output = None;
+    let mut emit = None;
+    let mut optimize = true;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-o" => output = Some(PathBuf::from(args.next().ok_or("-o needs a path")?)),
+            "--emit" => emit = Some(PathBuf::from(args.next().ok_or("--emit needs a directory")?)),
+            "--no-opt" => optimize = false,
+            a => return Err(format!("Unknown argument '{a}'")),
+        }
+    }
+    let (project, _) = load_project(&path)?;
+    let out = compile(&project, Options { optimize }).map_err(|f| f.render())?;
+    for w in &out.warnings {
+        eprintln!("{}", w.render(&out.analysis.sources));
+    }
+    if write {
+        let target = output.unwrap_or_else(|| {
+            if path.is_dir() {
+                path.join(format!("{}.nes", path.file_name().unwrap().to_string_lossy()))
+            } else {
+                path.with_extension("nes")
+            }
+        });
+        fs::write(&target, &out.rom).map_err(|e| e.to_string())?;
+        println!(
+            "{} → {} ({} bytes, {}, fixed {} / {} bytes, zero page {} bytes, RAM {} bytes)",
+            path.display(),
+            target.display(),
+            out.rom.len(),
+            out.board.name(),
+            out.linked.fixed_used,
+            out.linked.fixed_size,
+            out.linked.zp_used,
+            out.linked.ram_used
+        );
+    } else {
+        println!("{}: OK", path.display());
+    }
+    if let Some(dir) = emit {
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for p in &out.passes {
+            let name = p.name.to_lowercase().replace(' ', "-");
+            fs::write(dir.join(format!("{name}.txt")), &p.text).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn buttons(spec: &str) -> u8 {
+    spec.split('+')
+        .map(|b| match b.trim() {
+            "a" => 1,
+            "b" => 2,
+            "select" => 4,
+            "start" => 8,
+            "up" => 16,
+            "down" => 32,
+            "left" => 64,
+            "right" => 128,
+            _ => 0,
+        })
+        .fold(0, |a, b| a | b)
+}
+
+fn execute(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let path = PathBuf::from(args.next().ok_or("Expected a project or ROM")?);
+    let mut frames = 120;
+    let mut shot = None;
+    let mut hold = 0;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--shot" => shot = Some(PathBuf::from(args.next().ok_or("--shot needs a path")?)),
+            "--hold" => hold = buttons(&args.next().ok_or("--hold needs buttons")?),
+            n => frames = n.parse().map_err(|_| format!("Unknown argument '{n}'"))?,
+        }
+    }
+    let rom = if path.extension().is_some_and(|e| e == "nes") {
+        fs::read(&path).map_err(|e| e.to_string())?
+    } else {
+        let (project, _) = load_project(&path)?;
+        compile(&project, Options::default()).map_err(|f| f.render())?.rom
+    };
+    let mut emu = nested_runtime::Emulator::new(rom, 48000.0)?;
+    let mut energy = 0.0f64;
+    for _ in 0..frames {
+        let audio = emu.frame(hold)?;
+        energy += audio.iter().map(|s| (*s as f64).abs()).sum::<f64>();
+    }
+    println!("ran {frames} frames, PC ${:04X}, audio energy {energy:.1}", emu.pc());
+    if let Some(p) = shot {
+        fs::write(&p, emu.png(2)).map_err(|e| e.to_string())?;
+        println!("wrote {}", p.display());
     }
     Ok(())
 }
@@ -38,208 +200,29 @@ fn run() -> Result<(), String> {
 fn format_files(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let mut check = false;
     let mut paths = Vec::new();
-    for arg in args {
-        if arg == "--check" {
+    for a in args {
+        if a == "--check" {
             check = true;
         } else {
-            paths.push(PathBuf::from(arg));
+            paths.push(PathBuf::from(a));
         }
     }
-    if paths.is_empty() {
-        return Err("Expected source paths".into());
-    }
-    let mut changed = false;
-    for path in paths {
-        let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let formatted = nested_compiler::formatter::format_source(&source, Default::default());
-        if source != formatted {
-            changed = true;
+    let mut differs = false;
+    for p in paths {
+        let src = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        let formatted = nested_compiler::fmt::format(&src, &Default::default());
+        if formatted != src {
+            differs = true;
             if check {
-                println!("Needs formatting: {}", path.display());
+                println!("needs formatting: {}", p.display());
             } else {
-                fs::write(&path, formatted).map_err(|e| e.to_string())?;
-                println!("Formatted {}", path.display());
+                fs::write(&p, formatted).map_err(|e| e.to_string())?;
+                println!("formatted {}", p.display());
             }
         }
     }
-    if check && changed {
-        return Err("Source formatting differs".into());
+    if check && differs {
+        return Err("formatting differs".into());
     }
     Ok(())
-}
-
-fn build(args: &mut impl Iterator<Item = String>, write_rom: bool) -> Result<(), String> {
-    let path = PathBuf::from(args.next().ok_or("Expected a cartridge source path")?);
-    let mut output = path.with_extension("nes");
-    let mut emit = None;
-    let mut optimize = true;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-o" => output = PathBuf::from(args.next().ok_or("-o requires a path")?),
-            "--emit" => {
-                emit = Some(PathBuf::from(
-                    args.next().ok_or("--emit requires a directory")?,
-                ))
-            }
-            "--no-opt" => optimize = false,
-            _ => return Err(format!("Unknown option {arg}")),
-        }
-    }
-    let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let assets = load_assets(&path, &source)?;
-    let compiled = compile(&source, &assets, Options { optimize }).map_err(|errors| {
-        for error in errors {
-            let position = nested_compiler::lsp::position(&source, error.span.start);
-            eprintln!(
-                "{}:{}:{}: {}",
-                path.display(),
-                position.get("line").usize() + 1,
-                position.get("character").usize() + 1,
-                error.message
-            );
-        }
-        "Compilation failed".to_owned()
-    })?;
-    if write_rom {
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(&output, &compiled.rom).map_err(|e| e.to_string())?;
-    }
-    if let Some(directory) = emit {
-        fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-        for (name, content) in [
-            ("assembly.asm", compiled.generated.assembly.as_str()),
-            ("listing.txt", compiled.assembly.listing.as_str()),
-        ] {
-            fs::write(directory.join(name), content).map_err(|e| e.to_string())?;
-        }
-        fs::write(directory.join("report.json"), compiled.json().stringify())
-            .map_err(|e| e.to_string())?;
-        for (index, pass) in compiled.passes.iter().enumerate() {
-            fs::write(
-                directory.join(format!("pass-{:02}.txt", index + 1)),
-                &pass.text,
-            )
-            .map_err(|e| e.to_string())?;
-        }
-    }
-    println!(
-        "{} · mapper {} · {} B code/data · {} B compiler RAM · {} B ROM",
-        output.display(),
-        compiled.generated.mapper.id(),
-        compiled.assembly.bytes.len(),
-        compiled.generated.ram_bytes,
-        compiled.rom.len()
-    );
-    Ok(())
-}
-
-fn execute_rom(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
-    let path = args.next().ok_or("Expected a ROM path")?;
-    let frames = args
-        .next()
-        .unwrap_or_else(|| "120".into())
-        .parse::<usize>()
-        .map_err(|e| e.to_string())?;
-    let mut emulator =
-        nested_runtime::Emulator::new(fs::read(path).map_err(|e| e.to_string())?, 44100.0)?;
-    let mut energy = 0.0;
-    let mut count = 0;
-    for _ in 0..frames {
-        for sample in emulator.frame(0)? {
-            energy += f64::from(sample * sample);
-            count += 1;
-        }
-    }
-    if let Some(path) = args.next() {
-        let mut image = b"P6\n256 240\n255\n".to_vec();
-        image.extend(emulator.pixels());
-        fs::write(path, image).map_err(|e| e.to_string())?;
-    }
-    let dropped = emulator.read_ram(0x37f);
-    let rms = (energy / count.max(1) as f64).sqrt();
-    println!("{frames} emulated frames · PC ${:04X} · {count} audio samples · RMS {rms:.5} · dropped VRAM writes {dropped}", emulator.cpu.pc);
-    Ok(())
-}
-
-fn load_assets(path: &Path, source: &str) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let base = path.parent().unwrap_or(Path::new("."));
-    let mut assets = BTreeMap::new();
-    for asset in asset_paths(source) {
-        if Path::new(&asset).is_absolute() {
-            return Err("Asset paths must be relative to the source file".into());
-        }
-        let data = fs::read(base.join(&asset)).map_err(|e| format!("{asset}: {e}"))?;
-        assets.insert(asset, data);
-    }
-    Ok(assets)
-}
-fn lsp() -> Result<(), String> {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    let mut server = LanguageServer::new();
-    loop {
-        let mut length = None;
-        let mut header_bytes = 0;
-        loop {
-            let mut line = String::new();
-            if input.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
-                return Ok(());
-            }
-            header_bytes += line.len();
-            if header_bytes > 8192 {
-                return Err("LSP header exceeds 8 KiB".into());
-            }
-            if line == "\r\n" || line == "\n" {
-                break;
-            }
-            if let Some((name, value)) = line.split_once(':') {
-                if name.eq_ignore_ascii_case("Content-Length") {
-                    length = Some(
-                        value
-                            .trim()
-                            .parse::<usize>()
-                            .map_err(|_| "Invalid Content-Length")?,
-                    );
-                }
-            }
-        }
-        let length = length.ok_or("Missing Content-Length")?;
-        if length > 16 * 1024 * 1024 {
-            return Err("LSP message exceeds 16 MiB".into());
-        }
-        let mut bytes = vec![0; length];
-        input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
-        let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
-        match Json::parse(&text) {
-            Ok(request) => {
-                for message in server.handle(request) {
-                    let body = message.stringify();
-                    write!(output, "Content-Length: {}\r\n\r\n{}", body.len(), body)
-                        .map_err(|e| e.to_string())?;
-                    output.flush().map_err(|e| e.to_string())?;
-                }
-            }
-            Err(e) => {
-                let body = Json::object([
-                    ("jsonrpc", "2.0".into()),
-                    ("id", Json::Null),
-                    (
-                        "error",
-                        Json::object([("code", Json::Number(-32700.0)), ("message", e.into())]),
-                    ),
-                ])
-                .stringify();
-                write!(output, "Content-Length: {}\r\n\r\n{}", body.len(), body)
-                    .map_err(|e| e.to_string())?;
-                output.flush().map_err(|e| e.to_string())?;
-            }
-        }
-        if server.exit {
-            return Ok(());
-        }
-    }
 }

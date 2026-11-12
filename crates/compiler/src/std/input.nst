@@ -1,0 +1,64 @@
+//! Controllers. The runtime reads both pads at the start of every frame.
+
+pub const A: u8 = 0x01;
+pub const B: u8 = 0x02;
+pub const SELECT: u8 = 0x04;
+pub const START: u8 = 0x08;
+pub const UP: u8 = 0x10;
+pub const DOWN: u8 = 0x20;
+pub const LEFT: u8 = 0x40;
+pub const RIGHT: u8 = 0x80;
+
+@zp var pad1: u8 = 0;
+@zp var pad2: u8 = 0;
+@zp var last1: u8 = 0;
+@zp var last2: u8 = 0;
+
+/// Read both controllers (called by the runtime each frame).
+pub fn poll() {
+    last1 = pad1;
+    last2 = pad2;
+    asm {
+        lda #1
+        sta $4016
+        lda #0
+        sta $4016
+        ldx #8
+    read:
+        lda $4016
+        and #3
+        cmp #1
+        ror {pad1}
+        lda $4017
+        and #3
+        cmp #1
+        ror {pad2}
+        dex
+        bne read
+    }
+}
+
+/// Buttons held on controller 1.
+pub fn held() -> u8 {
+    return pad1;
+}
+
+/// Buttons pressed this frame on controller 1.
+pub fn pressed() -> u8 {
+    return pad1 & ~last1;
+}
+
+/// Buttons released this frame on controller 1.
+pub fn released() -> u8 {
+    return last1 & ~pad1;
+}
+
+/// Buttons held on controller 2.
+pub fn held2() -> u8 {
+    return pad2;
+}
+
+/// Buttons pressed this frame on controller 2.
+pub fn pressed2() -> u8 {
+    return pad2 & ~last2;
+}

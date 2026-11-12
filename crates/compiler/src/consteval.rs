@@ -215,6 +215,9 @@ impl<'e, E: Env> Interp<'e, E> {
                     Value::Slice(_, _, n) => Value::Int(n as i64),
                     _ => Value::Int(0),
                 },
+                Intrinsic::Addr => {
+                    return Err(Diagnostic::error(e.span, "Addresses are only known after linking"))
+                }
                 Intrinsic::Peek | Intrinsic::Poke => {
                     return Err(Diagnostic::error(e.span, "Hardware access cannot run at compile time"))
                 }

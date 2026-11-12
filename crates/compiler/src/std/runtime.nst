@@ -1,12 +1,19 @@
-//! The standard frame runtime: boots the console, then calls `main::init`
-//! once and `main::update` once per frame. Linked automatically unless the
-//! program defines its own `@reset` handler.
+//! The standard frame runtime. It boots the console, calls `main::init`
+//! once with rendering off, turns rendering on, then each frame reads the
+//! controllers, calls `main::update` and publishes the frame in the next
+//! vertical blank. Optional hooks: `main::vblank()` runs in every NMI (even
+//! during lag frames), `main::scanline()` handles the MMC3 IRQ.
+//!
+//! Linked automatically unless the program defines its own `@reset`.
+use std::nes;
+use std::video;
+use std::input;
 
-/// Frames completed since power-on; incremented by the NMI handler.
+/// Frames since power-on (wraps), counted in the NMI handler.
 @shared pub var frames: u8 = 0;
 
 @reset fn reset() {
-    // The PPU needs two vertical blanks before it accepts writes.
+    // The PPU accepts writes after two vertical blanks.
     asm {
     wait1:
         bit $2002
@@ -15,22 +22,38 @@
         bit $2002
         bpl wait2
     }
+    video::reset();
+    if defined(std::audio::reset) {
+        std::audio::reset();
+    }
+    nes::PPUCTRL = video::ctrl;
     if defined(main::init) {
         main::init();
     }
-    poke(0x2000, 0x80);
+    video::on();
     loop {
-        let seen = frames;
-        while frames == seen {}
+        input::poll();
         if defined(main::update) {
             main::update();
         }
+        video::end_frame();
+        video::wait();
     }
 }
 
 @nmi fn nmi() {
+    video::publish();
     frames += 1;
     if defined(main::vblank) {
         main::vblank();
+    }
+    if defined(std::audio::tick) {
+        std::audio::tick();
+    }
+}
+
+@irq fn irq() {
+    if defined(main::scanline) {
+        main::scanline();
     }
 }
