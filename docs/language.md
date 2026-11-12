@@ -111,8 +111,10 @@ prove the result stays inside, for example under `if slot < 7`.
 
 ### Slices
 
-A `&[T]` views an array: a constant table, a variable, a string literal or
-`asset("file.bin", 16..48)`. An array becomes a slice wherever one is
+A `&[T]` views an array of bytes (`u8`, `i8`, `bool` or a one-byte enum):
+a constant table, a string literal, `asset("file.bin", 16..48)` or a
+global `var` array. Local arrays can't be viewed; keep a global buffer
+instead. An array becomes a slice wherever one is
 expected (an argument, a `let s: &[u8]`, a returned value), so
 `video::text(1, 1, "READY")` passes a constant string. `len(s)` is a `u16`.
 
