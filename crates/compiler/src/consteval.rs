@@ -160,11 +160,9 @@ impl<'e, E: Env> Interp<'e, E> {
             ExprKind::Local(id) => self.frames.last().unwrap()[id.0 as usize].clone(),
             ExprKind::Global(g) => self.read_global(*g, e.span)?,
             ExprKind::SliceOf(g) => {
-                let n = match &self.env.types().size(&Type::U8) {
-                    _ => match self.read_global(*g, e.span)? {
-                        Value::Aggregate(v) => v.len() as u32,
-                        _ => 0,
-                    },
+                let n = match self.read_global(*g, e.span)? {
+                    Value::Aggregate(v) => v.len() as u32,
+                    _ => 0,
                 };
                 Value::Slice(*g, 0, n)
             }

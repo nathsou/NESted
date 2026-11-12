@@ -651,14 +651,11 @@ impl<'a> Parser<'a> {
 
     fn binary(&mut self, min: u8) -> PResult<Expr> {
         let mut lhs = self.unary()?;
-        loop {
-            let Some((op, prec)) = BINARY
-                .iter()
-                .find(|(op, _)| self.is(op))
-                .map(|(op, p)| (*op, *p))
-            else {
-                break;
-            };
+        while let Some((op, prec)) = BINARY
+            .iter()
+            .find(|(op, _)| self.is(op))
+            .map(|(op, p)| (*op, *p))
+        {
             if prec < min {
                 break;
             }

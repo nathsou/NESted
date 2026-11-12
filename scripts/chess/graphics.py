@@ -11,7 +11,7 @@ Square colors come from palettes: 0 light, 1 dark, 2/3 highlighted.
 """
 import pathlib
 
-OUT = pathlib.Path(__file__).resolve().parents[2] / "games" / "assets"
+OUT = pathlib.Path(__file__).resolve().parents[2] / "games" / "chess" / "assets"
 
 # '.' square (color 1), '#' body, 'o' outline. White pieces: body 2 (white),
 # outline 3 (black). Black pieces: body 3, outline 2.
@@ -304,9 +304,9 @@ def nametable():
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "chess.chr").write_bytes(chr_rom())
-    (OUT / "chess.pal").write_bytes(bytes(PALETTE))
-    (OUT / "chess.map").write_bytes(nametable())
+    (OUT / "chr").write_bytes(chr_rom())
+    (OUT / "pal").write_bytes(bytes(PALETTE))
+    (OUT / "map").write_bytes(nametable())
 
 
 if __name__ == "__main__":

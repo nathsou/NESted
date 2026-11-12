@@ -298,6 +298,6 @@ if __name__ == '__main__':
     out.append('pub const NAMES: [u8; _] = "%s";' % ''.join(n.ljust(8) for n, _, _ in LEVELS))
     out.append('pub const SKY: [u8; 3] = [%s];' % ', '.join(f'0x{s:02x}' for _, _, s in LEVELS))
     out.append(open('parse.nst').read())
-    open('levels.nst', 'w').write('\n'.join(out) + '\n')
+    open('levels.nst', 'w').write('\n'.join(out).rstrip('\n') + '\n')
     for name, segs, _ in LEVELS:
         print(name, len(rows_of(segs)[0]))

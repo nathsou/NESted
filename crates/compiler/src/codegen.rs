@@ -1131,7 +1131,6 @@ impl Gen<'_> {
         };
         if let Some(k) = b.konst() {
             // `>` and `<=` become `>=` and `<` against k + 1.
-            let k = if sc.signed() { k } else { k };
             match op {
                 BinOp::Gt if k < hi => {
                     op = BinOp::Ge;
@@ -1954,16 +1953,13 @@ impl Gen<'_> {
             self.jump(Op::Jmp, &l);
             return;
         }
-        match self.inst.rets.as_slice() {
-            [r] => {
-                let sc = self.inst.vars[r.0 as usize].sc;
-                let o = self.var(*r);
-                self.ins(Op::Lda, Arg::Mem(o.clone()));
-                if sc.wide() {
-                    self.ins(Op::Ldx, Arg::Mem(o.plus(1)));
-                }
+        if let [r] = self.inst.rets.as_slice() {
+            let sc = self.inst.vars[r.0 as usize].sc;
+            let o = self.var(*r);
+            self.ins(Op::Lda, Arg::Mem(o.clone()));
+            if sc.wide() {
+                self.ins(Op::Ldx, Arg::Mem(o.plus(1)));
             }
-            _ => {}
         }
         self.imp(Op::Rts);
     }

@@ -255,16 +255,14 @@ impl Formatter<'_> {
                                 prev = Some(&self.toks[i - 1].tok);
                                 prev_text = "}".into();
                                 let next = self.toks.get(i).map(|t| &t.tok);
-                                if !matches!(
+                                if (!matches!(
                                     next,
                                     Some(Tok::Punct(";" | "," | ")")) | Some(Tok::Ident(_))
-                                ) || matches!(next, Some(Tok::Ident(w)) if w != "else")
+                                ) || matches!(next, Some(Tok::Ident(w)) if w != "else"))
+                                    && !matches!(next, Some(Tok::Ident(w)) if w == "else")
+                                    && !matches!(next, Some(Tok::Punct(_)))
                                 {
-                                    if !matches!(next, Some(Tok::Ident(w)) if w == "else")
-                                        && !matches!(next, Some(Tok::Punct(_)))
-                                    {
-                                        self.newline();
-                                    }
+                                    self.newline();
                                 }
                                 continue;
                             }
@@ -375,17 +373,16 @@ impl Formatter<'_> {
                     let after_word =
                         prev.is_some_and(is_word) || matches!(prev, Some(Tok::Punct(")" | "]")));
                     let after_keyword = matches!(prev, Some(Tok::Ident(w)) if matches!(w.as_str(), "if" | "while" | "return" | "in" | "match" | "let" | "var"));
-                    if !after_word || after_keyword {
-                        if !(prev_text == "("
+                    if (!after_word || after_keyword)
+                        && (!(prev_text == "("
                             || prev_text == "["
                             || prev_text == "!"
                             || prev_text == "~"
                             || prev_text == "@"
                             || prev_text == "&")
-                            || after_keyword
-                        {
-                            self.space();
-                        }
+                            || after_keyword)
+                    {
+                        self.space();
                     }
                     self.push(p);
                     // Multi-line array literals keep one row per source line.
@@ -443,10 +440,8 @@ impl Formatter<'_> {
                         ".." | "..=" => self.push(p),
                         _ if unary => {
                             self.space();
-                            if prev_text == "(" || prev_text == "[" {
-                                if self.line.ends_with(' ') {
-                                    self.line.pop();
-                                }
+                            if (prev_text == "(" || prev_text == "[") && self.line.ends_with(' ') {
+                                self.line.pop();
                             }
                             self.push(p);
                         }

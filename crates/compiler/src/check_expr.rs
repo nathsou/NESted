@@ -955,7 +955,7 @@ impl Checker<'_> {
         expected: Option<&Type>,
         span: Span,
     ) -> Expr {
-        let op = BinOp::from_str(op).unwrap();
+        let op = BinOp::parse(op).unwrap();
         if op.is_logic() {
             let x = self.expr(s, a, Some(&Type::Bool));
             let x = self.coerce(s, x, &Type::Bool);
@@ -1967,7 +1967,7 @@ impl Checker<'_> {
                 }
                 let (klo, khi) = self.interval(s, k);
                 let current = {
-                    let e = if matches!(var(a), Some(_)) { a } else { b };
+                    let e = if var(a).is_some() { a } else { b };
                     self.interval(s, e)
                 };
                 let fact = match op {
@@ -2154,7 +2154,7 @@ impl Checker<'_> {
                 let bin = if *op == "=" {
                     None
                 } else {
-                    BinOp::from_str(&op[..op.len() - 1])
+                    BinOp::parse(&op[..op.len() - 1])
                 };
                 let v = match bin {
                     Some(BinOp::Shl | BinOp::Shr) => {

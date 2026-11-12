@@ -431,7 +431,7 @@ impl Builder<'_, '_> {
                     (&i.kind, *raw_index(e), wide, inner)
                 {
                     if let (Some(k), Sc::U8) = (k.constant(), self.sc(&x.ty)) {
-                        if pr.index.is_none() && k >= 0 && k < 256 {
+                        if pr.index.is_none() && (0..256).contains(&k) {
                             let base = self.scalar(x);
                             let wide_x = self.convert(base, Sc::U16);
                             let off = if *op == BinOp::Add { k } else { -k };

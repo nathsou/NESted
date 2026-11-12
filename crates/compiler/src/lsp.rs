@@ -827,11 +827,11 @@ fn completion(a: &Analysis, file: crate::source::FileId, text: &str, offset: usi
     let module = a.modules.iter().position(|m| m.file == file).unwrap_or(0);
     let mut items = Vec::new();
     // `path::` completions.
-    if prefix_text.ends_with("::") {
-        let path_start = prefix_text[..prefix_text.len() - 2]
+    if let Some(stem) = prefix_text.strip_suffix("::") {
+        let path_start = stem
             .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
             .map_or(0, |i| i + 1);
-        let path = &prefix_text[path_start..prefix_text.len() - 2];
+        let path = &stem[path_start..];
         let segs: Vec<&str> = path.split("::").collect();
         // Resolve the path's first segment in module scope.
         let mut target: Option<Def> = a.modules[module].names.get(segs[0]).copied();
@@ -842,8 +842,8 @@ fn completion(a: &Analysis, file: crate::source::FileId, text: &str, offset: usi
                 .iter()
                 .position(|m| m.path == file)
                 .map(|i| Def::Module(i as u32));
-            if target.is_some() {
-                return module_items(a, target.unwrap(), &mut items);
+            if let Some(t) = target {
+                return module_items(a, t, &mut items);
             }
             if segs == ["std"] {
                 for m in &a.modules {
@@ -1070,7 +1070,7 @@ fn signature(a: &Analysis, file: crate::source::FileId, text: &str, offset: usiz
             s.file == file && s.start as usize >= name_start && s.end as usize <= name_end
         })
         .map(|(_, d)| *d)
-        .last()
+        .next_back()
         .or_else(|| {
             let module = a.modules.iter().position(|m| m.file == file).unwrap_or(0);
             a.modules[module].names.get(last).copied()

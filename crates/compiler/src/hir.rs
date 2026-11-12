@@ -176,7 +176,7 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    pub fn from_str(s: &str) -> Option<BinOp> {
+    pub fn parse(s: &str) -> Option<BinOp> {
         Some(match s {
             "+" => BinOp::Add,
             "-" => BinOp::Sub,

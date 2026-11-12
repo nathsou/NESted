@@ -586,7 +586,6 @@ impl<'p> Checker<'p> {
                         ),
                     ),
                 }
-                return;
             }
         }
         // Loading already reported missing files.

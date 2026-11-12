@@ -1,6 +1,14 @@
 //! NESted: a statically allocated language for the NES, with an embeddable
 //! compiler, assembler, linker and language service. No third-party
 //! dependencies and no I/O: hosts supply sources and asset bytes.
+// Passes walk parallel per-block tables by index and thread a lot of
+// context through helpers; these lints fight that style.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::collapsible_match
+)]
 pub mod asm;
 pub mod ast;
 pub mod build_mir;

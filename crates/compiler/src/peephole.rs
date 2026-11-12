@@ -36,11 +36,37 @@ fn reads_nz(op: Op) -> bool {
 
 fn writes_nz(ins: &Ins) -> bool {
     use Op::*;
-    match ins.op {
-        Lda | Ldx | Ldy | Adc | Sbc | And | Ora | Eor | Cmp | Cpx | Cpy | Bit | Inc | Dec | Inx
-        | Iny | Dex | Dey | Asl | Lsr | Rol | Ror | Tax | Tay | Txa | Tya | Tsx | Pla | Plp => true,
-        _ => false,
-    }
+    matches!(
+        ins.op,
+        Lda | Ldx
+            | Ldy
+            | Adc
+            | Sbc
+            | And
+            | Ora
+            | Eor
+            | Cmp
+            | Cpx
+            | Cpy
+            | Bit
+            | Inc
+            | Dec
+            | Inx
+            | Iny
+            | Dex
+            | Dey
+            | Asl
+            | Lsr
+            | Rol
+            | Ror
+            | Tax
+            | Tay
+            | Txa
+            | Tya
+            | Tsx
+            | Pla
+            | Plp
+    )
 }
 
 /// Instruction sets N/Z from the value now in A.
@@ -579,7 +605,7 @@ fn jumps(lines: &mut Vec<Line>) -> bool {
 }
 
 /// `jsr f; rts` → `jmp f`.
-fn tails(lines: &mut Vec<Line>) -> bool {
+fn tails(lines: &mut [Line]) -> bool {
     let mut changed = false;
     for i in 0..lines.len().saturating_sub(1) {
         if let (Line::Ins(a), Line::Ins(b)) = (&lines[i], &lines[i + 1]) {
