@@ -41,7 +41,10 @@ impl Diagnostic {
     }
     /// `path:line:column: error: message`.
     pub fn render(&self, sources: &SourceMap) -> String {
-        let file = sources.get(self.span.file);
+        let Some(file) = sources.try_get(self.span.file) else {
+            // A project-level problem (no main.nst, say) has no source to point at.
+            return format!("error: {}", self.message);
+        };
         let (line, column) = file.position(self.span.start as usize);
         let kind = match self.severity {
             Severity::Error => "error",

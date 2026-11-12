@@ -114,6 +114,9 @@ impl SourceMap {
     pub fn get(&self, id: FileId) -> &SourceFile {
         &self.files[id.0 as usize]
     }
+    pub fn try_get(&self, id: FileId) -> Option<&SourceFile> {
+        self.files.get(id.0 as usize)
+    }
     pub fn find(&self, path: &str) -> Option<FileId> {
         self.by_path.get(path).copied()
     }

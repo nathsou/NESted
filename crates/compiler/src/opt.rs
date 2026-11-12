@@ -280,6 +280,7 @@ pub fn optimize(mir: &mut Mir) {
             for b in 0..inst.blocks.len() {
                 changed |= propagate(inst, b, &objs);
             }
+            changed |= global_propagate(inst);
             changed |= dead_assignments(inst, &objs);
             if !changed {
                 break;
@@ -1046,4 +1047,187 @@ fn inline_at(caller: &mut Inst, b: usize, k: usize, callee: &Inst) {
         term: tail_term,
         depth,
     });
+}
+
+/// Dominator sets: `dom[b][d]` is true when block `d` dominates block `b`.
+fn dominators(inst: &Inst) -> Vec<Vec<bool>> {
+    let n = inst.blocks.len();
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for b in 0..n {
+        for s in inst.successors(BlockId(b as u32)) {
+            preds[s.0 as usize].push(b);
+        }
+    }
+    let entry = inst.entry.0 as usize;
+    let mut dom = vec![vec![true; n]; n];
+    dom[entry] = vec![false; n];
+    dom[entry][entry] = true;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in 0..n {
+            if b == entry {
+                continue;
+            }
+            let mut next = vec![true; n];
+            for &p in &preds[b] {
+                for d in 0..n {
+                    next[d] &= dom[p][d];
+                }
+            }
+            next[b] = true;
+            if next != dom[b] {
+                dom[b] = next;
+                changed = true;
+            }
+        }
+    }
+    dom
+}
+
+/// Across blocks: a variable assigned exactly once, from a constant or from
+/// a variable that is itself never reassigned, can be replaced by that value
+/// wherever its assignment dominates the use. Inlined parameters are the
+/// typical case: `mode = TACTICAL` at the inline site, tested in a loop.
+fn global_propagate(inst: &mut Inst) -> bool {
+    let nv = inst.vars.len();
+    let mut defs = vec![0usize; nv];
+    let mut def_at: Vec<Option<(usize, usize)>> = vec![None; nv];
+    let mut banned = vec![false; nv];
+    for (i, v) in inst.vars.iter().enumerate() {
+        banned[i] = v.pointer;
+    }
+    for (b, block) in inst.blocks.iter().enumerate() {
+        for (k, s) in block.stmts.iter().enumerate() {
+            let (_, d) = stmt_effects(s);
+            for v in d {
+                defs[v.0 as usize] += 1;
+                def_at[v.0 as usize] = Some((b, k));
+            }
+            if let St::Asm { operands, .. } = s {
+                for o in operands {
+                    if let AsmOperand::Var(v) = o {
+                        banned[v.0 as usize] = true;
+                    }
+                }
+            }
+            if let St::Call { saved, .. } = s {
+                // Recursive calls save and restore these by name.
+                for v in saved {
+                    banned[v.0 as usize] = true;
+                }
+            }
+        }
+    }
+    let params: BTreeSet<VarId> = inst.params.iter().copied().collect();
+    // Variables whose value never changes once set.
+    let stable = |v: VarId| {
+        !banned[v.0 as usize] && defs[v.0 as usize] == if params.contains(&v) { 0 } else { 1 }
+    };
+    let mut replace: BTreeMap<VarId, Ex> = BTreeMap::new();
+    for x in 0..nv {
+        let xv = VarId(x as u32);
+        if defs[x] != 1 || banned[x] || params.contains(&xv) {
+            continue;
+        }
+        let (b, k) = def_at[x].unwrap();
+        let St::Assign(Place::Var(_), e) = &inst.blocks[b].stmts[k] else {
+            continue;
+        };
+        let with = match e {
+            Ex::Const(c, _) => Ex::Const(*c, inst.vars[x].sc),
+            Ex::Var(y, sc)
+                if *y != xv && stable(*y) && inst.vars[y.0 as usize].sc == inst.vars[x].sc =>
+            {
+                Ex::Var(*y, *sc)
+            }
+            _ => continue,
+        };
+        replace.insert(xv, with);
+    }
+    if replace.is_empty() {
+        return false;
+    }
+    let dom = dominators(inst);
+    // Keep only variables whose every use is dominated by the assignment.
+    let mut ok: BTreeSet<VarId> = replace.keys().copied().collect();
+    for (b, block) in inst.blocks.iter().enumerate() {
+        let check = |v: &VarId, k: usize, ok: &mut BTreeSet<VarId>| {
+            if let Some((db, dk)) = def_at[v.0 as usize] {
+                let dominated = if db == b { dk < k } else { dom[b][db] };
+                if !dominated {
+                    ok.remove(v);
+                }
+            }
+        };
+        for (k, s) in block.stmts.iter().enumerate() {
+            let (u, _) = stmt_effects(s);
+            for v in u.iter().filter(|v| replace.contains_key(v)) {
+                check(v, k, &mut ok);
+            }
+        }
+        let mut u = Live::new();
+        term_uses(&block.term, inst, &mut u);
+        for v in u.iter().filter(|v| replace.contains_key(v)) {
+            check(v, usize::MAX, &mut ok);
+        }
+    }
+    // A replacement that refers to another replaced variable is resolved
+    // in a later round.
+    let mut changed = false;
+    for x in ok {
+        let with = replace[&x].clone();
+        if let Ex::Var(y, _) = with {
+            if replace.contains_key(&y) {
+                continue;
+            }
+        }
+        let (db, dk) = def_at[x.0 as usize].unwrap();
+        for (b, block) in inst.blocks.iter_mut().enumerate() {
+            for (k, s) in block.stmts.iter_mut().enumerate() {
+                if (b, k) == (db, dk) {
+                    continue;
+                }
+                let before = format!("{s:?}");
+                rewrite_reads(s, x, &with);
+                changed |= format!("{s:?}") != before;
+            }
+            if let Term::Branch(c, _, _) = &mut block.term {
+                let before = c.clone();
+                substitute(c, x, &with);
+                changed |= *c != before;
+            }
+        }
+    }
+    changed
+}
+
+/// Replace reads of `v` in a statement (not the variable it assigns).
+fn rewrite_reads(s: &mut St, v: VarId, with: &Ex) {
+    let place = |p: &mut Place| match p {
+        Place::Mem(_, Some(i)) => substitute(i, v, with),
+        Place::Deref(a, c) => {
+            substitute(a, v, with);
+            substitute(c, v, with);
+        }
+        Place::Poke(a) => substitute(a, v, with),
+        _ => {}
+    };
+    match s {
+        St::Assign(p, e) => {
+            substitute(e, v, with);
+            place(p);
+        }
+        St::Call { args, rets, .. } => {
+            args.iter_mut().for_each(|a| substitute(a, v, with));
+            rets.iter_mut().for_each(place);
+        }
+        St::Asm { inputs, output, .. } => {
+            inputs.iter_mut().for_each(|(_, e)| substitute(e, v, with));
+            if let Some(p) = output {
+                place(p);
+            }
+        }
+        St::Line(_) => {}
+    }
 }

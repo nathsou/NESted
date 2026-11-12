@@ -110,6 +110,7 @@ pub fn optimize(lines: &mut Vec<Line>, mir: &Mir, inst: InstId) {
         changed |= registers(lines, &volatile);
         changed |= dead_stores(lines, mir, inst);
         changed |= tails(lines);
+        changed |= zero_compares(lines);
         if !changed && lines.len() == before {
             break;
         }
@@ -615,6 +616,76 @@ fn tails(lines: &mut [Line]) -> bool {
                 changed = true;
             }
         }
+    }
+    changed
+}
+
+/// `lda x; [sta ...]; cmp #0; beq/bne` → drop the `cmp`: the load already set
+/// N and Z from A. Only `cmp` also sets the carry, so the carry must be
+/// overwritten before it is read on both paths after the branch.
+fn zero_compares(lines: &mut Vec<Line>) -> bool {
+    fn carry_dead(lines: &[Line], mut p: usize) -> bool {
+        for _ in 0..16 {
+            match lines.get(p) {
+                Some(Line::Label(_)) => {}
+                Some(Line::Ins(i)) => {
+                    use Op::*;
+                    match i.op {
+                        Clc | Sec | Cmp | Cpx | Cpy | Asl | Lsr => return true,
+                        Adc | Sbc | Rol | Ror | Bcc | Bcs | Php | Plp | Jsr | Rts | Rti | Jmp
+                        | Brk | Beq | Bne | Bmi | Bpl | Bvc | Bvs => return false,
+                        _ => {}
+                    }
+                }
+                _ => return false,
+            }
+            p += 1;
+        }
+        false
+    }
+    let label_at = |lines: &[Line], name: &str| {
+        lines
+            .iter()
+            .position(|l| matches!(l, Line::Label(n) if n == name))
+    };
+    let mut changed = false;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let is_cmp0 = matches!(&lines[i], Line::Ins(ins) if ins.op == Op::Cmp && matches!(&ins.arg, Arg::Imm(o) if o.sym == Sym::Num && o.off == 0));
+        let branch = match &lines[i + 1] {
+            Line::Ins(b) if matches!(b.op, Op::Beq | Op::Bne) => {
+                b.arg.opnd().and_then(|o| match &o.sym {
+                    Sym::Label(n) => Some(n.clone()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        if is_cmp0 {
+            if let Some(target) = branch {
+                // The last flag-setting instruction before the compare.
+                let mut k = i;
+                let mut from_a = false;
+                while k > 0 {
+                    k -= 1;
+                    match &lines[k] {
+                        Line::Ins(p) if matches!(p.op, Op::Sta | Op::Stx | Op::Sty) => continue,
+                        Line::Ins(p) => from_a = nz_from_a(p),
+                        _ => {}
+                    }
+                    break;
+                }
+                if from_a
+                    && carry_dead(lines, i + 2)
+                    && label_at(lines, &target).is_some_and(|t| carry_dead(lines, t + 1))
+                {
+                    lines.remove(i);
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        i += 1;
     }
     changed
 }
