@@ -389,11 +389,22 @@ fn clobbers(s: &St, e: &Ex, objs: &[Obj]) -> bool {
         hit
     };
     match s {
-        St::Assign(Place::Mem(o, _), _) => reads_obj(*o),
+        St::Assign(Place::Mem(o, _), _) => reads_obj(*o) || reads_through_pointer(e),
         St::Assign(Place::Deref(..) | Place::Poke(_), _) => e.reads_memory(),
         St::Assign(Place::Var(_), _) | St::Line(_) => false,
         St::Call { .. } | St::Asm { .. } => e.reads_memory() || e.volatile(objs),
     }
+}
+
+/// Does `e` read memory through a slice pointer (which may view RAM)?
+fn reads_through_pointer(e: &Ex) -> bool {
+    let mut hit = false;
+    e.walk(&mut |x| {
+        if matches!(x, Ex::Deref(..)) {
+            hit = true;
+        }
+    });
+    hit
 }
 
 /// Uses and definitions of every variable in a function.

@@ -48,6 +48,10 @@ fn shapes() {
 fn trailing_comments_stay_on_their_line() {
     let src = "var a: u8 = 0;   // counter\nenum E {\n    A, // first\n    B,\n}\nfn f() {\n    a += 1; // step\n    // own line\n    a = 2;\n}\n";
     let out = format(src, &Style::default());
+    assert_eq!(
+        format("use std::audio::*;\n", &Style::default()),
+        "use std::audio::*;\n"
+    );
     assert_eq!(out, "var a: u8 = 0; // counter\nenum E {\n    A, // first\n    B,\n}\nfn f() {\n    a += 1; // step\n    // own line\n    a = 2;\n}\n");
     assert_eq!(format(&out, &Style::default()), out);
 }

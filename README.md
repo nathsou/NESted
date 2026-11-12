@@ -15,10 +15,15 @@ running in an emulator.
 
 ## Example cartridges
 
-| Glide · CNROM | Sprout · MMC3 | NESted Chess · NROM |
-|:---:|:---:|:---:|
-| ![Glide](docs/screenshots/glide.png) | ![Sprout](docs/screenshots/sprout.png) | ![NESted Chess](docs/screenshots/chess.png) |
-| An ice-sliding puzzle in 25 levels. You only stop when something stops you: push blocks to make new stopping points, sink them into holes to make bridges, collect every star, then reach the exit. Undo any move, beat each level's par. | A scrolling platformer across three worlds. A jumps (hold for height), B in the air slams down to break bricks, flatten enemies and bounce off springs. Gems, checkpoints, and a status bar held still by the MMC3 scanline IRQ while the world scrolls. | A complete chess engine in 32 KiB of ROM and 2 KiB of RAM. Play the cartridge at eight levels, a friend, or watch it play itself. |
+| Glide · CNROM | Sprout · MMC3 |
+|:---:|:---:|
+| ![Glide](docs/screenshots/glide.png) | ![Sprout](docs/screenshots/sprout.png) |
+| An ice-sliding puzzle in 25 levels. You only stop when something stops you: push blocks to make new stopping points, sink them into holes to make bridges, collect every star, then reach the exit. Undo any move, beat each level's par. | A scrolling platformer across three worlds. A jumps (hold for height), B in the air slams down to break bricks, flatten enemies and bounce off springs. Gems, checkpoints, and a status bar held still by the MMC3 scanline IRQ while the world scrolls. |
+
+| Nova · UxROM | NESted Chess · NROM |
+|:---:|:---:|
+| ![Nova](docs/screenshots/nova.png) | ![NESted Chess](docs/screenshots/chess.png) |
+| A vertical shooter. Weaving drones, diving darts, meteors and saucers that drop power-ups, then a mothership with four attack patterns at the end of each stage. B sets off a bomb that clears the screen; after three stages the armada returns faster. | A complete chess engine in 32 KiB of ROM and 2 KiB of RAM. Play the cartridge at eight levels, a friend, or watch it play itself. |
 
 **Controls:** arrows move, **X** is A, **Z** is B, **Enter** is Start,
 **Shift** is Select. Click the screen first; gamepads and the on-screen pad
@@ -31,7 +36,10 @@ parsed from ASCII maps by compile-time functions), runs its title screen from
 a banked code window, streams columns of tiles as it scrolls, and splits the
 screen with the scanline IRQ. Chess uses recursion with `@recursive`, a
 transposition table and a `vblank` hook that keeps the clock and spinner
-running while the engine thinks.
+running while the engine thinks. Nova has no graphics ROM at all: its
+sprites are drawn as text in [`art.nst`](games/nova/art.nst), turned into
+tiles by a compile-time function, stored in a switchable bank and copied to
+the cartridge's CHR RAM at power-on.
 
 ### NESted Chess
 
@@ -155,8 +163,9 @@ The compiler's execution tests run programs through both the compile-time
 interpreter and the emulator and require identical results, optimized and
 not; a fuzzer generates random programs for the same comparison. The game
 tests play the cartridges with scripted controller input: a bot replays the
-par solution of every Glide level, another clears Sprout's first world, and
-the chess tests play moves against the engine and check perft counts. Every
+par solution of every Glide level, another clears Sprout's first world, a
+third pilots Nova through a stage and its mothership, and the chess tests
+play moves against the engine and check perft counts. Every
 frame, they also check that no background update was dropped.
 
 ## Repository

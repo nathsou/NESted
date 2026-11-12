@@ -228,3 +228,26 @@ fn recursion_with_loops() {
         2,
     );
 }
+
+#[test]
+fn slices_of_ram_bytes() {
+    check(
+        "var buf: [u8; 8] = [0; 8];
+         var signs: [i8; 4] = [-1, 2, -3, 4];
+         fn sum(s: &[u8]) -> u16 { var t: u16 = 0; for i in 0..len(s) { t += u16(s[i]); } return t; }
+         fn first(s: &[i8]) -> i8 { if len(s) > 0 { return s[0]; } return 0; }
+         fn fill(n: u8) { for i in 0..8 { buf[i] = n + i; } }
+         fn run() {
+            fill(3);
+            out[0] = sum(buf);
+            buf[2] = 100;
+            out[1] = sum(buf);
+            fill(10);
+            let v = sum(buf);
+            buf[0] = 0;
+            out[2] = v + sum(buf);
+            out[3] = u16(i16(first(signs)));
+         }",
+        4,
+    );
+}

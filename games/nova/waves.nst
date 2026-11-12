@@ -1,0 +1,74 @@
+//! Stage scripts. Each group is four bytes: frames to wait after the
+//! previous group started, enemy kind, x position (`ANY` picks one at
+//! random) and how many enemies follow each other in a line. `BOSS` ends
+//! the stage.
+
+pub const DRONE: u8 = 0;
+pub const DART: u8 = 1;
+pub const SAUCER: u8 = 2;
+pub const ROCK: u8 = 3;
+pub const ANY: u8 = 255;
+pub const BOSS: u8 = 255;
+
+/// Stage 1: drones weave in, a few darts, a saucer to teach power-ups.
+pub const STAGE1: [u8; _] = [
+    60, DRONE, 64, 5,
+    90, DRONE, 176, 5,
+    100, DART, ANY, 3,
+    60, DRONE, 120, 6,
+    120, SAUCER, 120, 1,
+    80, ROCK, ANY, 3,
+    90, DRONE, 40, 4,
+    10, DRONE, 200, 4,
+    100, DART, ANY, 4,
+    90, ROCK, ANY, 4,
+    80, DRONE, 120, 8,
+    120, SAUCER, 80, 1,
+    20, SAUCER, 176, 1,
+    120, DART, ANY, 6,
+    150, BOSS, 0, 0,
+];
+
+/// Stage 2: crossing formations and a meteor shower.
+pub const STAGE2: [u8; _] = [
+    60, DRONE, 40, 6,
+    30, DRONE, 200, 6,
+    100, SAUCER, 120, 1,
+    60, ROCK, ANY, 6,
+    90, DART, ANY, 5,
+    80, DRONE, 80, 5,
+    20, DRONE, 160, 5,
+    90, SAUCER, 64, 1,
+    10, SAUCER, 192, 1,
+    120, ROCK, ANY, 8,
+    80, DART, ANY, 8,
+    100, DRONE, 120, 10,
+    150, BOSS, 0, 0,
+];
+
+/// Stage 3: everything at once.
+pub const STAGE3: [u8; _] = [
+    60, DART, ANY, 6,
+    60, DRONE, 56, 6,
+    10, DRONE, 184, 6,
+    90, SAUCER, 120, 1,
+    40, ROCK, ANY, 6,
+    60, SAUCER, 48, 1,
+    10, SAUCER, 200, 1,
+    100, DART, ANY, 8,
+    60, DRONE, 120, 8,
+    30, ROCK, ANY, 8,
+    100, SAUCER, 80, 1,
+    10, SAUCER, 160, 1,
+    40, DART, ANY, 10,
+    150, BOSS, 0, 0,
+];
+
+/// The stage's script.
+pub fn script(stage: u8) -> &[u8] {
+    return match stage {
+        0 => STAGE1,
+        1 => STAGE2,
+        _ => STAGE3,
+    };
+}

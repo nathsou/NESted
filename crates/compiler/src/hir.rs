@@ -175,6 +175,28 @@ pub enum BinOp {
 }
 
 impl BinOp {
+    /// The comparison with its operands swapped (`a < b` is `b > a`).
+    pub fn flip(self) -> BinOp {
+        match self {
+            BinOp::Lt => BinOp::Gt,
+            BinOp::Le => BinOp::Ge,
+            BinOp::Gt => BinOp::Lt,
+            BinOp::Ge => BinOp::Le,
+            o => o,
+        }
+    }
+    /// The comparison that holds when this one is false.
+    pub fn negate(self) -> BinOp {
+        match self {
+            BinOp::Lt => BinOp::Ge,
+            BinOp::Le => BinOp::Gt,
+            BinOp::Gt => BinOp::Le,
+            BinOp::Ge => BinOp::Lt,
+            BinOp::Eq => BinOp::Ne,
+            BinOp::Ne => BinOp::Eq,
+            o => o,
+        }
+    }
     pub fn parse(s: &str) -> Option<BinOp> {
         Some(match s {
             "+" => BinOp::Add,

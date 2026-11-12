@@ -450,6 +450,8 @@ impl Formatter<'_> {
                             self.push("@");
                         }
                         ".." | "..=" => self.push(p),
+                        // A glob import: `use std::audio::*;`.
+                        "*" if prev_text == "::" => self.push("*"),
                         _ if unary => {
                             self.space();
                             if (prev_text == "(" || prev_text == "[") && self.line.ends_with(' ') {

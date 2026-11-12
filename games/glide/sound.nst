@@ -1,5 +1,5 @@
 //! Glide's music and sound effects, as streams for std::audio.
-use std::audio:: * ;
+use std::audio::*;
 
 const Q: u8 = 24;
 const E: u8 = 12;

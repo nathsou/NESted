@@ -19,7 +19,7 @@ const examples = resolve(pub, 'examples');
 rmSync(examples, { recursive: true, force: true });
 mkdirSync(examples, { recursive: true });
 const manifest = [];
-const ORDER = ['glide', 'sprout', 'chess'];
+const ORDER = ['glide', 'sprout', 'nova', 'chess'];
 for (const name of readdirSync(resolve(root, 'games')).sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b))) {
   const dir = resolve(root, 'games', name);
   if (!statSync(dir).isDirectory()) continue;
@@ -41,7 +41,8 @@ for (const name of readdirSync(resolve(root, 'games')).sort((a, b) => ORDER.inde
     .replace(/^./, (c) => c.toUpperCase());
   manifest.push({ id: name, title, mapper, summary, files });
   // A screenshot a few seconds in, past the title screen, for the project picker.
-  run(resolve(root, 'target/release/nested'), ['run', `games/${name}`, '240', '--input', 'start@90', '--shot', resolve(examples, name, 'preview.png')]);
+  const preview = name === 'nova' ? ['420', '--input', 'start@90', '--hold', 'a'] : ['240', '--input', 'start@90'];
+  run(resolve(root, 'target/release/nested'), ['run', `games/${name}`, ...preview, '--shot', resolve(examples, name, 'preview.png')]);
 }
 writeFileSync(resolve(examples, 'index.json'), JSON.stringify(manifest, null, 2));
 run('npm', ['run', 'typecheck']);

@@ -111,9 +111,10 @@ prove the result stays inside, for example under `if slot < 7`.
 
 ### Slices
 
-A `&[T]` views an array, a constant or part of one: `&TABLE`, a string
-literal, or `asset("file.bin", 16..48)`. `len(s)` is a `u16`. Arrays coerce to
-slices at calls, so `video::text(1, 1, "READY")` passes a constant string.
+A `&[T]` views an array: a constant table, a variable, a string literal or
+`asset("file.bin", 16..48)`. An array becomes a slice wherever one is
+expected (an argument, a `let s: &[u8]`, a returned value), so
+`video::text(1, 1, "READY")` passes a constant string. `len(s)` is a `u16`.
 
 ## Items
 

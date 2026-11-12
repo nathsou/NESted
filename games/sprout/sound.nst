@@ -1,5 +1,5 @@
 //! Sprout's music and sound effects.
-use std::audio:: * ;
+use std::audio::*;
 
 const Q: u8 = 16;
 const E: u8 = 8;

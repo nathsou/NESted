@@ -109,3 +109,13 @@ fn modules() {
         .iter()
         .any(|d| d.message.contains("private")));
 }
+
+#[test]
+fn slice_length_guards() {
+    ok("fn f(s: &[u8]) -> u8 { if len(s) > 2 { return s[0] + s[2]; } return 0; }");
+    ok("fn f(s: &[u8]) -> u8 { if len(s) == 0 { return 0; } return s[0]; }");
+    ok("fn f(s: &[u8]) -> u8 { if 1 < len(s) { return s[1]; } return 0; }");
+    let e = errors("fn f(s: &[u8]) -> u8 { if len(s) > 2 { return s[3]; } return 0; }");
+    assert!(e[0].contains("slice length"), "{e:?}");
+    ok("var a: [u8; 4] = [0; 4]; fn g(s: &[u8]) -> u16 { return len(s); } fn f() { a[1] = 2; let n = g(a); }");
+}

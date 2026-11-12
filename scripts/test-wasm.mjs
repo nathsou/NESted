@@ -28,7 +28,7 @@ function files(dir) {
 
 const results = [];
 mkdirSync(resolve(root, 'artifacts'), { recursive: true });
-for (const game of ['glide', 'sprout', 'chess']) {
+for (const game of ['glide', 'sprout', 'nova', 'chess']) {
   const dir = resolve(root, 'games', game);
   e.nested_reset_project();
   for (const path of files(dir)) {

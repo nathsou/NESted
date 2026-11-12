@@ -18,6 +18,12 @@ pub enum Key {
 }
 
 /// Lexical environment of the expression being checked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SliceFact {
+    Below(LocalId, LocalId),
+    AtLeast(LocalId, i64),
+}
+
 pub struct Scope {
     pub module: usize,
     pub fn_id: Option<FnId>,
@@ -26,8 +32,9 @@ pub struct Scope {
     /// Proven inclusive bounds of variables. An entry with lo > hi kills
     /// earlier facts about its key (the variable was assigned).
     pub facts: Vec<(Key, i64, i64)>,
-    /// `index < len(slice)` facts for immutable locals.
-    pub slice_facts: Vec<(LocalId, LocalId)>,
+    /// What is known about slice lengths: `index < len(slice)` for
+    /// immutable locals, or `len(slice) >= n`.
+    pub slice_facts: Vec<SliceFact>,
     /// Immutable locals bound to `len(slice)`.
     pub len_alias: Vec<(LocalId, LocalId)>,
     pub loops: u32,
@@ -435,13 +442,23 @@ impl Checker<'_> {
                 if !compatible {
                     return mismatch(self, &e);
                 }
+                // Byte arrays are contiguous in RAM too; wider elements and
+                // structs are split into separate tables.
+                let bytes = self.types.size(from) == 1 && !matches!(**from, Type::Struct(_));
                 let g = match &e.kind {
-                    ExprKind::Global(g) if self.globals[g.0 as usize].is_const() => *g,
+                    ExprKind::Global(g) if self.globals[g.0 as usize].is_const() || bytes => *g,
                     ExprKind::Const(v) => self.intern_bytes(v.clone(), (**to).clone(), span),
+                    ExprKind::Global(_) => {
+                        self.diags.error(
+                            span,
+                            "Only arrays of bytes in RAM can be viewed as slices; this one is stored as separate tables",
+                        );
+                        return err(span);
+                    }
                     _ => {
                         self.diags.error(
                             span,
-                            "Slices view constant ROM arrays; this array is not constant",
+                            "Slices view constant arrays and global arrays; copy this local array into a global",
                         );
                         return err(span);
                     }
@@ -1231,8 +1248,13 @@ impl Checker<'_> {
             None => {
                 let proven = match (&i.kind, &b.kind) {
                     (ExprKind::Local(ix), ExprKind::Local(sl)) => {
-                        s.slice_facts.contains(&(*ix, *sl))
+                        s.slice_facts.contains(&SliceFact::Below(*ix, *sl))
                     }
+                    (_, ExprKind::Local(sl)) => i.constant().is_some_and(|k| {
+                        s.slice_facts
+                            .iter()
+                            .any(|f| matches!(f, SliceFact::AtLeast(l, n) if l == sl && *n > k))
+                    }),
                     _ => false,
                 };
                 if !raw && !proven {
@@ -1904,6 +1926,34 @@ impl Checker<'_> {
                 self.facts_from(s, b, false);
             }
             ExprKind::Binary(op, a, b) if op.is_compare() => {
+                // `len(s) > k` and friends, for a constant k.
+                let slice_len = |e: &Expr| match &e.kind {
+                    ExprKind::Intrinsic(Intrinsic::SliceLen, args) => match &args[0].kind {
+                        ExprKind::Local(sl) => Some(*sl),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let oriented = match (slice_len(a), slice_len(b), a.constant(), b.constant()) {
+                    (Some(sl), _, _, Some(k)) => Some((sl, *op, k)),
+                    (_, Some(sl), Some(k), _) => Some((sl, op.flip(), k)),
+                    _ => None,
+                };
+                if let Some((sl, op, k)) = oriented {
+                    if s.immutable(sl) {
+                        let op = if truth { op } else { op.negate() };
+                        let at_least = match op {
+                            BinOp::Gt => Some(k + 1),
+                            BinOp::Ge | BinOp::Eq => Some(k),
+                            BinOp::Ne if k == 0 => Some(1),
+                            _ => None,
+                        };
+                        if let Some(n) = at_least {
+                            s.slice_facts.push(SliceFact::AtLeast(sl, n));
+                        }
+                    }
+                    return;
+                }
                 let var = |e: &Expr| {
                     // A range viewed as its base type is the same variable.
                     let e = match &e.kind {
@@ -1951,7 +2001,7 @@ impl Checker<'_> {
                     if s.immutable(id) {
                         if let ExprKind::Intrinsic(Intrinsic::SliceLen, args) = &k.kind {
                             if let (ExprKind::Local(sl), BinOp::Lt) = (&args[0].kind, op) {
-                                s.slice_facts.push((id, *sl));
+                                s.slice_facts.push(SliceFact::Below(id, *sl));
                             }
                             return;
                         }
@@ -1959,7 +2009,7 @@ impl Checker<'_> {
                             if let Some((_, sl)) = s.len_alias.iter().find(|(a, _)| a == n).copied()
                             {
                                 if op == BinOp::Lt {
-                                    s.slice_facts.push((id, sl));
+                                    s.slice_facts.push(SliceFact::Below(id, sl));
                                 }
                             }
                         }
@@ -2461,12 +2511,12 @@ impl Checker<'_> {
                 s.facts.push((Key::Local(id), alo, bhi - !inclusive as i64));
                 if let ExprKind::Intrinsic(Intrinsic::SliceLen, args) = &b.kind {
                     if let (ExprKind::Local(sl), false) = (&args[0].kind, *inclusive) {
-                        s.slice_facts.push((id, *sl));
+                        s.slice_facts.push(SliceFact::Below(id, *sl));
                     }
                 }
                 if let (ExprKind::Local(n), false) = (&b.kind, *inclusive) {
                     if let Some((_, sl)) = s.len_alias.iter().find(|(a, _)| a == n).copied() {
-                        s.slice_facts.push((id, sl));
+                        s.slice_facts.push(SliceFact::Below(id, sl));
                     }
                 }
                 s.loops += 1;

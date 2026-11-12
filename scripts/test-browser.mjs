@@ -20,7 +20,7 @@ try {
 
   // Every example builds, runs without dropping video updates, and is listed.
   const examples = await browser.evaluate(`${n}.examples().map(e => e.id)`);
-  assert.deepEqual(examples, ['glide', 'sprout', 'chess']);
+  assert.deepEqual(examples, ['glide', 'sprout', 'nova', 'chess']);
   for (const id of examples) {
     await browser.evaluate(`${n}.openExample('${id}')`);
     await browser.wait(`${n}.ready && ${n}.project.example === '${id}' && ${n}.frames > 60`);
@@ -94,7 +94,7 @@ try {
     assert.equal(await browser.evaluate(`getComputedStyle(document.querySelector('${selector}')).display`), 'flex', pane);
   }
   assert.equal(browser.errors.length, 0, JSON.stringify(browser.errors));
-  console.log('Playground: three examples, nine board templates, LSP across modules, diagnostics, formatting, inspectors and responsive layouts passed.');
+  console.log('Playground: four examples, nine board templates, LSP across modules, diagnostics, formatting, inspectors and responsive layouts passed.');
 } finally {
   await browser.close();
   server.kill('SIGTERM');

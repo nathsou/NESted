@@ -68,6 +68,15 @@ try {
   await step(RIGHT, 8);
   await screen('sprout');
 
+  // Nova: start, then fly and fire through the first waves.
+  await open('nova');
+  await step(0, 60);
+  await tap(START);
+  await step(A, 260);
+  await step(A | LEFT, 24);
+  await step(A, 60);
+  await screen('nova');
+
   // Chess: play 1.e4 against level 1 and wait for the reply.
   await open('chess');
   await tap(UP);

@@ -559,3 +559,148 @@ fn chess_speed() {
         g.byte("game_plies")
     );
 }
+
+mod nova {
+    use super::*;
+    const PLAY: u8 = 1;
+    const OVER: u8 = 2;
+    const BOSS: u8 = 3;
+    const CLEAR: u8 = 4;
+
+    /// Steer under the nearest target, keep firing, sidestep close bullets.
+    fn pilot(g: &mut Game) -> u8 {
+        let px = g.byte("px");
+        let py = g.byte("py");
+        let mut target: Option<u8> = None;
+        if g.byte("phase") == BOSS {
+            target = Some(g.byte("boss_x").wrapping_add(8));
+        }
+        let mut best = 0u8;
+        for i in 0..6 {
+            if g.emu.read_ram(g.addr("enemies.alive") + i) != 0 {
+                let y = g.emu.read_ram(g.addr("enemies.y") + i);
+                if y >= best && y < py {
+                    best = y;
+                    target = Some(g.emu.read_ram(g.addr("enemies.x") + i));
+                }
+            }
+        }
+        let mut buttons = A;
+        let mut dodge = 0i16;
+        for i in 0..12 {
+            if g.emu.read_ram(g.addr("bullets.alive") + i) != 0 {
+                // Word arrays are stored as a low-byte table then a high-byte table.
+                let mut word = |n: &str| {
+                    let a = g.addr(n);
+                    g.emu.read_ram(a + i) as u16 | (g.emu.read_ram(a + 12 + i) as u16) << 8
+                };
+                let bx = (word("bullets.x") >> 4) as i16;
+                let by = (word("bullets.y") >> 4) as i16;
+                let dx = bx - (px as i16 + 4);
+                let dy = py as i16 - by;
+                if (-8..40).contains(&dy) && dx.abs() < 14 {
+                    dodge = if dx > 0 { -1 } else { 1 };
+                }
+            }
+        }
+        if dodge < 0 && px > 16 {
+            buttons |= LEFT;
+        } else if dodge > 0 && px < 224 {
+            buttons |= RIGHT;
+        } else if let Some(t) = target {
+            if t > px + 2 {
+                buttons |= RIGHT;
+            } else if t + 2 < px {
+                buttons |= LEFT;
+            }
+        }
+        if py < 180 {
+            buttons |= DOWN;
+        }
+        buttons
+    }
+
+    #[test]
+    fn clears_a_stage_and_its_mothership() {
+        let mut g = Game::load("nova");
+        g.wait(60);
+        g.shot("nova-title");
+        g.tap(START);
+        g.until("mode", PLAY, 120);
+        let lives = g.addr("lives");
+        let mut saw_boss = false;
+        let mut shot_play = false;
+        for _ in 0..12000 {
+            // Endless ships: this test is about the stage, not the pilot.
+            g.emu.write_ram(lives, 5);
+            let b = pilot(&mut g);
+            g.frame(b);
+            if !shot_play && g.frames > 900 {
+                g.shot("nova");
+                shot_play = true;
+            }
+            if g.byte("phase") == BOSS && g.byte("boss_hp") > 0 && g.byte("boss_y") >= 24 {
+                if !saw_boss {
+                    g.wait(60);
+                    g.shot("nova-boss");
+                }
+                saw_boss = true;
+            }
+            if g.byte("stage") == 1 {
+                break;
+            }
+        }
+        assert!(saw_boss, "the mothership arrived");
+        assert_eq!(
+            g.byte("stage"),
+            1,
+            "stage 2 began after the mothership fell"
+        );
+        assert!(g.word("score") > 100, "score {}", g.word("score"));
+    }
+
+    /// How far the bot gets on its own: `cargo test nova_unassisted -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn nova_unassisted() {
+        let mut g = Game::load("nova");
+        g.wait(60);
+        g.tap(START);
+        g.until("mode", PLAY, 120);
+        let mut deaths = 0;
+        let mut was_alive = true;
+        while g.byte("mode") == PLAY && g.frames < 40000 {
+            let b = pilot(&mut g);
+            g.frame(b);
+            let alive = g.byte("alive") != 0;
+            if was_alive && !alive {
+                deaths += 1;
+                let (frame, stage, phase) = (g.frames, g.byte("stage"), g.byte("phase"));
+                println!("death {deaths} at frame {frame} (stage {stage} phase {phase})");
+            }
+            was_alive = alive;
+        }
+        let (frame, stage, lap, score) =
+            (g.frames, g.byte("stage"), g.byte("lap"), g.word("score"));
+        println!("ended at frame {frame}: stage {stage} lap {lap} score {score}0");
+    }
+
+    #[test]
+    fn game_over_returns_to_the_title() {
+        let mut g = Game::load("nova");
+        g.wait(60);
+        g.tap(START);
+        // Sit still at the bottom and let the armada win.
+        for _ in 0..20000 {
+            g.frame(0);
+            if g.byte("mode") == OVER {
+                break;
+            }
+        }
+        assert_eq!(g.byte("mode"), OVER);
+        g.wait(70);
+        g.tap(START);
+        g.until("mode", 0, 120);
+        let _ = CLEAR;
+    }
+}
