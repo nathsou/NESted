@@ -13,8 +13,8 @@ pub mod fmt;
 pub mod hir;
 pub mod json;
 pub mod lexer;
-pub mod lsp;
 pub mod link;
+pub mod lsp;
 pub mod mir;
 pub mod parser;
 pub mod source;
@@ -110,7 +110,8 @@ pub fn compile(project: &Project, options: Options) -> Result<Output, Failure> {
     if diags.has_errors() {
         return Err(fail(analysis, diags.items));
     }
-    let board = link::Board::from_name(&analysis.program.cartridge.mapper).unwrap_or(link::Board::Nrom);
+    let board =
+        link::Board::from_name(&analysis.program.cartridge.mapper).unwrap_or(link::Board::Nrom);
     let mut units = Vec::new();
     let mut asm_text = String::new();
     for i in 0..mir.insts.len() {
@@ -159,7 +160,10 @@ pub fn compile(project: &Project, options: Options) -> Result<Output, Failure> {
         Ok(l) => l,
         Err(errors) => {
             let span = analysis.program.cartridge.span;
-            let extra = errors.into_iter().map(|e| Diagnostic::error(span, e)).collect();
+            let extra = errors
+                .into_iter()
+                .map(|e| Diagnostic::error(span, e))
+                .collect();
             let mut f = fail(analysis, extra);
             f.passes = passes;
             return Err(f);
@@ -173,11 +177,20 @@ pub fn compile(project: &Project, options: Options) -> Result<Output, Failure> {
     for (bank, item) in &linked.listing {
         listing.push_str(&format!(
             "{}{:04X}  {:<9} {:<22} {}\n",
-            bank.map(|b| format!("{b:02}:")).unwrap_or_else(|| "   ".into()),
+            bank.map(|b| format!("{b:02}:"))
+                .unwrap_or_else(|| "   ".into()),
             item.address,
-            item.bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" "),
+            item.bytes
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" "),
             item.text,
-            if item.cycles.0 == item.cycles.1 { format!("{}", item.cycles.0) } else { format!("{}-{}", item.cycles.0, item.cycles.1) }
+            if item.cycles.0 == item.cycles.1 {
+                format!("{}", item.cycles.0)
+            } else {
+                format!("{}-{}", item.cycles.0, item.cycles.1)
+            }
         ));
     }
     passes.push(Pass {

@@ -41,8 +41,18 @@ pub struct LanguageServer {
 }
 
 const TOKEN_TYPES: &[&str] = &[
-    "namespace", "type", "function", "variable", "parameter", "keyword", "number", "string", "operator",
-    "enumMember", "property", "macro",
+    "namespace",
+    "type",
+    "function",
+    "variable",
+    "parameter",
+    "keyword",
+    "number",
+    "string",
+    "operator",
+    "enumMember",
+    "property",
+    "macro",
 ];
 
 fn dir_of(uri: &str) -> &str {
@@ -82,7 +92,11 @@ impl LanguageServer {
             }
             let trimmed = dir.trim_end_matches('/');
             match trimmed.rfind('/') {
-                Some(i) if i > 0 && !trimmed[..i].ends_with(':') && !trimmed[..i].ends_with("//") => dir = trimmed[..i + 1].to_owned(),
+                Some(i)
+                    if i > 0 && !trimmed[..i].ends_with(':') && !trimmed[..i].ends_with("//") =>
+                {
+                    dir = trimmed[..i + 1].to_owned()
+                }
                 _ => return dir_of(uri).to_owned(),
             }
         }
@@ -98,7 +112,10 @@ impl LanguageServer {
                 for (u, bytes) in load(&root) {
                     if let Some(rel) = u.strip_prefix(&root) {
                         if rel.ends_with(".nst") {
-                            project.sources.insert(rel.to_owned(), String::from_utf8_lossy(&bytes).into_owned());
+                            project.sources.insert(
+                                rel.to_owned(),
+                                String::from_utf8_lossy(&bytes).into_owned(),
+                            );
                             uris.insert(rel.to_owned(), u.clone());
                         } else {
                             project.assets.insert(rel.to_owned(), bytes);
@@ -124,13 +141,21 @@ impl LanguageServer {
             };
             project.entry = entry;
             let analysis = crate::check::analyze(&project);
-            self.cache = Some(Workspace { root, analysis, uris });
+            self.cache = Some(Workspace {
+                root,
+                analysis,
+                uris,
+            });
         }
         self.cache.as_ref().unwrap()
     }
 
     fn notification(method: &str, params: Json) -> Json {
-        obj([("jsonrpc", "2.0".into()), ("method", method.into()), ("params", params)])
+        obj([
+            ("jsonrpc", "2.0".into()),
+            ("method", method.into()),
+            ("params", params),
+        ])
     }
     fn response(id: Json, result: Json) -> Json {
         obj([("jsonrpc", "2.0".into()), ("id", id), ("result", result)])
@@ -139,7 +164,13 @@ impl LanguageServer {
         obj([
             ("jsonrpc", "2.0".into()),
             ("id", id),
-            ("error", obj([("code", Json::Number(code as f64)), ("message", message.into())])),
+            (
+                "error",
+                obj([
+                    ("code", Json::Number(code as f64)),
+                    ("message", message.into()),
+                ]),
+            ),
         ])
     }
 
@@ -163,8 +194,16 @@ impl LanguageServer {
                     }
                 }
             };
-            let range = if ws.uris.contains_key(&file.path) { span_range(a, d.span) } else { zero_range() };
-            let message = if ws.uris.contains_key(&file.path) { d.message.clone() } else { format!("{}: {}", file.path, d.message) };
+            let range = if ws.uris.contains_key(&file.path) {
+                span_range(a, d.span)
+            } else {
+                zero_range()
+            };
+            let message = if ws.uris.contains_key(&file.path) {
+                d.message.clone()
+            } else {
+                format!("{}: {}", file.path, d.message)
+            };
             by_file.entry(target).or_default().push(obj([
                 ("range", range),
                 (
@@ -191,7 +230,10 @@ impl LanguageServer {
         for old in self.published.difference(&now) {
             out.push(Self::notification(
                 "textDocument/publishDiagnostics",
-                obj([("uri", old.clone().into()), ("diagnostics", Json::Array(vec![]))]),
+                obj([
+                    ("uri", old.clone().into()),
+                    ("diagnostics", Json::Array(vec![])),
+                ]),
             ));
         }
         self.published = now;
@@ -204,7 +246,11 @@ impl LanguageServer {
         let params = request.get("params").clone();
         match method.as_str() {
             "initialize" => return vec![Self::response(id, capabilities())],
-            "initialized" | "$/cancelRequest" | "workspace/didChangeConfiguration" | "textDocument/didSave" | "$/setTrace" => return vec![],
+            "initialized"
+            | "$/cancelRequest"
+            | "workspace/didChangeConfiguration"
+            | "textDocument/didSave"
+            | "$/setTrace" => return vec![],
             "shutdown" => {
                 self.shutdown = true;
                 return vec![Self::response(id, Json::Null)];
@@ -229,15 +275,23 @@ impl LanguageServer {
             "textDocument/didChange" => {
                 let d = params.get("textDocument");
                 let uri = d.get("uri").str().to_owned();
-                let Some(doc) = self.docs.get_mut(&uri) else { return vec![] };
+                let Some(doc) = self.docs.get_mut(&uri) else {
+                    return vec![];
+                };
                 for change in params.get("contentChanges").array() {
                     if change.get("range").is_null() {
                         doc.text = change.get("text").str().to_owned();
                     } else {
                         let file = crate::source::SourceFile::new("", doc.text.clone());
                         let r = change.get("range");
-                        let s = file.offset(r.get("start").get("line").usize(), r.get("start").get("character").usize());
-                        let e = file.offset(r.get("end").get("line").usize(), r.get("end").get("character").usize());
+                        let s = file.offset(
+                            r.get("start").get("line").usize(),
+                            r.get("start").get("character").usize(),
+                        );
+                        let e = file.offset(
+                            r.get("end").get("line").usize(),
+                            r.get("end").get("character").usize(),
+                        );
                         if s <= e && e <= doc.text.len() {
                             doc.text.replace_range(s..e, change.get("text").str());
                         }
@@ -256,7 +310,12 @@ impl LanguageServer {
             "nested/asset" => {
                 // { uri, data: [bytes] }
                 let uri = params.get("uri").str().to_owned();
-                let data: Vec<u8> = params.get("data").array().iter().map(|b| b.usize() as u8).collect();
+                let data: Vec<u8> = params
+                    .get("data")
+                    .array()
+                    .iter()
+                    .map(|b| b.usize() as u8)
+                    .collect();
                 self.set_asset(&uri, data);
                 return vec![];
             }
@@ -281,12 +340,19 @@ impl LanguageServer {
         let result = match method.as_str() {
             "textDocument/formatting" => {
                 let opts = params.get("options");
-                let indent = if opts.get("insertSpaces").bool() || opts.get("insertSpaces").is_null() {
-                    " ".repeat(opts.get("tabSize").usize().clamp(1, 8).max(if opts.get("tabSize").is_null() { 4 } else { 1 }))
-                } else {
-                    "\t".into()
-                };
-                let formatted = crate::fmt::format(&text, &crate::fmt::Style { indent, width: 100 });
+                let indent =
+                    if opts.get("insertSpaces").bool() || opts.get("insertSpaces").is_null() {
+                        " ".repeat(
+                            opts.get("tabSize")
+                                .usize()
+                                .clamp(1, 8)
+                                .max(if opts.get("tabSize").is_null() { 4 } else { 1 }),
+                        )
+                    } else {
+                        "\t".into()
+                    };
+                let formatted =
+                    crate::fmt::format(&text, &crate::fmt::Style { indent, width: 100 });
                 if formatted == text {
                     Json::Array(vec![])
                 } else {
@@ -322,15 +388,23 @@ impl LanguageServer {
                 match method.as_str() {
                     "textDocument/hover" => match at {
                         Some((span, def)) => obj([
-                            ("contents", obj([("kind", "markdown".into()), ("value", describe(a, def).into())])),
+                            (
+                                "contents",
+                                obj([
+                                    ("kind", "markdown".into()),
+                                    ("value", describe(a, def).into()),
+                                ]),
+                            ),
                             ("range", span_range(a, span)),
                         ]),
                         None => Json::Null,
                     },
-                    "textDocument/definition" => match at.and_then(|(_, d)| a.defs.get(&d).map(|s| (d, *s))) {
-                        Some((_, span)) => location(ws, a, span).unwrap_or(Json::Null),
-                        None => Json::Null,
-                    },
+                    "textDocument/definition" => {
+                        match at.and_then(|(_, d)| a.defs.get(&d).map(|s| (d, *s))) {
+                            Some((_, span)) => location(ws, a, span).unwrap_or(Json::Null),
+                            None => Json::Null,
+                        }
+                    }
                     "textDocument/references" => match at {
                         Some((_, def)) => {
                             let mut out = Vec::new();
@@ -347,17 +421,31 @@ impl LanguageServer {
                         None => Json::Array(vec![]),
                     },
                     "textDocument/prepareRename" => match at {
-                        Some((span, def)) if !matches!(def, Def::Builtin(_) | Def::Module(_)) => span_range(a, span),
+                        Some((span, def)) if !matches!(def, Def::Builtin(_) | Def::Module(_)) => {
+                            span_range(a, span)
+                        }
                         _ => Json::Null,
                     },
                     "textDocument/rename" => {
                         let new_name = params.get("newName").str().to_owned();
-                        let valid = new_name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                            && new_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        let valid = new_name
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                            && new_name
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
                             && !KEYWORDS.contains(&new_name.as_str());
                         match at {
-                            Some((_, def)) if valid && !matches!(def, Def::Builtin(_) | Def::Module(_)) => {
-                                let mut spans: Vec<Span> = a.refs.iter().filter(|(_, d)| *d == def).map(|(s, _)| *s).collect();
+                            Some((_, def))
+                                if valid && !matches!(def, Def::Builtin(_) | Def::Module(_)) =>
+                            {
+                                let mut spans: Vec<Span> = a
+                                    .refs
+                                    .iter()
+                                    .filter(|(_, d)| *d == def)
+                                    .map(|(s, _)| *s)
+                                    .collect();
                                 if let Some(s) = a.defs.get(&def) {
                                     spans.push(*s);
                                 }
@@ -375,10 +463,17 @@ impl LanguageServer {
                                 }
                                 obj([(
                                     "changes",
-                                    Json::Object(changes.into_iter().map(|(k, v)| (k, Json::Array(v))).collect()),
+                                    Json::Object(
+                                        changes
+                                            .into_iter()
+                                            .map(|(k, v)| (k, Json::Array(v)))
+                                            .collect(),
+                                    ),
                                 )])
                             }
-                            _ if !valid => return vec![Self::failure(id, -32602, "Not a valid name")],
+                            _ if !valid => {
+                                return vec![Self::failure(id, -32602, "Not a valid name")]
+                            }
                             _ => Json::Null,
                         }
                     }
@@ -440,7 +535,14 @@ fn capabilities() -> Json {
             "capabilities",
             obj([
                 ("positionEncoding", "utf-16".into()),
-                ("textDocumentSync", obj([("openClose", true.into()), ("change", Json::Number(2.0)), ("save", true.into())])),
+                (
+                    "textDocumentSync",
+                    obj([
+                        ("openClose", true.into()),
+                        ("change", Json::Number(2.0)),
+                        ("save", true.into()),
+                    ]),
+                ),
                 ("hoverProvider", true.into()),
                 ("definitionProvider", true.into()),
                 ("referencesProvider", true.into()),
@@ -448,16 +550,40 @@ fn capabilities() -> Json {
                 ("documentSymbolProvider", true.into()),
                 ("documentFormattingProvider", true.into()),
                 ("inlayHintProvider", true.into()),
-                ("completionProvider", obj([("triggerCharacters", Json::Array(vec![".".into(), ":".into(), "@".into()]))])),
-                ("signatureHelpProvider", obj([("triggerCharacters", Json::Array(vec!["(".into(), ",".into()]))])),
+                (
+                    "completionProvider",
+                    obj([(
+                        "triggerCharacters",
+                        Json::Array(vec![".".into(), ":".into(), "@".into()]),
+                    )]),
+                ),
+                (
+                    "signatureHelpProvider",
+                    obj([(
+                        "triggerCharacters",
+                        Json::Array(vec!["(".into(), ",".into()]),
+                    )]),
+                ),
                 (
                     "semanticTokensProvider",
                     obj([
                         (
                             "legend",
                             obj([
-                                ("tokenTypes", Json::Array(TOKEN_TYPES.iter().map(|t| Json::from(*t)).collect())),
-                                ("tokenModifiers", Json::Array(vec!["declaration".into(), "readonly".into(), "defaultLibrary".into()])),
+                                (
+                                    "tokenTypes",
+                                    Json::Array(
+                                        TOKEN_TYPES.iter().map(|t| Json::from(*t)).collect(),
+                                    ),
+                                ),
+                                (
+                                    "tokenModifiers",
+                                    Json::Array(vec![
+                                        "declaration".into(),
+                                        "readonly".into(),
+                                        "defaultLibrary".into(),
+                                    ]),
+                                ),
                             ]),
                         ),
                         ("full", true.into()),
@@ -465,7 +591,13 @@ fn capabilities() -> Json {
                 ),
             ]),
         ),
-        ("serverInfo", obj([("name", "NESted".into()), ("version", env!("CARGO_PKG_VERSION").into())])),
+        (
+            "serverInfo",
+            obj([
+                ("name", "NESted".into()),
+                ("version", env!("CARGO_PKG_VERSION").into()),
+            ]),
+        ),
     ])
 }
 
@@ -496,7 +628,15 @@ pub fn describe(a: &Analysis, def: Def) -> String {
                 s = format!("@io(0x{addr:04X}) {s}");
             }
             let size = p.types.size(&gl.ty);
-            code(s, &format!("{}{}{size} byte{}", gl.doc, if gl.doc.is_empty() { "" } else { "\n\n" }, if size == 1 { "" } else { "s" }))
+            code(
+                s,
+                &format!(
+                    "{}{}{size} byte{}",
+                    gl.doc,
+                    if gl.doc.is_empty() { "" } else { "\n\n" },
+                    if size == 1 { "" } else { "s" }
+                ),
+            )
         }
         Def::Fn(f) => {
             let func = p.function(f);
@@ -505,24 +645,54 @@ pub fn describe(a: &Analysis, def: Def) -> String {
                 .iter()
                 .map(|l| {
                     let d = &func.locals[l.0 as usize];
-                    format!("{}{}: {}", if d.mutable { "var " } else { "" }, d.name, t(&d.ty))
+                    format!(
+                        "{}{}: {}",
+                        if d.mutable { "var " } else { "" },
+                        d.name,
+                        t(&d.ty)
+                    )
                 })
                 .collect();
-            let ret = if func.result == Type::Void { String::new() } else { format!(" -> {}", t(&func.result)) };
+            let ret = if func.result == Type::Void {
+                String::new()
+            } else {
+                format!(" -> {}", t(&func.result))
+            };
             let doc = doc_for(a, def);
-            code(format!("fn {}({}){ret}", func.path, params.join(", ")), &doc)
+            code(
+                format!("fn {}({}){ret}", func.path, params.join(", ")),
+                &doc,
+            )
         }
         Def::Local(f, l) => {
             let func = p.function(f);
             match func.locals.get(l.0 as usize) {
-                Some(d) => code(format!("{} {}: {}", if d.mutable { "var" } else { "let" }, d.name, t(&d.ty)), ""),
+                Some(d) => code(
+                    format!(
+                        "{} {}: {}",
+                        if d.mutable { "var" } else { "let" },
+                        d.name,
+                        t(&d.ty)
+                    ),
+                    "",
+                ),
                 None => String::new(),
             }
         }
         Def::Struct(s) => {
             let d = &p.types.structs[s.0 as usize];
-            let fields: Vec<String> = d.fields.iter().map(|(n, ft)| format!("    {n}: {},", t(ft))).collect();
-            code(format!("struct {} {{\n{}\n}}", d.name, fields.join("\n")), &format!("{} bytes; arrays of it are stored field by field", p.types.size(&Type::Struct(s))))
+            let fields: Vec<String> = d
+                .fields
+                .iter()
+                .map(|(n, ft)| format!("    {n}: {},", t(ft)))
+                .collect();
+            code(
+                format!("struct {} {{\n{}\n}}", d.name, fields.join("\n")),
+                &format!(
+                    "{} bytes; arrays of it are stored field by field",
+                    p.types.size(&Type::Struct(s))
+                ),
+            )
         }
         Def::Field(s, i) => {
             let d = &p.types.structs[s.0 as usize];
@@ -531,8 +701,15 @@ pub fn describe(a: &Analysis, def: Def) -> String {
         }
         Def::Enum(e) => {
             let d = &p.types.enums[e.0 as usize];
-            let v: Vec<String> = d.variants.iter().map(|(n, x)| format!("    {n} = {x},")).collect();
-            code(format!("enum {}: {} {{\n{}\n}}", d.name, t(&d.repr), v.join("\n")), &doc_for(a, def))
+            let v: Vec<String> = d
+                .variants
+                .iter()
+                .map(|(n, x)| format!("    {n} = {x},"))
+                .collect();
+            code(
+                format!("enum {}: {} {{\n{}\n}}", d.name, t(&d.repr), v.join("\n")),
+                &doc_for(a, def),
+            )
         }
         Def::Variant(e, i) => {
             let d = &p.types.enums[e.0 as usize];
@@ -541,7 +718,10 @@ pub fn describe(a: &Analysis, def: Def) -> String {
         }
         Def::Range(r) => {
             let d = &p.types.ranges[r.0 as usize];
-            code(format!("type {} = {} in {}..={}", d.name, t(&d.base), d.lo, d.hi), "Values are proven to stay in range; use it to index arrays without checks.")
+            code(
+                format!("type {} = {} in {}..={}", d.name, t(&d.base), d.lo, d.hi),
+                "Values are proven to stay in range; use it to index arrays without checks.",
+            )
         }
         Def::Alias(i) => match a.aliases.get(i as usize) {
             Some((n, ty)) => code(format!("type {n} = {}", t(ty)), ""),
@@ -555,21 +735,36 @@ pub fn describe(a: &Analysis, def: Def) -> String {
                 .take_while(|c| c.text.starts_with("//!"))
                 .map(|c| c.text.trim_start_matches("//!").trim().to_owned())
                 .collect();
-            code(format!("module {}", path.trim_end_matches(".nst").replace('/', "::")), &doc.join(" "))
+            code(
+                format!(
+                    "module {}",
+                    path.trim_end_matches(".nst").replace('/', "::")
+                ),
+                &doc.join(" "),
+            )
         }
         Def::Builtin(name) => {
             if let Some((_, d)) = BUILTIN_FNS.iter().find(|(n, _)| *n == name) {
                 code(format!("fn {name}"), d)
             } else {
-                code(name.to_string(), "Built-in machine type. Arithmetic wraps; convert explicitly between widths.")
+                code(
+                    name.to_string(),
+                    "Built-in machine type. Arithmetic wraps; convert explicitly between widths.",
+                )
             }
         }
     }
 }
 
 fn doc_for(a: &Analysis, def: Def) -> String {
-    let Some(span) = a.defs.get(&def) else { return String::new() };
-    let m = &a.modules[a.modules.iter().position(|m| m.file == span.file).unwrap_or(0)];
+    let Some(span) = a.defs.get(&def) else {
+        return String::new();
+    };
+    let m = &a.modules[a
+        .modules
+        .iter()
+        .position(|m| m.file == span.file)
+        .unwrap_or(0)];
     let text = &a.sources.get(m.file).text;
     // `///` lines right above the item's line.
     let line_start = text[..span.start as usize].rfind('\n').map_or(0, |i| i + 1);
@@ -580,7 +775,9 @@ fn doc_for(a: &Analysis, def: Def) -> String {
             continue;
         }
         let between = &text[c.span.end as usize..end];
-        if between.matches('\n').count() > 1 || !between.trim().is_empty() && !between.trim().starts_with('@') {
+        if between.matches('\n').count() > 1
+            || !between.trim().is_empty() && !between.trim().starts_with('@')
+        {
             break;
         }
         match c.text.strip_prefix("///") {
@@ -594,7 +791,11 @@ fn doc_for(a: &Analysis, def: Def) -> String {
 }
 
 fn completion_item(label: &str, kind: f64, detail: String) -> Json {
-    obj([("label", label.into()), ("kind", Json::Number(kind)), ("detail", detail.into())])
+    obj([
+        ("label", label.into()),
+        ("kind", Json::Number(kind)),
+        ("detail", detail.into()),
+    ])
 }
 
 fn def_kind(def: &Def) -> f64 {
@@ -619,7 +820,9 @@ fn short(a: &Analysis, def: Def) -> String {
 
 fn completion(a: &Analysis, file: crate::source::FileId, text: &str, offset: usize) -> Json {
     let before = &text[..offset.min(text.len())];
-    let word_start = before.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(0, |i| i + 1);
+    let word_start = before
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .map_or(0, |i| i + 1);
     let prefix_text = &before[..word_start];
     let module = a.modules.iter().position(|m| m.file == file).unwrap_or(0);
     let mut items = Vec::new();
@@ -634,14 +837,22 @@ fn completion(a: &Analysis, file: crate::source::FileId, text: &str, offset: usi
         let mut target: Option<Def> = a.modules[module].names.get(segs[0]).copied();
         if target.is_none() {
             let file = format!("{}.nst", segs.join("/"));
-            target = a.modules.iter().position(|m| m.path == file).map(|i| Def::Module(i as u32));
+            target = a
+                .modules
+                .iter()
+                .position(|m| m.path == file)
+                .map(|i| Def::Module(i as u32));
             if target.is_some() {
                 return module_items(a, target.unwrap(), &mut items);
             }
             if segs == ["std"] {
                 for m in &a.modules {
                     if let Some(rest) = m.path.strip_prefix("std/") {
-                        items.push(completion_item(rest.trim_end_matches(".nst"), 9.0, "module".into()));
+                        items.push(completion_item(
+                            rest.trim_end_matches(".nst"),
+                            9.0,
+                            "module".into(),
+                        ));
                     }
                 }
                 for (p, _) in crate::stdlib::FILES {
@@ -666,19 +877,30 @@ fn completion(a: &Analysis, file: crate::source::FileId, text: &str, offset: usi
     // Field completion after `name.`.
     if prefix_text.ends_with('.') {
         let base_end = prefix_text.len() - 1;
-        let base_start = prefix_text[..base_end].rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '[' || c == ']')).map_or(0, |i| i + 1);
+        let base_start = prefix_text[..base_end]
+            .rfind(|c: char| {
+                !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '[' || c == ']')
+            })
+            .map_or(0, |i| i + 1);
         let base = &prefix_text[base_start..base_end];
         let name = base.split(['[', '.']).next().unwrap_or("");
         let ty = find_type(a, file, module, name, offset);
         if let Some(mut ty) = ty {
             // Walk `.field` and `[..]` steps.
             let rest = &base[name.len()..];
-            for part in rest.split('.').skip(if rest.starts_with('.') { 1 } else { 0 }) {
+            for part in rest
+                .split('.')
+                .skip(if rest.starts_with('.') { 1 } else { 0 })
+            {
                 let idx = part.matches('[').count();
                 let fname = part.split('[').next().unwrap_or("");
                 if !fname.is_empty() {
                     if let Type::Struct(s) = &ty {
-                        if let Some((_, ft)) = a.program.types.structs[s.0 as usize].fields.iter().find(|(n, _)| n == fname) {
+                        if let Some((_, ft)) = a.program.types.structs[s.0 as usize]
+                            .fields
+                            .iter()
+                            .find(|(n, _)| n == fname)
+                        {
                             ty = ft.clone();
                         }
                     }
@@ -703,7 +925,23 @@ fn completion(a: &Analysis, file: crate::source::FileId, text: &str, offset: usi
         return Json::Array(items);
     }
     if prefix_text.ends_with('@') {
-        for at in ["inline", "noinline", "nmi", "irq", "reset", "zp", "ram", "at", "io", "bank", "shared", "recursive", "budget", "export", "cold"] {
+        for at in [
+            "inline",
+            "noinline",
+            "nmi",
+            "irq",
+            "reset",
+            "zp",
+            "ram",
+            "at",
+            "io",
+            "bank",
+            "shared",
+            "recursive",
+            "budget",
+            "export",
+            "cold",
+        ] {
             items.push(completion_item(at, 14.0, "attribute".into()));
         }
         return Json::Array(items);
@@ -755,8 +993,16 @@ fn module_items(a: &Analysis, target: Def, items: &mut Vec<Json>) -> Json {
             }
         }
         Def::Enum(e) => {
-            for (i, (n, _)) in a.program.types.enums[e.0 as usize].variants.iter().enumerate() {
-                items.push(completion_item(n, 20.0, short(a, Def::Variant(e, i as u32))));
+            for (i, (n, _)) in a.program.types.enums[e.0 as usize]
+                .variants
+                .iter()
+                .enumerate()
+            {
+                items.push(completion_item(
+                    n,
+                    20.0,
+                    short(a, Def::Variant(e, i as u32)),
+                ));
             }
         }
         _ => {}
@@ -764,12 +1010,23 @@ fn module_items(a: &Analysis, target: Def, items: &mut Vec<Json>) -> Json {
     Json::Array(std::mem::take(items))
 }
 
-fn find_type(a: &Analysis, file: crate::source::FileId, module: usize, name: &str, offset: usize) -> Option<Type> {
+fn find_type(
+    a: &Analysis,
+    file: crate::source::FileId,
+    module: usize,
+    name: &str,
+    offset: usize,
+) -> Option<Type> {
     for f in &a.program.functions {
         if f.span.file != file {
             continue;
         }
-        if let Some(l) = f.locals.iter().rev().find(|l| l.name == name && (l.span.start as usize) < offset) {
+        if let Some(l) = f
+            .locals
+            .iter()
+            .rev()
+            .find(|l| l.name == name && (l.span.start as usize) < offset)
+        {
             return Some(l.ty.clone());
         }
     }
@@ -800,21 +1057,27 @@ fn signature(a: &Analysis, file: crate::source::FileId, text: &str, offset: usiz
     }
     let Some(open) = open else { return Json::Null };
     let name_end = open;
-    let name_start = before[..name_end].rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':')).map_or(0, |i| i + 1);
+    let name_start = before[..name_end]
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+        .map_or(0, |i| i + 1);
     let callee = &before[name_start..name_end];
     let last = callee.rsplit("::").next().unwrap_or("");
     // Resolve through refs at that position.
     let def = a
         .refs
         .iter()
-        .filter(|(s, _)| s.file == file && s.start as usize >= name_start && s.end as usize <= name_end)
+        .filter(|(s, _)| {
+            s.file == file && s.start as usize >= name_start && s.end as usize <= name_end
+        })
         .map(|(_, d)| *d)
         .last()
         .or_else(|| {
             let module = a.modules.iter().position(|m| m.file == file).unwrap_or(0);
             a.modules[module].names.get(last).copied()
         });
-    let Some(Def::Fn(f)) = def else { return Json::Null };
+    let Some(Def::Fn(f)) = def else {
+        return Json::Null;
+    };
     let func = a.program.function(f);
     let params: Vec<String> = func
         .params
@@ -831,7 +1094,15 @@ fn signature(a: &Analysis, file: crate::source::FileId, text: &str, offset: usiz
             Json::Array(vec![obj([
                 ("label", label.into()),
                 ("documentation", doc_for(a, Def::Fn(f)).into()),
-                ("parameters", Json::Array(params.iter().map(|p| obj([("label", p.clone().into())])).collect())),
+                (
+                    "parameters",
+                    Json::Array(
+                        params
+                            .iter()
+                            .map(|p| obj([("label", p.clone().into())]))
+                            .collect(),
+                    ),
+                ),
             ])]),
         ),
         ("activeSignature", Json::Number(0.0)),
@@ -842,7 +1113,9 @@ fn signature(a: &Analysis, file: crate::source::FileId, text: &str, offset: usiz
 fn semantic_tokens(a: &Analysis, file: crate::source::FileId, ws: &Workspace) -> Json {
     let _ = ws;
     let m = a.modules.iter().find(|m| m.file == file);
-    let Some(m) = m else { return obj([("data", Json::Array(vec![]))]) };
+    let Some(m) = m else {
+        return obj([("data", Json::Array(vec![]))]);
+    };
     let src = a.sources.get(file);
     let mut refs: BTreeMap<u32, Def> = BTreeMap::new();
     for (s, d) in &a.refs {
@@ -880,10 +1153,21 @@ fn semantic_tokens(a: &Analysis, file: crate::source::FileId, ws: &Workspace) ->
                         Def::Module(_) => (0, 0),
                         Def::Struct(_) | Def::Enum(_) | Def::Range(_) | Def::Alias(_) => (1, 0),
                         Def::Fn(_) => (2, 0),
-                        Def::Global(g) => (3, if a.program.global(*g).is_const() { 2 } else { 0 }),
+                        Def::Global(g) => (
+                            3,
+                            if a.program.global(*g).is_const() {
+                                2
+                            } else {
+                                0
+                            },
+                        ),
                         Def::Local(f, l) => {
                             let func = a.program.function(*f);
-                            if func.params.contains(l) { (4, 0) } else { (3, 0) }
+                            if func.params.contains(l) {
+                                (4, 0)
+                            } else {
+                                (3, 0)
+                            }
                         }
                         Def::Variant(..) => (9, 0),
                         Def::Field(..) => (10, 0),
@@ -942,7 +1226,11 @@ fn document_symbols(a: &Analysis, file: crate::source::FileId) -> Json {
 
 /// Serve LSP over stdin/stdout with `Content-Length` framing, reading
 /// project files from disk.
-pub fn serve(input: &mut dyn std::io::BufRead, output: &mut dyn std::io::Write, loader: Option<Loader>) -> Result<(), String> {
+pub fn serve(
+    input: &mut dyn std::io::BufRead,
+    output: &mut dyn std::io::Write,
+    loader: Option<Loader>,
+) -> Result<(), String> {
     let mut server = LanguageServer::new();
     server.loader = loader;
     loop {
@@ -963,8 +1251,12 @@ pub fn serve(input: &mut dyn std::io::BufRead, output: &mut dyn std::io::Write, 
         let Some(n) = length else { continue };
         let mut body = vec![0; n];
         input.read_exact(&mut body).map_err(|e| e.to_string())?;
-        let Ok(text) = std::str::from_utf8(&body) else { continue };
-        let Ok(request) = Json::parse(text) else { continue };
+        let Ok(text) = std::str::from_utf8(&body) else {
+            continue;
+        };
+        let Ok(request) = Json::parse(text) else {
+            continue;
+        };
         for reply in server.handle(request) {
             let s = reply.stringify();
             write!(output, "Content-Length: {}\r\n\r\n{s}", s.len()).map_err(|e| e.to_string())?;
@@ -980,7 +1272,9 @@ pub fn serve(input: &mut dyn std::io::BufRead, output: &mut dyn std::io::Write, 
 pub fn serve_stdio() -> Result<(), String> {
     let loader: Loader = Box::new(|uri: &str| {
         let mut out = Vec::new();
-        let Some(path) = uri.strip_prefix("file://") else { return out };
+        let Some(path) = uri.strip_prefix("file://") else {
+            return out;
+        };
         let path = percent_decode(path);
         let p = std::path::Path::new(&path);
         if path.ends_with(".nst") {
@@ -989,11 +1283,19 @@ pub fn serve_stdio() -> Result<(), String> {
             }
             return out;
         }
-        fn walk(dir: &std::path::Path, base_uri: &str, base: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>, depth: usize) {
+        fn walk(
+            dir: &std::path::Path,
+            base_uri: &str,
+            base: &std::path::Path,
+            out: &mut Vec<(String, Vec<u8>)>,
+            depth: usize,
+        ) {
             if depth > 6 {
                 return;
             }
-            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
             for e in rd.flatten() {
                 let p = e.path();
                 let name = e.file_name().to_string_lossy().into_owned();
@@ -1002,9 +1304,15 @@ pub fn serve_stdio() -> Result<(), String> {
                 }
                 if p.is_dir() {
                     walk(&p, base_uri, base, out, depth + 1);
-                } else if std::fs::metadata(&p).map(|m| m.len() <= 1 << 20).unwrap_or(false) {
+                } else if std::fs::metadata(&p)
+                    .map(|m| m.len() <= 1 << 20)
+                    .unwrap_or(false)
+                {
                     if let (Ok(rel), Ok(b)) = (p.strip_prefix(base), std::fs::read(&p)) {
-                        out.push((format!("{base_uri}{}", rel.to_string_lossy().replace('\\', "/")), b));
+                        out.push((
+                            format!("{base_uri}{}", rel.to_string_lossy().replace('\\', "/")),
+                            b,
+                        ));
                     }
                 }
             }

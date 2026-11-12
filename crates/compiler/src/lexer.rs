@@ -147,7 +147,12 @@ pub fn lex(file: FileId, src: &str, diags: &mut Diagnostics) -> Lexed {
                 blank_before,
             });
         };
-        if c.is_ascii_alphabetic() || (c == b'_' && bytes.get(i + 1).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')) {
+        if c.is_ascii_alphabetic()
+            || (c == b'_'
+                && bytes
+                    .get(i + 1)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_'))
+        {
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }

@@ -52,7 +52,10 @@ pub fn load_project(path: &Path) -> Result<(Project, PathBuf), String> {
         (path.to_path_buf(), "main.nst".to_owned())
     } else {
         let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        (root, path.file_name().unwrap().to_string_lossy().into_owned())
+        (
+            root,
+            path.file_name().unwrap().to_string_lossy().into_owned(),
+        )
     };
     let mut project = Project {
         entry: entry.clone(),
@@ -73,11 +76,20 @@ pub fn load_project(path: &Path) -> Result<(Project, PathBuf), String> {
                 walk(&path, base, p, depth + 1)?;
                 continue;
             }
-            let rel = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
             if rel.ends_with(".nst") {
-                p.sources.insert(rel, fs::read_to_string(&path).map_err(|e| e.to_string())?);
-            } else if fs::metadata(&path).map(|m| m.len() <= 1 << 20).unwrap_or(false) {
-                p.assets.insert(rel, fs::read(&path).map_err(|e| e.to_string())?);
+                p.sources
+                    .insert(rel, fs::read_to_string(&path).map_err(|e| e.to_string())?);
+            } else if fs::metadata(&path)
+                .map(|m| m.len() <= 1 << 20)
+                .unwrap_or(false)
+            {
+                p.assets
+                    .insert(rel, fs::read(&path).map_err(|e| e.to_string())?);
             }
         }
         Ok(())
@@ -85,7 +97,10 @@ pub fn load_project(path: &Path) -> Result<(Project, PathBuf), String> {
     if path.is_dir() {
         walk(&root, &root, &mut project, 0)?;
     } else {
-        project.sources.insert(entry, fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?);
+        project.sources.insert(
+            entry,
+            fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?,
+        );
         // Assets next to a single file.
         if let Ok(entries) = fs::read_dir(&root) {
             for e in entries.flatten() {
@@ -107,7 +122,11 @@ fn build(args: &mut impl Iterator<Item = String>, write: bool) -> Result<(), Str
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-o" => output = Some(PathBuf::from(args.next().ok_or("-o needs a path")?)),
-            "--emit" => emit = Some(PathBuf::from(args.next().ok_or("--emit needs a directory")?)),
+            "--emit" => {
+                emit = Some(PathBuf::from(
+                    args.next().ok_or("--emit needs a directory")?,
+                ))
+            }
             "--no-opt" => optimize = false,
             a => return Err(format!("Unknown argument '{a}'")),
         }
@@ -120,7 +139,8 @@ fn build(args: &mut impl Iterator<Item = String>, write: bool) -> Result<(), Str
                 fs::create_dir_all(dir).map_err(|e| e.to_string())?;
                 for p in &f.passes {
                     let name = p.name.to_lowercase().replace(' ', "-");
-                    fs::write(dir.join(format!("{name}.txt")), &p.text).map_err(|e| e.to_string())?;
+                    fs::write(dir.join(format!("{name}.txt")), &p.text)
+                        .map_err(|e| e.to_string())?;
                 }
             }
             return Err(f.render());
@@ -132,7 +152,10 @@ fn build(args: &mut impl Iterator<Item = String>, write: bool) -> Result<(), Str
     if write {
         let target = output.unwrap_or_else(|| {
             if path.is_dir() {
-                path.join(format!("{}.nes", path.file_name().unwrap().to_string_lossy()))
+                path.join(format!(
+                    "{}.nes",
+                    path.file_name().unwrap().to_string_lossy()
+                ))
             } else {
                 path.with_extension("nes")
             }
@@ -188,12 +211,23 @@ fn execute(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--input" => {
-                for part in args.next().ok_or("--input needs button@frame,...")?.split(',') {
+                for part in args
+                    .next()
+                    .ok_or("--input needs button@frame,...")?
+                    .split(',')
+                {
                     let (b, f) = part.split_once('@').ok_or("expected button@frame")?;
                     script.push((f.parse().map_err(|_| "bad frame")?, buttons(b)));
                 }
             }
-            "--watch" => watch = args.next().ok_or("--watch needs names")?.split(',').map(str::to_owned).collect(),
+            "--watch" => {
+                watch = args
+                    .next()
+                    .ok_or("--watch needs names")?
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect()
+            }
             "--shot" => shot = Some(PathBuf::from(args.next().ok_or("--shot needs a path")?)),
             "--hold" => hold = buttons(&args.next().ok_or("--hold needs buttons")?),
             n => frames = n.parse().map_err(|_| format!("Unknown argument '{n}'"))?,
@@ -211,21 +245,36 @@ fn execute(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let mut emu = nested_runtime::Emulator::new(rom, 48000.0)?;
     let mut energy = 0.0f64;
     for f in 0..frames {
-        let extra = script.iter().filter(|(at, _)| *at == f).fold(0, |a, (_, b)| a | b);
+        let extra = script
+            .iter()
+            .filter(|(at, _)| *at == f)
+            .fold(0, |a, (_, b)| a | b);
         let audio = emu.frame(hold | extra)?;
         energy += audio.iter().map(|s| (*s as f64).abs()).sum::<f64>();
     }
-    println!("ran {frames} frames, PC ${:04X}, audio energy {energy:.1}", emu.pc());
+    println!(
+        "ran {frames} frames, PC ${:04X}, audio energy {energy:.1}",
+        emu.pc()
+    );
     for name in &watch {
-        match symbols.iter().find(|s| s.name == *name || s.name.ends_with(&format!("::{name}"))) {
+        match symbols
+            .iter()
+            .find(|s| s.name == *name || s.name.ends_with(&format!("::{name}")))
+        {
             Some(s) => {
-                let bytes: Vec<String> = (0..s.size.clamp(1, 16)).map(|i| format!("{:02X}", emu.read_ram(s.address + i as u16))).collect();
+                let bytes: Vec<String> = (0..s.size.clamp(1, 16))
+                    .map(|i| format!("{:02X}", emu.read_ram(s.address + i as u16)))
+                    .collect();
                 println!("  {} @ ${:04X}: {}", s.name, s.address, bytes.join(" "));
             }
             None => println!("  {name}: no such symbol"),
         }
     }
-    if let Some(s) = symbols.iter().rev().find(|s| s.kind.starts_with("fn") && s.address <= emu.pc()) {
+    if let Some(s) = symbols
+        .iter()
+        .rev()
+        .find(|s| s.kind.starts_with("fn") && s.address <= emu.pc())
+    {
         println!("  PC in {}", s.name);
     }
     if let Some(p) = shot {

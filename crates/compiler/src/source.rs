@@ -67,10 +67,7 @@ impl SourceFile {
             Err(l) => l - 1,
         };
         let start = self.line_starts[line];
-        let column = self.text[start..offset]
-            .chars()
-            .map(char::len_utf16)
-            .sum();
+        let column = self.text[start..offset].chars().map(char::len_utf16).sum();
         (line, column)
     }
     /// Byte offset of a zero-based line and UTF-16 column.

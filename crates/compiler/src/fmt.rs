@@ -36,7 +36,11 @@ enum Brace {
 pub fn format(src: &str, style: &Style) -> String {
     let mut diags = Diagnostics::default();
     let lexed = lex(FileId(0), src, &mut diags);
-    if diags.items.iter().any(|d| d.message.starts_with("Unterminated")) {
+    if diags
+        .items
+        .iter()
+        .any(|d| d.message.starts_with("Unterminated"))
+    {
         return src.to_owned();
     }
     let mut f = Formatter {
@@ -120,7 +124,9 @@ impl Formatter<'_> {
         }
     }
     fn emit_comments_before(&mut self, pos: u32) {
-        while self.next_comment < self.comments.len() && self.comments[self.next_comment].span.start < pos {
+        while self.next_comment < self.comments.len()
+            && self.comments[self.next_comment].span.start < pos
+        {
             let c = &self.comments[self.next_comment];
             self.next_comment += 1;
             if c.trailing && !self.line.trim().is_empty() {
@@ -133,7 +139,8 @@ impl Formatter<'_> {
                 }
                 // A blank line before a comment block is kept.
                 let before = &self.src[..c.span.start as usize];
-                let gap = before.trim_end_matches([' ', '\t']).ends_with("\n\n") || before.trim_end_matches([' ', '\t']).ends_with("\r\n\r\n");
+                let gap = before.trim_end_matches([' ', '\t']).ends_with("\n\n")
+                    || before.trim_end_matches([' ', '\t']).ends_with("\r\n\r\n");
                 if gap {
                     self.blank();
                 }
@@ -197,8 +204,12 @@ impl Formatter<'_> {
                 Tok::Punct("{") => {
                     let close = self.matching_brace(i);
                     let one_line = close.is_some_and(|c| {
-                        let inner = &self.src[t.span.end as usize..self.toks[c].span.start as usize];
-                        !inner.contains('\n') && !inner.contains('{') && !inner.trim().is_empty() && inner.len() < 64
+                        let inner =
+                            &self.src[t.span.end as usize..self.toks[c].span.start as usize];
+                        !inner.contains('\n')
+                            && !inner.contains('{')
+                            && !inner.trim().is_empty()
+                            && inner.len() < 64
                             && (prev_text == "=>" || self.expr_if == Some(self.parens.len()))
                     });
                     let kind = if self.pending_decl {
@@ -226,21 +237,32 @@ impl Formatter<'_> {
                             self.space();
                             self.push("{");
                             // An empty literal stays `{}`.
-                            if !matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::Punct("}"))) {
+                            if !matches!(
+                                self.toks.get(i + 1).map(|t| &t.tok),
+                                Some(Tok::Punct("}"))
+                            ) {
                                 self.push(" ");
                             }
                         }
                         _ => {
                             self.space();
-                            if matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::Punct("}"))) && kind == Brace::Block {
+                            if matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::Punct("}")))
+                                && kind == Brace::Block
+                            {
                                 // Empty block: `{}`.
                                 self.push("{}");
                                 i += 2;
                                 prev = Some(&self.toks[i - 1].tok);
                                 prev_text = "}".into();
                                 let next = self.toks.get(i).map(|t| &t.tok);
-                                if !matches!(next, Some(Tok::Punct(";" | "," | ")")) | Some(Tok::Ident(_))) || matches!(next, Some(Tok::Ident(w)) if w != "else") {
-                                    if !matches!(next, Some(Tok::Ident(w)) if w == "else") && !matches!(next, Some(Tok::Punct(_))) {
+                                if !matches!(
+                                    next,
+                                    Some(Tok::Punct(";" | "," | ")")) | Some(Tok::Ident(_))
+                                ) || matches!(next, Some(Tok::Ident(w)) if w != "else")
+                                {
+                                    if !matches!(next, Some(Tok::Ident(w)) if w == "else")
+                                        && !matches!(next, Some(Tok::Punct(_)))
+                                    {
                                         self.newline();
                                     }
                                 }
@@ -268,12 +290,21 @@ impl Formatter<'_> {
                             self.push("}");
                             if kind == Brace::Inline {
                                 let next = self.toks.get(i + 1).map(|t| &t.tok);
-                                if !matches!(next, Some(Tok::Ident(w)) if w == "else") && self.expr_if == Some(self.parens.len()) {
+                                if !matches!(next, Some(Tok::Ident(w)) if w == "else")
+                                    && self.expr_if == Some(self.parens.len())
+                                {
                                     self.expr_if = None;
                                 }
-                                let keep = matches!(next, Some(Tok::Punct(";" | ")" | "," | "}")) | Some(Tok::Eof))
-                                    || matches!(next, Some(Tok::Ident(w)) if w == "else");
-                                if !keep && matches!(self.braces.last(), Some(Brace::Block | Brace::Match | Brace::Inline) | None) {
+                                let keep = matches!(
+                                    next,
+                                    Some(Tok::Punct(";" | ")" | "," | "}")) | Some(Tok::Eof)
+                                ) || matches!(next, Some(Tok::Ident(w)) if w == "else");
+                                if !keep
+                                    && matches!(
+                                        self.braces.last(),
+                                        Some(Brace::Block | Brace::Match | Brace::Inline) | None
+                                    )
+                                {
                                     self.newline();
                                 }
                             }
@@ -281,11 +312,17 @@ impl Formatter<'_> {
                         _ => {
                             if !self.line.trim().is_empty() {
                                 // Last entry without a trailing separator.
-                                if matches!(kind, Brace::Decl) && !self.line.trim_end().ends_with(',') && !self.line.trim_end().ends_with(';') {
+                                if matches!(kind, Brace::Decl)
+                                    && !self.line.trim_end().ends_with(',')
+                                    && !self.line.trim_end().ends_with(';')
+                                {
                                     let in_cartridge = self.line.contains('=');
                                     self.push(if in_cartridge { ";" } else { "," });
                                 }
-                                if matches!(kind, Brace::Match) && !self.line.trim_end().ends_with(',') && !self.line.trim_end().ends_with('}') {
+                                if matches!(kind, Brace::Match)
+                                    && !self.line.trim_end().ends_with(',')
+                                    && !self.line.trim_end().ends_with('}')
+                                {
                                     self.push(",");
                                 }
                                 self.newline();
@@ -316,7 +353,9 @@ impl Formatter<'_> {
                 Tok::Punct(",") => {
                     self.push(",");
                     if self.parens.last() == Some(&'M') {
-                        let next_line = self.toks.get(i + 1).is_some_and(|n| self.src[t.span.end as usize..n.span.start as usize].contains('\n'));
+                        let next_line = self.toks.get(i + 1).is_some_and(|n| {
+                            self.src[t.span.end as usize..n.span.start as usize].contains('\n')
+                        });
                         if next_line {
                             self.newline();
                         } else {
@@ -333,10 +372,18 @@ impl Formatter<'_> {
                     }
                 }
                 Tok::Punct(p @ ("(" | "[")) => {
-                    let after_word = prev.is_some_and(is_word) || matches!(prev, Some(Tok::Punct(")" | "]")));
+                    let after_word =
+                        prev.is_some_and(is_word) || matches!(prev, Some(Tok::Punct(")" | "]")));
                     let after_keyword = matches!(prev, Some(Tok::Ident(w)) if matches!(w.as_str(), "if" | "while" | "return" | "in" | "match" | "let" | "var"));
                     if !after_word || after_keyword {
-                        if !(prev_text == "(" || prev_text == "[" || prev_text == "!" || prev_text == "~" || prev_text == "@" || prev_text == "&") || after_keyword {
+                        if !(prev_text == "("
+                            || prev_text == "["
+                            || prev_text == "!"
+                            || prev_text == "~"
+                            || prev_text == "@"
+                            || prev_text == "&")
+                            || after_keyword
+                        {
                             self.space();
                         }
                     }
@@ -344,7 +391,11 @@ impl Formatter<'_> {
                     // Multi-line array literals keep one row per source line.
                     let literal = *p == "[" && !after_word;
                     let close = self.matching(i);
-                    let multiline = literal && close.is_some_and(|c| self.src[t.span.end as usize..self.toks[c].span.start as usize].contains('\n'));
+                    let multiline = literal
+                        && close.is_some_and(|c| {
+                            self.src[t.span.end as usize..self.toks[c].span.start as usize]
+                                .contains('\n')
+                        });
                     if multiline {
                         self.parens.push('M');
                         self.newline();
@@ -372,7 +423,8 @@ impl Formatter<'_> {
                 Tok::Punct(p) => {
                     let p = *p;
                     let unary = matches!(p, "-" | "!" | "~" | "&")
-                        && (!(prev.is_some_and(is_word) || matches!(prev, Some(Tok::Punct(")" | "]" | "}"))))
+                        && (!(prev.is_some_and(is_word)
+                            || matches!(prev, Some(Tok::Punct(")" | "]" | "}"))))
                             || matches!(prev, Some(Tok::Ident(w)) if crate::lexer::KEYWORDS.contains(&w.as_str()) && w != "true" && w != "false"));
                     match p {
                         "." | "::" => {
@@ -410,8 +462,10 @@ impl Formatter<'_> {
                     }
                 }
                 Tok::Ident(w) => {
-                    let glued = matches!(prev_text.as_str(), "." | "::" | "@" | "(" | "[" | "!" | "~" | ".." | "..=")
-                        || (prev_text == "-" && self.line.ends_with('-'))
+                    let glued = matches!(
+                        prev_text.as_str(),
+                        "." | "::" | "@" | "(" | "[" | "!" | "~" | ".." | "..="
+                    ) || (prev_text == "-" && self.line.ends_with('-'))
                         || (prev_text == "&" && self.line.ends_with('&'));
                     if !glued {
                         self.space();
@@ -425,7 +479,11 @@ impl Formatter<'_> {
                         }
                         "if" => {
                             self.header = true;
-                            if matches!(prev_text.as_str(), "=" | "(" | "," | "=>" | "return" | "else") && (prev_text != "else" || self.expr_if.is_some()) {
+                            if matches!(
+                                prev_text.as_str(),
+                                "=" | "(" | "," | "=>" | "return" | "else"
+                            ) && (prev_text != "else" || self.expr_if.is_some())
+                            {
                                 self.expr_if = Some(self.parens.len());
                             }
                         }
@@ -434,8 +492,12 @@ impl Formatter<'_> {
                     }
                     // An attribute without arguments ends its line when it
                     // stands alone (`@inline` before `fn`).
-                    if prev_text == "@" && !matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::Punct("("))) {
-                        let next_line = self.toks.get(i + 1).is_some_and(|n| self.src[t.span.end as usize..n.span.start as usize].contains('\n'));
+                    if prev_text == "@"
+                        && !matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::Punct("(")))
+                    {
+                        let next_line = self.toks.get(i + 1).is_some_and(|n| {
+                            self.src[t.span.end as usize..n.span.start as usize].contains('\n')
+                        });
                         if next_line {
                             self.newline();
                         }
@@ -453,7 +515,9 @@ impl Formatter<'_> {
             // Attribute argument lists end their line too.
             if text == ")" && self.parens.is_empty() {
                 if let Some(open) = self.find_attr_start(i) {
-                    let next_line = self.toks.get(i + 1).is_some_and(|n| self.src[t.span.end as usize..n.span.start as usize].contains('\n'));
+                    let next_line = self.toks.get(i + 1).is_some_and(|n| {
+                        self.src[t.span.end as usize..n.span.start as usize].contains('\n')
+                    });
                     if open && next_line {
                         self.newline();
                     }
@@ -465,7 +529,6 @@ impl Formatter<'_> {
                 prev_text = "}".into();
             }
             i += 1;
-
         }
         if !self.line.trim().is_empty() {
             self.newline();

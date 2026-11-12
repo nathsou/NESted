@@ -224,7 +224,9 @@ impl Checker<'_> {
                     BinOp::Add => fits(alo + clo, ahi + chi),
                     BinOp::Sub => fits(alo - chi, ahi - clo),
                     BinOp::Mul if alo >= 0 && clo >= 0 => fits(alo * clo, ahi * chi),
-                    BinOp::Shl if alo >= 0 && clo == chi && clo < 16 => fits(alo << clo, ahi << clo),
+                    BinOp::Shl if alo >= 0 && clo == chi && clo < 16 => {
+                        fits(alo << clo, ahi << clo)
+                    }
                     BinOp::Or if !signed && alo >= 0 && clo >= 0 => {
                         let bits = 64 - (ahi | chi).leading_zeros();
                         fits(alo.max(clo), (1i64 << bits) - 1)
@@ -341,11 +343,7 @@ impl Checker<'_> {
         let mismatch = |c: &mut Self, e: &Expr| {
             c.diags.error(
                 span,
-                format!(
-                    "Expected {}, found {}",
-                    c.ty_name(target),
-                    c.ty_name(&e.ty)
-                ),
+                format!("Expected {}, found {}", c.ty_name(target), c.ty_name(&e.ty)),
             );
             err(span)
         };
@@ -404,14 +402,19 @@ impl Checker<'_> {
                 let to = (**to).clone();
                 let from = (**from).clone();
                 let kind = match e.kind {
-                    ExprKind::Array(items) => ExprKind::Array(
-                        items.into_iter().map(|x| self.coerce(s, x, &to)).collect(),
-                    ),
-                    ExprKind::Repeat(x, n) => ExprKind::Repeat(Box::new(self.coerce(s, *x, &to)), n),
-                    ExprKind::Const(v) if from == Type::Int || self.types.base(&from) == self.types.base(&to) => {
+                    ExprKind::Array(items) => {
+                        ExprKind::Array(items.into_iter().map(|x| self.coerce(s, x, &to)).collect())
+                    }
+                    ExprKind::Repeat(x, n) => {
+                        ExprKind::Repeat(Box::new(self.coerce(s, *x, &to)), n)
+                    }
+                    ExprKind::Const(v)
+                        if from == Type::Int || self.types.base(&from) == self.types.base(&to) =>
+                    {
                         let (lo, hi) = self.types.bounds(&to);
                         if v.items().iter().any(|x| x.int() < lo || x.int() > hi) {
-                            self.diags.error(span, format!("A value does not fit {}", self.ty_name(&to)));
+                            self.diags
+                                .error(span, format!("A value does not fit {}", self.ty_name(&to)));
                             return err(span);
                         }
                         ExprKind::Const(v)
@@ -426,7 +429,9 @@ impl Checker<'_> {
             (Type::Array(from, _), Type::Slice(to)) => {
                 let fb = self.types.base(from);
                 let tb = self.types.base(to);
-                let compatible = **from == Type::Int || from == to || (fb == tb && !matches!(**to, Type::Range(_) | Type::Enum(_)));
+                let compatible = **from == Type::Int
+                    || from == to
+                    || (fb == tb && !matches!(**to, Type::Range(_) | Type::Enum(_)));
                 if !compatible {
                     return mismatch(self, &e);
                 }
@@ -434,7 +439,10 @@ impl Checker<'_> {
                     ExprKind::Global(g) if self.globals[g.0 as usize].is_const() => *g,
                     ExprKind::Const(v) => self.intern_bytes(v.clone(), (**to).clone(), span),
                     _ => {
-                        self.diags.error(span, "Slices view constant ROM arrays; this array is not constant");
+                        self.diags.error(
+                            span,
+                            "Slices view constant ROM arrays; this array is not constant",
+                        );
                         return err(span);
                     }
                 };
@@ -508,7 +516,11 @@ impl Checker<'_> {
 
     fn fold(&self, op: BinOp, a: i64, b: i64, t: &Type) -> Option<i64> {
         let signed = self.types.signed(t) || *t == Type::Int;
-        let bits = if *t == Type::Int { 63 } else { self.types.size(t) as u32 * 8 };
+        let bits = if *t == Type::Int {
+            63
+        } else {
+            self.types.size(t) as u32 * 8
+        };
         let v = match op {
             BinOp::Add => a + b,
             BinOp::Sub => a - b,
@@ -562,7 +574,11 @@ impl Checker<'_> {
             BinOp::LogicAnd => (a != 0 && b != 0) as i64,
             BinOp::LogicOr => (a != 0 || b != 0) as i64,
         };
-        Some(if *t == Type::Int { v } else { self.types.wrap(t, v) })
+        Some(if *t == Type::Int {
+            v
+        } else {
+            self.types.wrap(t, v)
+        })
     }
 
     // -------------------------------------------------------- expressions
@@ -614,7 +630,10 @@ impl Checker<'_> {
                     }
                     op => {
                         if !self.types.is_integer(&x.ty) {
-                            self.diags.error(span, format!("'{op}' needs an integer, found {}", self.ty_name(&x.ty)));
+                            self.diags.error(
+                                span,
+                                format!("'{op}' needs an integer, found {}", self.ty_name(&x.ty)),
+                            );
                             return err(span);
                         }
                         let t = match &x.ty {
@@ -624,7 +643,15 @@ impl Checker<'_> {
                         let x = self.coerce(s, x, &t);
                         if let Some(n) = x.constant() {
                             let v = if op == "-" { -n } else { !n };
-                            return int(if t == Type::Int { v } else { self.types.wrap(&t, v) }, t, span);
+                            return int(
+                                if t == Type::Int {
+                                    v
+                                } else {
+                                    self.types.wrap(&t, v)
+                                },
+                                t,
+                                span,
+                            );
                         }
                         let u = if op == "-" { UnOp::Neg } else { UnOp::BitNot };
                         Expr::new(ExprKind::Unary(u, Box::new(x)), t, span)
@@ -657,7 +684,10 @@ impl Checker<'_> {
                             }
                             None => {
                                 let name = def.name.clone();
-                                self.diags.error(field.span, format!("'{name}' has no field '{}'", field.name));
+                                self.diags.error(
+                                    field.span,
+                                    format!("'{name}' has no field '{}'", field.name),
+                                );
                                 err(span)
                             }
                         }
@@ -680,7 +710,8 @@ impl Checker<'_> {
                     return err(span);
                 };
                 let Def::Struct(sid) = def else {
-                    self.diags.error(path.span, format!("'{}' is not a struct", path.text()));
+                    self.diags
+                        .error(path.span, format!("'{}' is not a struct", path.text()));
                     return err(span);
                 };
                 self.ensure(def);
@@ -693,10 +724,13 @@ impl Checker<'_> {
                             let v = self.expr(s, value, Some(&defs[i].1));
                             let v = self.coerce(s, v, &defs[i].1);
                             if values[i].replace(v).is_some() {
-                                self.diags.error(name.span, format!("Field '{}' is repeated", name.name));
+                                self.diags
+                                    .error(name.span, format!("Field '{}' is repeated", name.name));
                             }
                         }
-                        None => self.diags.error(name.span, format!("No field '{}'", name.name)),
+                        None => self
+                            .diags
+                            .error(name.span, format!("No field '{}'", name.name)),
                     }
                 }
                 let missing: Vec<String> = defs
@@ -706,7 +740,8 @@ impl Checker<'_> {
                     .map(|(f, _)| f.0.clone())
                     .collect();
                 if !missing.is_empty() {
-                    self.diags.error(span, format!("Missing fields: {}", missing.join(", ")));
+                    self.diags
+                        .error(span, format!("Missing fields: {}", missing.join(", ")));
                     return err(span);
                 }
                 let values: Vec<Expr> = values.into_iter().map(Option::unwrap).collect();
@@ -777,12 +812,17 @@ impl Checker<'_> {
                     return err(span);
                 };
                 if !(1..=65535).contains(&n) {
-                    self.diags.error(count.span, "Repeat count must be between 1 and 65535");
+                    self.diags
+                        .error(count.span, "Repeat count must be between 1 and 65535");
                     return err(span);
                 }
                 let ty = Type::Array(Box::new(elem), n as u32);
                 if let ExprKind::Const(v) = &x.kind {
-                    return Expr::new(ExprKind::Const(Value::aggregate(vec![v.clone(); n as usize])), ty, span);
+                    return Expr::new(
+                        ExprKind::Const(Value::aggregate(vec![v.clone(); n as usize])),
+                        ty,
+                        span,
+                    );
                 }
                 Expr::new(ExprKind::Repeat(Box::new(x), n as u32), ty, span)
             }
@@ -835,7 +875,10 @@ impl Checker<'_> {
             }
             AK::Asm(inputs, body, body_span) => self.asm(s, inputs, body, *body_span, span),
             AK::Range(..) => {
-                self.diags.error(span, "A range is only valid in 'for' loops, patterns and asset()");
+                self.diags.error(
+                    span,
+                    "A range is only valid in 'for' loops, patterns and asset()",
+                );
                 err(span)
             }
         }
@@ -891,17 +934,27 @@ impl Checker<'_> {
                 int(v, Type::Enum(e), span)
             }
             Def::Fn(_) => {
-                self.diags.error(span, "Functions are not values; call it with (...)");
+                self.diags
+                    .error(span, "Functions are not values; call it with (...)");
                 err(span)
             }
             _ => {
-                self.diags.error(span, format!("'{}' is not a value", p.text()));
+                self.diags
+                    .error(span, format!("'{}' is not a value", p.text()));
                 err(span)
             }
         }
     }
 
-    fn binary(&mut self, s: &mut Scope, op: &str, a: &ast::Expr, b: &ast::Expr, expected: Option<&Type>, span: Span) -> Expr {
+    fn binary(
+        &mut self,
+        s: &mut Scope,
+        op: &str,
+        a: &ast::Expr,
+        b: &ast::Expr,
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Expr {
         let op = BinOp::from_str(op).unwrap();
         if op.is_logic() {
             let x = self.expr(s, a, Some(&Type::Bool));
@@ -920,7 +973,11 @@ impl Checker<'_> {
             if let (Some(p), Some(q)) = (x.constant(), y.constant()) {
                 return int(self.fold(op, p, q, &Type::Bool).unwrap(), Type::Bool, span);
             }
-            return Expr::new(ExprKind::Binary(op, Box::new(x), Box::new(y)), Type::Bool, span);
+            return Expr::new(
+                ExprKind::Binary(op, Box::new(x), Box::new(y)),
+                Type::Bool,
+                span,
+            );
         }
         let arith_expected = if op.is_compare() { None } else { expected };
         let x = self.expr(s, a, arith_expected);
@@ -968,7 +1025,11 @@ impl Checker<'_> {
                 }
                 t if self.types.size(t) == 1 => {
                     let t = self.types.base(t);
-                    if t == Type::U8 { y } else { Expr::new(ExprKind::Cast(Box::new(y)), Type::U8, span) }
+                    if t == Type::U8 {
+                        y
+                    } else {
+                        Expr::new(ExprKind::Cast(Box::new(y)), Type::U8, span)
+                    }
                 }
                 _ => Expr::new(ExprKind::Cast(Box::new(y)), Type::U8, span),
             };
@@ -985,18 +1046,32 @@ impl Checker<'_> {
             if let (Some(p), Some(q)) = (x.constant(), y.constant()) {
                 return int(self.fold(op, p, q, &Type::Int).unwrap(), Type::Bool, span);
             }
-            return Expr::new(ExprKind::Binary(op, Box::new(x), Box::new(y)), Type::Bool, span);
+            return Expr::new(
+                ExprKind::Binary(op, Box::new(x), Box::new(y)),
+                Type::Bool,
+                span,
+            );
         }
-        if x.ty == Type::Bool && y.ty == Type::Bool && matches!(op, BinOp::And | BinOp::Or | BinOp::Xor) {
+        if x.ty == Type::Bool
+            && y.ty == Type::Bool
+            && matches!(op, BinOp::And | BinOp::Or | BinOp::Xor)
+        {
             if let (Some(p), Some(q)) = (x.constant(), y.constant()) {
                 return int(self.fold(op, p, q, &Type::U8).unwrap(), Type::Bool, span);
             }
-            return Expr::new(ExprKind::Binary(op, Box::new(x), Box::new(y)), Type::Bool, span);
+            return Expr::new(
+                ExprKind::Binary(op, Box::new(x), Box::new(y)),
+                Type::Bool,
+                span,
+            );
         }
         for v in [&x, &y] {
             if !self.types.is_integer(&v.ty) {
                 let t = self.ty_name(&v.ty);
-                self.diags.error(v.span, format!("'{}' needs integer operands, found {t}", op.symbol()));
+                self.diags.error(
+                    v.span,
+                    format!("'{}' needs integer operands, found {t}", op.symbol()),
+                );
                 return err(span);
             }
         }
@@ -1008,7 +1083,11 @@ impl Checker<'_> {
             self.diags.error(y.span, "Division by zero");
             return err(span);
         }
-        let rt = if op.is_compare() { Type::Bool } else { t.clone() };
+        let rt = if op.is_compare() {
+            Type::Bool
+        } else {
+            t.clone()
+        };
         if let (Some(p), Some(q)) = (x.constant(), y.constant()) {
             if let Some(v) = self.fold(op, p, q, &t) {
                 return int(v, rt, span);
@@ -1024,7 +1103,11 @@ impl Checker<'_> {
         if !self.types.is_scalar(&x.ty) || !self.types.is_scalar(&target) {
             self.diags.error(
                 span,
-                format!("Cannot convert {} to {}", self.ty_name(&x.ty), self.ty_name(&target)),
+                format!(
+                    "Cannot convert {} to {}",
+                    self.ty_name(&x.ty),
+                    self.ty_name(&target)
+                ),
             );
             return err(span);
         }
@@ -1032,13 +1115,21 @@ impl Checker<'_> {
             if x.ty == Type::Bool {
                 return x;
             }
-            let t = if x.ty == Type::Int { Type::U16 } else { self.types.base(&x.ty) };
+            let t = if x.ty == Type::Int {
+                Type::U16
+            } else {
+                self.types.base(&x.ty)
+            };
             if let Some(n) = x.constant() {
                 return int((n != 0) as i64, Type::Bool, span);
             }
             let x = self.coerce(s, x, &t);
             let zero = int(0, t, span);
-            return Expr::new(ExprKind::Binary(BinOp::Ne, Box::new(x), Box::new(zero)), Type::Bool, span);
+            return Expr::new(
+                ExprKind::Binary(BinOp::Ne, Box::new(x), Box::new(zero)),
+                Type::Bool,
+                span,
+            );
         }
         if !unchecked {
             if let Type::Range(_) = target {
@@ -1056,8 +1147,15 @@ impl Checker<'_> {
         if let Some(n) = x.constant() {
             let v = self.types.wrap(&target, n);
             if let Type::Enum(e) = &target {
-                if !self.types.enums[e.0 as usize].variants.iter().any(|v2| v2.1 == v) {
-                    self.diags.error(span, format!("{v} is not a value of {}", self.ty_name(&target)));
+                if !self.types.enums[e.0 as usize]
+                    .variants
+                    .iter()
+                    .any(|v2| v2.1 == v)
+                {
+                    self.diags.error(
+                        span,
+                        format!("{v} is not a value of {}", self.ty_name(&target)),
+                    );
                 }
             }
             return int(v, target, span);
@@ -1093,14 +1191,21 @@ impl Checker<'_> {
         }
         let i = if i.ty == Type::Int {
             let n = i.constant().unwrap_or(0);
-            let t = if (0..=255).contains(&n) { Type::U8 } else { Type::U16 };
+            let t = if (0..=255).contains(&n) {
+                Type::U8
+            } else {
+                Type::U16
+            };
             if n < 0 {
                 self.diags.error(i.span, "Negative index");
                 return err(span);
             }
             self.coerce(s, i, &t)
         } else if self.types.signed(&i.ty) {
-            self.diags.error(i.span, format!("Index must be unsigned; found {}", self.ty_name(&i.ty)));
+            self.diags.error(
+                i.span,
+                format!("Index must be unsigned; found {}", self.ty_name(&i.ty)),
+            );
             return err(span);
         } else {
             i
@@ -1110,7 +1215,8 @@ impl Checker<'_> {
             Some(n) => {
                 if let Some(k) = i.constant() {
                     if k >= n as i64 {
-                        self.diags.error(i.span, format!("Index {k} is out of bounds for length {n}"));
+                        self.diags
+                            .error(i.span, format!("Index {k} is out of bounds for length {n}"));
                         return err(span);
                     }
                 } else if !raw && (lo < 0 || hi >= n as i64) {
@@ -1124,7 +1230,9 @@ impl Checker<'_> {
             }
             None => {
                 let proven = match (&i.kind, &b.kind) {
-                    (ExprKind::Local(ix), ExprKind::Local(sl)) => s.slice_facts.contains(&(*ix, *sl)),
+                    (ExprKind::Local(ix), ExprKind::Local(sl)) => {
+                        s.slice_facts.contains(&(*ix, *sl))
+                    }
                     _ => false,
                 };
                 if !raw && !proven {
@@ -1143,9 +1251,17 @@ impl Checker<'_> {
         Expr::new(ExprKind::Index(Box::new(b), Box::new(i), raw), elem, span)
     }
 
-    fn call(&mut self, s: &mut Scope, callee: &ast::Expr, args: &[ast::Expr], expected: Option<&Type>, span: Span) -> Expr {
+    fn call(
+        &mut self,
+        s: &mut Scope,
+        callee: &ast::Expr,
+        args: &[ast::Expr],
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Expr {
         let AK::Path(path) = &callee.kind else {
-            self.diags.error(callee.span, "Only named functions can be called");
+            self.diags
+                .error(callee.span, "Only named functions can be called");
             return err(span);
         };
         if path.is_single() && s.lookup(&path.segments[0].name).is_some() {
@@ -1178,7 +1294,10 @@ impl Checker<'_> {
         };
         let arity = |c: &mut Self, n: usize| {
             if args.len() != n {
-                c.diags.error(span, format!("Expected {n} argument(s), found {}", args.len()));
+                c.diags.error(
+                    span,
+                    format!("Expected {n} argument(s), found {}", args.len()),
+                );
                 false
             } else {
                 true
@@ -1205,17 +1324,29 @@ impl Checker<'_> {
                         return err(span);
                     }
                     let x = self.expr(s, &args[0], Some(&Type::U16));
-                    let t = if x.ty == Type::I16 { Type::I16 } else { Type::U16 };
+                    let t = if x.ty == Type::I16 {
+                        Type::I16
+                    } else {
+                        Type::U16
+                    };
                     let x = if self.types.size(&x.ty) == 1 && x.ty != Type::Int {
                         self.cast(s, x, Type::U16, span, true)
                     } else {
                         self.coerce(s, x, &t)
                     };
                     if let Some(n) = x.constant() {
-                        let v = if name == "lo" { n & 255 } else { (n >> 8) & 255 };
+                        let v = if name == "lo" {
+                            n & 255
+                        } else {
+                            (n >> 8) & 255
+                        };
                         return int(v, Type::U8, span);
                     }
-                    let i = if name == "lo" { Intrinsic::Lo } else { Intrinsic::Hi };
+                    let i = if name == "lo" {
+                        Intrinsic::Lo
+                    } else {
+                        Intrinsic::Hi
+                    };
                     Expr::new(ExprKind::Intrinsic(i, vec![x]), Type::U8, span)
                 }
                 "len" => {
@@ -1231,12 +1362,17 @@ impl Checker<'_> {
                                     return int(*n as i64, Type::Int, span);
                                 }
                             }
-                            Expr::new(ExprKind::Intrinsic(Intrinsic::SliceLen, vec![x]), Type::U16, span)
+                            Expr::new(
+                                ExprKind::Intrinsic(Intrinsic::SliceLen, vec![x]),
+                                Type::U16,
+                                span,
+                            )
                         }
                         Type::Error => err(span),
                         t => {
                             let t = self.ty_name(t);
-                            self.diags.error(span, format!("len() needs an array or slice, found {t}"));
+                            self.diags
+                                .error(span, format!("len() needs an array or slice, found {t}"));
                             err(span)
                         }
                     }
@@ -1248,7 +1384,11 @@ impl Checker<'_> {
                     s.has_asm = true;
                     let a = self.expr(s, &args[0], Some(&Type::U16));
                     let a = self.coerce(s, a, &Type::U16);
-                    Expr::new(ExprKind::Intrinsic(Intrinsic::Peek, vec![a]), Type::U8, span)
+                    Expr::new(
+                        ExprKind::Intrinsic(Intrinsic::Peek, vec![a]),
+                        Type::U8,
+                        span,
+                    )
                 }
                 "poke" => {
                     if !arity(self, 2) {
@@ -1258,12 +1398,17 @@ impl Checker<'_> {
                     let a = self.expr(s, &args[0], Some(&Type::U16));
                     let a = self.coerce(s, a, &Type::U16);
                     let v = self.expr(s, &args[1], Some(&Type::U8));
-                    let v = if self.types.size(&v.ty) == 1 && v.ty != Type::Int && v.ty != Type::U8 {
+                    let v = if self.types.size(&v.ty) == 1 && v.ty != Type::Int && v.ty != Type::U8
+                    {
                         self.cast(s, v, Type::U8, span, true)
                     } else {
                         self.coerce(s, v, &Type::U8)
                     };
-                    Expr::new(ExprKind::Intrinsic(Intrinsic::Poke, vec![a, v]), Type::Void, span)
+                    Expr::new(
+                        ExprKind::Intrinsic(Intrinsic::Poke, vec![a, v]),
+                        Type::Void,
+                        span,
+                    )
                 }
                 "asset" => self.asset(s, args, expected, span),
                 "addr" => {
@@ -1272,9 +1417,11 @@ impl Checker<'_> {
                     }
                     let x = self.expr(s, &args[0], None);
                     match (&x.kind, &x.ty) {
-                        (_, Type::Slice(_)) | (ExprKind::Global(_), _) => {
-                            Expr::new(ExprKind::Intrinsic(Intrinsic::Addr, vec![x]), Type::U16, span)
-                        }
+                        (_, Type::Slice(_)) | (ExprKind::Global(_), _) => Expr::new(
+                            ExprKind::Intrinsic(Intrinsic::Addr, vec![x]),
+                            Type::U16,
+                            span,
+                        ),
                         _ if x.ty.is_error() => err(span),
                         _ => {
                             self.diags.error(span, "addr() takes a global or a slice");
@@ -1296,7 +1443,8 @@ impl Checker<'_> {
                 self.cast(s, x, Type::Range(r), span, false)
             }
             Def::Enum(_) => {
-                self.diags.error(span, "Convert integers to enums with 'x as Enum'");
+                self.diags
+                    .error(span, "Convert integers to enums with 'x as Enum'");
                 err(span)
             }
             Def::Fn(f) => {
@@ -1322,13 +1470,20 @@ impl Checker<'_> {
                 Expr::new(ExprKind::Call(f, out), result, span)
             }
             _ => {
-                self.diags.error(callee.span, format!("'{}' is not a function", path.text()));
+                self.diags
+                    .error(callee.span, format!("'{}' is not a function", path.text()));
                 err(span)
             }
         }
     }
 
-    fn asset(&mut self, s: &mut Scope, args: &[ast::Expr], expected: Option<&Type>, span: Span) -> Expr {
+    fn asset(
+        &mut self,
+        s: &mut Scope,
+        args: &[ast::Expr],
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Expr {
         let path = match args.first().map(|a| &a.kind) {
             Some(AK::Str(p)) => String::from_utf8_lossy(p).to_string(),
             _ => {
@@ -1337,12 +1492,16 @@ impl Checker<'_> {
             }
         };
         let Some(bytes) = self.asset_bytes(&path) else {
-            self.diags.error(args[0].span, format!("Missing asset '{path}'"));
+            self.diags
+                .error(args[0].span, format!("Missing asset '{path}'"));
             return err(span);
         };
         let (start, end) = match args.get(1) {
             None => (0, bytes.len() as i64),
-            Some(ast::Expr { kind: AK::Range(a, b, inclusive), .. }) => {
+            Some(ast::Expr {
+                kind: AK::Range(a, b, inclusive),
+                ..
+            }) => {
                 let a = self.const_int(s.module, a).unwrap_or(0);
                 let b = self.const_int(s.module, b).unwrap_or(0) + *inclusive as i64;
                 (a, b)
@@ -1360,7 +1519,10 @@ impl Checker<'_> {
         if start < 0 || end > bytes.len() as i64 || start >= end {
             self.diags.error(
                 span,
-                format!("Range {start}..{end} is outside asset '{path}' ({} bytes)", bytes.len()),
+                format!(
+                    "Range {start}..{end} is outside asset '{path}' ({} bytes)",
+                    bytes.len()
+                ),
             );
             return err(span);
         }
@@ -1391,17 +1553,33 @@ impl Checker<'_> {
                 if data.len() != self.types.size(t) {
                     self.diags.error(
                         span,
-                        format!("Asset range has {} bytes; {} needs {}", data.len(), self.ty_name(t), self.types.size(t)),
+                        format!(
+                            "Asset range has {} bytes; {} needs {}",
+                            data.len(),
+                            self.ty_name(t),
+                            self.types.size(t)
+                        ),
                     );
                     return err(span);
                 }
             }
         }
         let v = Value::aggregate(data.iter().map(|b| Value::Int(*b as i64)).collect());
-        Expr::new(ExprKind::Const(v), Type::Array(Box::new(Type::U8), data.len() as u32), span)
+        Expr::new(
+            ExprKind::Const(v),
+            Type::Array(Box::new(Type::U8), data.len() as u32),
+            span,
+        )
     }
 
-    fn asm(&mut self, s: &mut Scope, inputs: &[ast::AsmInput], body: &str, body_span: Span, span: Span) -> Expr {
+    fn asm(
+        &mut self,
+        s: &mut Scope,
+        inputs: &[ast::AsmInput],
+        body: &str,
+        body_span: Span,
+        span: Span,
+    ) -> Expr {
         s.has_asm = true;
         let mut out_inputs = Vec::new();
         for i in inputs {
@@ -1410,7 +1588,8 @@ impl Checker<'_> {
                 "x" => 'x',
                 "y" => 'y',
                 _ => {
-                    self.diags.error(i.register.span, "Assembly inputs bind a, x or y");
+                    self.diags
+                        .error(i.register.span, "Assembly inputs bind a, x or y");
                     continue;
                 }
             };
@@ -1418,7 +1597,11 @@ impl Checker<'_> {
             let v = if v.ty == Type::Int {
                 self.coerce(s, v, &Type::U8)
             } else if self.types.size(&v.ty) == 1 {
-                if v.ty == Type::U8 { v } else { Expr::new(ExprKind::Cast(Box::new(v)), Type::U8, span) }
+                if v.ty == Type::U8 {
+                    v
+                } else {
+                    Expr::new(ExprKind::Cast(Box::new(v)), Type::U8, span)
+                }
             } else {
                 self.diags.error(v.span, "Assembly inputs are bytes");
                 v
@@ -1441,7 +1624,10 @@ impl Checker<'_> {
             let nspan = Span::new(body_span.file, offset + open + 1, offset + open + close);
             let segments: Vec<ast::Ident> = name
                 .split("::")
-                .map(|n| ast::Ident { name: n.trim().to_owned(), span: nspan })
+                .map(|n| ast::Ident {
+                    name: n.trim().to_owned(),
+                    span: nspan,
+                })
                 .collect();
             let r = if segments.len() == 1 && s.lookup(name).is_some() {
                 let id = s.lookup(name).unwrap();
@@ -1450,20 +1636,28 @@ impl Checker<'_> {
                 }
                 Some(AsmRef::Local(id))
             } else {
-                let path = ast::Path { segments, span: nspan };
+                let path = ast::Path {
+                    segments,
+                    span: nspan,
+                };
                 match self.resolve_path(s.module, &path, true) {
                     Some(d @ Def::Global(g)) => {
                         self.ensure(d);
                         let gl = &self.globals[g.0 as usize];
                         match (&gl.kind, &gl.value) {
-                            (GlobalKind::Const, Value::Int(n)) if self.types.is_scalar(&gl.ty) => Some(AsmRef::Const(*n)),
+                            (GlobalKind::Const, Value::Int(n)) if self.types.is_scalar(&gl.ty) => {
+                                Some(AsmRef::Const(*n))
+                            }
                             _ => Some(AsmRef::Global(g)),
                         }
                     }
                     Some(Def::Fn(f)) => Some(AsmRef::Fn(f)),
-                    Some(Def::Variant(e, i)) => Some(AsmRef::Const(self.types.enums[e.0 as usize].variants[i as usize].1)),
+                    Some(Def::Variant(e, i)) => Some(AsmRef::Const(
+                        self.types.enums[e.0 as usize].variants[i as usize].1,
+                    )),
                     Some(_) => {
-                        self.diags.error(nspan, format!("'{name}' cannot be used in assembly"));
+                        self.diags
+                            .error(nspan, format!("'{name}' cannot be used in assembly"));
                         None
                     }
                     None => None,
@@ -1484,7 +1678,8 @@ impl Checker<'_> {
             }
         }
         if let Err((line, message)) = crate::asm::validate(&text) {
-            self.diags.error(body_span, format!("Assembly line {line}: {message}"));
+            self.diags
+                .error(body_span, format!("Assembly line {line}: {message}"));
         }
         Expr::new(
             ExprKind::Asm(Box::new(AsmBlock {
@@ -1596,7 +1791,8 @@ impl Checker<'_> {
             let body = match &arm.body {
                 ArmBody::Expr(e) => self.expr(s, e, expected),
                 ArmBody::Block(b) => {
-                    self.diags.error(b.span, "Use block arms only in statement matches");
+                    self.diags
+                        .error(b.span, "Use block arms only in statement matches");
                     err(b.span)
                 }
             };
@@ -1634,19 +1830,32 @@ impl Checker<'_> {
         if !missing.is_empty() {
             self.diags.error(
                 span,
-                format!("Match does not cover {}; add the missing cases or '_'", missing.join(", ")),
+                format!(
+                    "Match does not cover {}; add the missing cases or '_'",
+                    missing.join(", ")
+                ),
             );
         }
     }
 
-    fn unify_arms(&mut self, s: &mut Scope, arms: Vec<Arm<Expr>>, expected: Option<&Type>, span: Span) -> Result<(Vec<Arm<Expr>>, Type), ()> {
+    fn unify_arms(
+        &mut self,
+        s: &mut Scope,
+        arms: Vec<Arm<Expr>>,
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Result<(Vec<Arm<Expr>>, Type), ()> {
         let t = match expected.filter(|t| **t != Type::Void) {
             Some(t) => t.clone(),
             None => {
-                let concrete = arms.iter().find(|a| a.body.ty != Type::Int && a.body.ty != Type::Never);
+                let concrete = arms
+                    .iter()
+                    .find(|a| a.body.ty != Type::Int && a.body.ty != Type::Never);
                 match concrete {
                     Some(a) => match &a.body.ty {
-                        Type::Range(_) if arms.iter().any(|b| b.body.ty != a.body.ty) => self.types.base(&a.body.ty),
+                        Type::Range(_) if arms.iter().any(|b| b.body.ty != a.body.ty) => {
+                            self.types.base(&a.body.ty)
+                        }
                         t => t.clone(),
                     },
                     None => {
@@ -1698,7 +1907,9 @@ impl Checker<'_> {
                 let var = |e: &Expr| {
                     // A range viewed as its base type is the same variable.
                     let e = match &e.kind {
-                        ExprKind::Cast(x) if self.types.base(&x.ty) == self.types.base(&e.ty) => x.as_ref(),
+                        ExprKind::Cast(x) if self.types.base(&x.ty) == self.types.base(&e.ty) => {
+                            x.as_ref()
+                        }
                         _ => e,
                     };
                     match &e.kind {
@@ -1745,7 +1956,8 @@ impl Checker<'_> {
                             return;
                         }
                         if let ExprKind::Local(n) = &k.kind {
-                            if let Some((_, sl)) = s.len_alias.iter().find(|(a, _)| a == n).copied() {
+                            if let Some((_, sl)) = s.len_alias.iter().find(|(a, _)| a == n).copied()
+                            {
                                 if op == BinOp::Lt {
                                     s.slice_facts.push((id, sl));
                                 }
@@ -1794,7 +2006,8 @@ impl Checker<'_> {
         let mut ids = Vec::new();
         for (p, (name, t, mutable)) in decl.params.iter().zip(params) {
             if s.blocks[0].iter().any(|(n, _)| *n == name) {
-                self.diags.error(p.name.span, format!("Parameter '{name}' is repeated"));
+                self.diags
+                    .error(p.name.span, format!("Parameter '{name}' is repeated"));
             }
             let l = s.declare(&name, t, mutable, p.name.span);
             self.defs.insert(Def::Local(id, l), p.name.span);
@@ -1804,7 +2017,11 @@ impl Checker<'_> {
         if result != Type::Void && !result.is_error() && !terminates(&body) {
             self.diags.error(
                 decl.body.span,
-                format!("'{}' can reach its end without returning a {}", decl.name.name, self.ty_name(&result)),
+                format!(
+                    "'{}' can reach its end without returning a {}",
+                    decl.name.name,
+                    self.ty_name(&result)
+                ),
             );
         }
         Function {
@@ -1826,7 +2043,12 @@ impl Checker<'_> {
     }
 
     /// Check a block and report `probe` evaluated at its end.
-    fn block_probe(&mut self, s: &mut Scope, stmts: &[ast::Stmt], probe: &dyn Fn(&Self, &Scope) -> Vec<(i64, i64)>) -> (Vec<Stmt>, Vec<(i64, i64)>) {
+    fn block_probe(
+        &mut self,
+        s: &mut Scope,
+        stmts: &[ast::Stmt],
+        probe: &dyn Fn(&Self, &Scope) -> Vec<(i64, i64)>,
+    ) -> (Vec<Stmt>, Vec<(i64, i64)>) {
         s.blocks.push(Vec::new());
         let mark = (s.facts.len(), s.slice_facts.len());
         let mut out = Vec::new();
@@ -1871,7 +2093,12 @@ impl Checker<'_> {
     fn stmt(&mut self, s: &mut Scope, st: &ast::Stmt) -> Option<Stmt> {
         let span = st.span;
         Some(match &st.kind {
-            StmtKind::Let { name, mutable, ty, value } => {
+            StmtKind::Let {
+                name,
+                mutable,
+                ty,
+                value,
+            } => {
                 let (t, e) = match ty {
                     Some(t) => {
                         let (t, pre) = self.resolve_decl_type(s.module, t, None);
@@ -1905,7 +2132,10 @@ impl Checker<'_> {
                 {
                     let (lo, hi) = self.interval(s, &e);
                     let full = self.types.bounds(&s.locals[id.0 as usize].ty);
-                    if (lo, hi) != full && lo <= hi && self.types.is_scalar(&s.locals[id.0 as usize].ty) {
+                    if (lo, hi) != full
+                        && lo <= hi
+                        && self.types.is_scalar(&s.locals[id.0 as usize].ty)
+                    {
                         s.facts.push((Key::Local(id), lo, hi));
                     }
                 }
@@ -1947,12 +2177,25 @@ impl Checker<'_> {
                             self.coerce(s, v, &Type::Bool)
                         } else {
                             if !self.types.is_integer(&t.ty) && !t.ty.is_error() {
-                                self.diags.error(span, format!("'{op}' needs an integer target"));
+                                self.diags
+                                    .error(span, format!("'{op}' needs an integer target"));
                             }
                             let v = self.expr(s, value, Some(&base));
                             if matches!(t.ty, Type::Range(_)) {
                                 let v2 = self.coerce(s, v.clone(), &base);
-                                let probe = Expr::new(ExprKind::Binary(b, Box::new(Expr::new(ExprKind::Cast(Box::new(t.clone())), base.clone(), span)), Box::new(v2)), base.clone(), span);
+                                let probe = Expr::new(
+                                    ExprKind::Binary(
+                                        b,
+                                        Box::new(Expr::new(
+                                            ExprKind::Cast(Box::new(t.clone())),
+                                            base.clone(),
+                                            span,
+                                        )),
+                                        Box::new(v2),
+                                    ),
+                                    base.clone(),
+                                    span,
+                                );
                                 let (lo, hi) = self.interval(s, &probe);
                                 let (tlo, thi) = self.types.bounds(&t.ty);
                                 if lo < tlo || hi > thi {
@@ -1977,13 +2220,27 @@ impl Checker<'_> {
                 if bin.is_none() {
                     self.assigned_fact(s, &t, Some(&v));
                 } else {
-                    let new = bin.map(|b| Expr::new(ExprKind::Binary(b, Box::new(t.clone()), Box::new(v.clone())), t.ty.clone(), span));
+                    let new = bin.map(|b| {
+                        Expr::new(
+                            ExprKind::Binary(b, Box::new(t.clone()), Box::new(v.clone())),
+                            t.ty.clone(),
+                            span,
+                        )
+                    });
                     // Compound assignment: bounds from the old value, when they cannot wrap.
                     let fact = new.as_ref().map(|n| self.interval(s, n));
                     self.assigned_fact(s, &t, None);
-                    if let (Some((lo, hi)), ExprKind::Local(_) | ExprKind::Global(_)) = (fact, &t.kind) {
+                    if let (Some((lo, hi)), ExprKind::Local(_) | ExprKind::Global(_)) =
+                        (fact, &t.kind)
+                    {
                         let full = self.types.bounds(&t.ty);
-                        if (lo, hi) != full && lo <= hi && matches!(bin, Some(BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Shr)) {
+                        if (lo, hi) != full
+                            && lo <= hi
+                            && matches!(
+                                bin,
+                                Some(BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Shr)
+                            )
+                        {
                             let key = match &t.kind {
                                 ExprKind::Local(id) => Key::Local(*id),
                                 ExprKind::Global(g) => Key::Global(*g),
@@ -2003,13 +2260,20 @@ impl Checker<'_> {
                 }
                 let x = self.expr(s, e, Some(&Type::Void));
                 match &x.kind {
-                    ExprKind::Call(..) | ExprKind::Asm(..) | ExprKind::Intrinsic(..) | ExprKind::Match(..) => {}
+                    ExprKind::Call(..)
+                    | ExprKind::Asm(..)
+                    | ExprKind::Intrinsic(..)
+                    | ExprKind::Match(..) => {}
                     _ if x.ty.is_error() => {}
                     _ => self.diags.warning(e.span, "This expression has no effect"),
                 }
                 Stmt::Expr(x)
             }
-            StmtKind::If { cond, then, otherwise } => {
+            StmtKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 let c = self.expr(s, cond, Some(&Type::Bool));
                 let c = self.coerce(s, c, &Type::Bool);
                 // Compile-time conditions (such as `defined(...)`) skip the
@@ -2029,13 +2293,19 @@ impl Checker<'_> {
                 {
                     let mut names = Vec::new();
                     let mut calls = false;
-                    for st in then.stmts.iter().chain(otherwise.iter().flat_map(|b| b.stmts.iter())) {
+                    for st in then
+                        .stmts
+                        .iter()
+                        .chain(otherwise.iter().flat_map(|b| b.stmts.iter()))
+                    {
                         assigned(st, &mut names, &mut calls);
                     }
                     for n in names.into_iter().flatten() {
                         if let Some(id) = s.lookup(&n) {
                             let t = s.locals[id.0 as usize].ty.clone();
-                            if self.types.is_scalar(&t) && !keys.iter().any(|(k, _)| *k == Key::Local(id)) {
+                            if self.types.is_scalar(&t)
+                                && !keys.iter().any(|(k, _)| *k == Key::Local(id))
+                            {
                                 keys.push((Key::Local(id), t));
                             }
                         }
@@ -2054,7 +2324,9 @@ impl Checker<'_> {
                     }
                 }
                 let probe = |c: &Self, s: &Scope| -> Vec<(i64, i64)> {
-                    keys.iter().map(|(k, t)| c.fact_bounds(s, *k, c.types.bounds(t))).collect()
+                    keys.iter()
+                        .map(|(k, t)| c.fact_bounds(s, *k, c.types.bounds(t)))
+                        .collect()
                 };
                 let mark = (s.facts.len(), s.slice_facts.len());
                 self.facts_from(s, &c, true);
@@ -2122,13 +2394,23 @@ impl Checker<'_> {
                 s.loops -= 1;
                 Stmt::Loop(b)
             }
-            StmtKind::For { var, start, end, inclusive, reverse, body } => {
+            StmtKind::For {
+                var,
+                start,
+                end,
+                inclusive,
+                reverse,
+                body,
+            } => {
                 let a = self.expr(s, start, None);
                 let b = self.expr(s, end, None);
                 let t = match (&a.ty, &b.ty) {
                     (Type::Int, Type::Int) => {
                         let lo = a.constant().unwrap_or(0).min(b.constant().unwrap_or(0));
-                        let hi = a.constant().unwrap_or(0).max(b.constant().unwrap_or(0) - !inclusive as i64);
+                        let hi = a
+                            .constant()
+                            .unwrap_or(0)
+                            .max(b.constant().unwrap_or(0) - !inclusive as i64);
                         if lo >= 0 && hi <= 255 {
                             Type::U8
                         } else if lo >= -128 && hi <= 127 {
@@ -2144,13 +2426,17 @@ impl Checker<'_> {
                     (x, y) if self.types.base(x) == self.types.base(y) => self.types.base(x),
                     (x, y) => {
                         let (x, y) = (self.ty_name(x), self.ty_name(y));
-                        self.diags.error(span, format!("Loop bounds have different types {x} and {y}"));
+                        self.diags.error(
+                            span,
+                            format!("Loop bounds have different types {x} and {y}"),
+                        );
                         Type::Error
                     }
                 };
                 if !self.types.is_integer(&t) && !matches!(t, Type::Enum(_) | Type::Error) {
                     let n = self.ty_name(&t);
-                    self.diags.error(span, format!("Loop bounds must be integers, found {n}"));
+                    self.diags
+                        .error(span, format!("Loop bounds must be integers, found {n}"));
                 }
                 let a = self.coerce(s, a, &t);
                 // An exclusive end may be one past the type's maximum.
@@ -2223,7 +2509,8 @@ impl Checker<'_> {
                     None => {
                         if r != Type::Void && !r.is_error() {
                             let t = self.ty_name(&r);
-                            self.diags.error(span, format!("Expected a {t} return value"));
+                            self.diags
+                                .error(span, format!("Expected a {t} return value"));
                         }
                         None
                     }
@@ -2234,7 +2521,13 @@ impl Checker<'_> {
         })
     }
 
-    fn match_stmt(&mut self, s: &mut Scope, scrutinee: &ast::Expr, arms: &[ast::Arm], span: Span) -> Stmt {
+    fn match_stmt(
+        &mut self,
+        s: &mut Scope,
+        scrutinee: &ast::Expr,
+        arms: &[ast::Arm],
+        span: Span,
+    ) -> Stmt {
         let x = self.expr(s, scrutinee, None);
         if x.ty.is_error() {
             return Stmt::Block(Vec::new());
@@ -2316,8 +2609,11 @@ impl Checker<'_> {
                 if !s.locals[id.0 as usize].mutable {
                     let name = s.locals[id.0 as usize].name.clone();
                     self.diags.push(
-                        Diagnostic::error(e.span, format!("'{name}' is immutable; declare it with 'var'"))
-                            .note(s.locals[id.0 as usize].span, "declared here"),
+                        Diagnostic::error(
+                            e.span,
+                            format!("'{name}' is immutable; declare it with 'var'"),
+                        )
+                        .note(s.locals[id.0 as usize].span, "declared here"),
                     );
                 }
             }
@@ -2334,7 +2630,9 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Const(_) if e.ty.is_error() => {}
-            _ => self.diags.error(e.span, "This expression cannot be assigned"),
+            _ => self
+                .diags
+                .error(e.span, "This expression cannot be assigned"),
         }
     }
 }
@@ -2372,10 +2670,15 @@ pub fn terminates(body: &[Stmt]) -> bool {
         Some(Stmt::If(_, a, b)) => terminates(a) && terminates(b),
         Some(Stmt::Block(b)) => terminates(b),
         Some(Stmt::Match(_, arms)) => {
-            !arms.is_empty() && arms.iter().all(|a| terminates(&a.body)) && arms.iter().any(|a| a.patterns.is_empty() && a.guard.is_none()) || {
-                // Exhaustive without a wildcard: every arm terminates.
-                !arms.is_empty() && arms.iter().all(|a| terminates(&a.body))
-            }
+            !arms.is_empty()
+                && arms.iter().all(|a| terminates(&a.body))
+                && arms
+                    .iter()
+                    .any(|a| a.patterns.is_empty() && a.guard.is_none())
+                || {
+                    // Exhaustive without a wildcard: every arm terminates.
+                    !arms.is_empty() && arms.iter().all(|a| terminates(&a.body))
+                }
         }
         _ => false,
     }
@@ -2430,7 +2733,11 @@ fn assigned(st: &ast::Stmt, out: &mut Vec<Option<String>>, calls: &mut bool) {
                 }
             }
         }
-        StmtKind::If { cond, then, otherwise } => {
+        StmtKind::If {
+            cond,
+            then,
+            otherwise,
+        } => {
             *calls |= has_call(cond);
             block(then, out, calls);
             if let Some(o) = otherwise {
@@ -2441,7 +2748,9 @@ fn assigned(st: &ast::Stmt, out: &mut Vec<Option<String>>, calls: &mut bool) {
             *calls |= has_call(cond);
             block(body, out, calls);
         }
-        StmtKind::For { body, start, end, .. } => {
+        StmtKind::For {
+            body, start, end, ..
+        } => {
             *calls |= has_call(start) || has_call(end);
             block(body, out, calls);
         }
@@ -2455,13 +2764,18 @@ fn has_call(e: &ast::Expr) -> bool {
     match &e.kind {
         AK::Call(_, _) | AK::Asm(..) => true,
         AK::Unary(_, a) | AK::Cast(a, _) | AK::Field(a, _) => has_call(a),
-        AK::Binary(_, a, b) | AK::Index(a, b, _) | AK::Repeat(a, b) | AK::Range(a, b, _) => has_call(a) || has_call(b),
+        AK::Binary(_, a, b) | AK::Index(a, b, _) | AK::Repeat(a, b) | AK::Range(a, b, _) => {
+            has_call(a) || has_call(b)
+        }
         AK::StructLit(_, f) => f.iter().any(|(_, v)| has_call(v)),
         AK::Array(v) => v.iter().any(has_call),
-        AK::Match(x, arms) => has_call(x) || arms.iter().any(|a| match &a.body {
-            ast::ArmBody::Expr(e) => has_call(e),
-            ast::ArmBody::Block(_) => true,
-        }),
+        AK::Match(x, arms) => {
+            has_call(x)
+                || arms.iter().any(|a| match &a.body {
+                    ast::ArmBody::Expr(e) => has_call(e),
+                    ast::ArmBody::Block(_) => true,
+                })
+        }
         AK::If(c, a, b) => has_call(c) || has_call(a) || has_call(b),
         _ => false,
     }

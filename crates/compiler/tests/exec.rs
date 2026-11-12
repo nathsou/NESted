@@ -10,7 +10,8 @@ pub struct Run {
 
 impl Run {
     pub fn new(src: &str, optimize: bool) -> Run {
-        let out = compile(&Project::single(src), Options { optimize }).unwrap_or_else(|e| panic!("{}", e.render()));
+        let out = compile(&Project::single(src), Options { optimize })
+            .unwrap_or_else(|e| panic!("{}", e.render()));
         let mut emu = Emulator::new(out.rom.clone(), 44100.0).unwrap();
         for _ in 0..8 {
             emu.frame(0).unwrap();
@@ -41,24 +42,63 @@ fn check(decls: &str, n: usize) {
     let src = format!("var out: [u16; {n}] = [0; {n}];\n{decls}\nfn init() {{ run(); }}\n");
     let reference = {
         let a = nested_compiler::analyze(&Project::single(&src));
-        assert!(!a.diagnostics.has_errors(), "{:?}", a.diagnostics.items.iter().map(|d| d.render(&a.sources)).collect::<Vec<_>>());
+        assert!(
+            !a.diagnostics.has_errors(),
+            "{:?}",
+            a.diagnostics
+                .items
+                .iter()
+                .map(|d| d.render(&a.sources))
+                .collect::<Vec<_>>()
+        );
         let mut env = nested_compiler::consteval::ProgramEnv::new(&a.program);
-        let run = a.program.functions.iter().position(|f| f.name == "run").unwrap();
+        let run = a
+            .program
+            .functions
+            .iter()
+            .position(|f| f.name == "run")
+            .unwrap();
         let mut interp = nested_compiler::consteval::Interp::new(&mut env);
         interp.mutable_globals = true;
-        interp.call(nested_compiler::hir::FnId(run as u32), vec![], Default::default()).unwrap();
+        interp
+            .call(
+                nested_compiler::hir::FnId(run as u32),
+                vec![],
+                Default::default(),
+            )
+            .unwrap();
         let writes = interp.global_writes.clone();
-        let g = a.program.globals.iter().position(|g| g.name == "out").unwrap();
-        let v = writes.iter().rev().find(|(x, _)| x.0 as usize == g).map(|(_, v)| v.clone()).unwrap();
-        v.items().iter().map(|x| x.int() as u16).collect::<Vec<u16>>()
+        let g = a
+            .program
+            .globals
+            .iter()
+            .position(|g| g.name == "out")
+            .unwrap();
+        let v = writes
+            .iter()
+            .rev()
+            .find(|(x, _)| x.0 as usize == g)
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        v.items()
+            .iter()
+            .map(|x| x.int() as u16)
+            .collect::<Vec<u16>>()
     };
     for optimize in [false, true] {
         let mut r = Run::new(&src, optimize);
         let base = r.addr("out");
         let actual: Vec<u16> = (0..n as u16)
-            .map(|i| r.emu.read_ram(base + i) as u16 | (r.emu.read_ram(base + n as u16 + i) as u16) << 8)
+            .map(|i| {
+                r.emu.read_ram(base + i) as u16 | (r.emu.read_ram(base + n as u16 + i) as u16) << 8
+            })
             .collect();
-        assert_eq!(actual, reference, "optimize={optimize}\n{}", r.out.passes.iter().find(|p| p.name == "6502").unwrap().text);
+        assert_eq!(
+            actual,
+            reference,
+            "optimize={optimize}\n{}",
+            r.out.passes.iter().find(|p| p.name == "6502").unwrap().text
+        );
     }
 }
 

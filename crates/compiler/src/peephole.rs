@@ -37,8 +37,8 @@ fn reads_nz(op: Op) -> bool {
 fn writes_nz(ins: &Ins) -> bool {
     use Op::*;
     match ins.op {
-        Lda | Ldx | Ldy | Adc | Sbc | And | Ora | Eor | Cmp | Cpx | Cpy | Bit | Inc | Dec | Inx | Iny | Dex | Dey
-        | Asl | Lsr | Rol | Ror | Tax | Tay | Txa | Tya | Tsx | Pla | Plp => true,
+        Lda | Ldx | Ldy | Adc | Sbc | And | Ora | Eor | Cmp | Cpx | Cpy | Bit | Inc | Dec | Inx
+        | Iny | Dex | Dey | Asl | Lsr | Rol | Ror | Tax | Tay | Txa | Tya | Tsx | Pla | Plp => true,
         _ => false,
     }
 }
@@ -59,8 +59,13 @@ fn same_place(a: &Opnd, b: &Opnd) -> bool {
 
 fn may_alias(store: &Arg, m: &Opnd) -> bool {
     match store {
-        Arg::Mem(o) => same_place(o, m) || (matches!(o.sym, Sym::Num) && matches!(m.sym, Sym::Num) && o.off == m.off),
-        Arg::MemX(o) | Arg::MemY(o) => o.sym == m.sym || matches!((&o.sym, &m.sym), (Sym::Num, Sym::Num)),
+        Arg::Mem(o) => {
+            same_place(o, m)
+                || (matches!(o.sym, Sym::Num) && matches!(m.sym, Sym::Num) && o.off == m.off)
+        }
+        Arg::MemX(o) | Arg::MemY(o) => {
+            o.sym == m.sym || matches!((&o.sym, &m.sym), (Sym::Num, Sym::Num))
+        }
         Arg::IndX(_) | Arg::IndY(_) | Arg::Ind(_) => true,
         _ => false,
     }
@@ -89,7 +94,9 @@ pub fn optimize(lines: &mut Vec<Line>, mir: &Mir, inst: InstId) {
 fn nz_needed(lines: &[Line]) -> Vec<bool> {
     let mut at_label: BTreeMap<String, bool> = BTreeMap::new();
     let target = |ins: &Ins| match ins.arg.opnd() {
-        Some(Opnd { sym: Sym::Label(n), .. }) => Some(n.clone()),
+        Some(Opnd {
+            sym: Sym::Label(n), ..
+        }) => Some(n.clone()),
         _ => None,
     };
     let mut need = vec![true; lines.len()];
@@ -106,7 +113,9 @@ fn nz_needed(lines: &[Line]) -> Vec<bool> {
                     }
                     if ins.op == Op::Jmp {
                         live = match (&ins.arg, target(ins)) {
-                            (Arg::Mem(_), Some(t)) => at_label.get(&t).copied().unwrap_or(!t.starts_with("__f")),
+                            (Arg::Mem(_), Some(t)) => {
+                                at_label.get(&t).copied().unwrap_or(!t.starts_with("__f"))
+                            }
                             _ => true,
                         };
                         need[i] = live;
@@ -241,13 +250,17 @@ fn registers(lines: &mut Vec<Line>, volatile: &dyn Fn(&Opnd) -> bool) -> bool {
                     }
                     Inx | Dex => {
                         regs.x = match regs.x {
-                            Some(Val::Imm(k)) => Some(Val::Imm((k + if ins.op == Inx { 1 } else { -1 }) & 0xff)),
+                            Some(Val::Imm(k)) => {
+                                Some(Val::Imm((k + if ins.op == Inx { 1 } else { -1 }) & 0xff))
+                            }
                             _ => None,
                         }
                     }
                     Iny | Dey => {
                         regs.y = match regs.y {
-                            Some(Val::Imm(k)) => Some(Val::Imm((k + if ins.op == Iny { 1 } else { -1 }) & 0xff)),
+                            Some(Val::Imm(k)) => {
+                                Some(Val::Imm((k + if ins.op == Iny { 1 } else { -1 }) & 0xff))
+                            }
                             _ => None,
                         }
                     }
@@ -259,10 +272,14 @@ fn registers(lines: &mut Vec<Line>, volatile: &dyn Fn(&Opnd) -> bool) -> bool {
                             regs.forget_mem(|m| may_alias(&arg, m));
                         }
                     }
-                    Cmp | Cpx | Cpy | Bit | Clc | Sec | Cld | Cli | Clv | Sed | Sei | Nop | Php | Pha => {
+                    Cmp | Cpx | Cpy | Bit | Clc | Sec | Cld | Cli | Clv | Sed | Sei | Nop | Php
+                    | Pha => {
                         // `cmp #0` right after A was set by a flag-setting op.
                         if ins.op == Cmp && ins.arg == Arg::Imm(Opnd::num(0)) {
-                            let prev = (0..i).rev().find(|j| matches!(lines[*j], Line::Ins(_)) || matches!(lines[*j], Line::Label(_) | Line::Barrier));
+                            let prev = (0..i).rev().find(|j| {
+                                matches!(lines[*j], Line::Ins(_))
+                                    || matches!(lines[*j], Line::Label(_) | Line::Barrier)
+                            });
                             if let Some(j) = prev {
                                 if let Line::Ins(p) = &lines[j] {
                                     if nz_from_a(p) && !remove[j] {
@@ -309,7 +326,11 @@ fn dead_stores(lines: &mut Vec<Line>, mir: &Mir, inst: InstId) -> bool {
     let me = &mir.insts[inst.0 as usize];
     let params: BTreeSet<u32> = me.params.iter().map(|v| v.0).collect();
     // Multi-value results are read by callers.
-    let shared_rets: BTreeSet<u32> = if me.rets.len() > 1 { me.rets.iter().map(|v| v.0).collect() } else { BTreeSet::new() };
+    let shared_rets: BTreeSet<u32> = if me.rets.len() > 1 {
+        me.rets.iter().map(|v| v.0).collect()
+    } else {
+        BTreeSet::new()
+    };
     let mut read: BTreeMap<(u32, i64), usize> = BTreeMap::new();
     let mut written_only: BTreeSet<u32> = BTreeSet::new();
     let mut any_asm = false;
@@ -317,11 +338,17 @@ fn dead_stores(lines: &mut Vec<Line>, mir: &Mir, inst: InstId) -> bool {
         match l {
             Line::Barrier => any_asm = true,
             Line::Ins(ins) => {
-                if let Some(Opnd { sym: Sym::Var(i, v), off, .. }) = ins.arg.opnd() {
+                if let Some(Opnd {
+                    sym: Sym::Var(i, v),
+                    off,
+                    ..
+                }) = ins.arg.opnd()
+                {
                     if *i != inst {
                         continue;
                     }
-                    let store = matches!(ins.op, Op::Sta | Op::Stx | Op::Sty) && matches!(ins.arg, Arg::Mem(_));
+                    let store = matches!(ins.op, Op::Sta | Op::Stx | Op::Sty)
+                        && matches!(ins.arg, Arg::Mem(_));
                     if store {
                         written_only.insert(v.0);
                     } else {
@@ -341,11 +368,24 @@ fn dead_stores(lines: &mut Vec<Line>, mir: &Mir, inst: InstId) -> bool {
     lines.retain(|l| {
         if let Line::Ins(ins) = l {
             if matches!(ins.op, Op::Sta | Op::Stx | Op::Sty) {
-                if let Arg::Mem(Opnd { sym: Sym::Var(i, v), off, .. }) = &ins.arg {
-                    let temp = v.0 >= n_vars || me.vars[v.0 as usize].temp || (me.rets.len() == 1 && me.rets[0] == VarId(v.0));
+                if let Arg::Mem(Opnd {
+                    sym: Sym::Var(i, v),
+                    off,
+                    ..
+                }) = &ins.arg
+                {
+                    let temp = v.0 >= n_vars
+                        || me.vars[v.0 as usize].temp
+                        || (me.rets.len() == 1 && me.rets[0] == VarId(v.0));
                     let user_named = v.0 < n_vars && !me.vars[v.0 as usize].temp;
                     let _ = user_named;
-                    if *i == inst && temp && !params.contains(&v.0) && !shared_rets.contains(&v.0) && !read.contains_key(&(v.0, *off)) && !me.vars.get(v.0 as usize).is_some_and(|x| x.pointer) {
+                    if *i == inst
+                        && temp
+                        && !params.contains(&v.0)
+                        && !shared_rets.contains(&v.0)
+                        && !read.contains_key(&(v.0, *off))
+                        && !me.vars.get(v.0 as usize).is_some_and(|x| x.pointer)
+                    {
                         changed = true;
                         return false;
                     }
@@ -383,7 +423,13 @@ fn jumps(lines: &mut Vec<Line>) -> bool {
     let labels = index(lines);
     for i in 0..lines.len() {
         let Line::Ins(ins) = &lines[i] else { continue };
-        let Some(Opnd { sym: Sym::Label(target), .. }) = ins.arg.opnd() else { continue };
+        let Some(Opnd {
+            sym: Sym::Label(target),
+            ..
+        }) = ins.arg.opnd()
+        else {
+            continue;
+        };
         if !(ins.op.is_branch() || ins.op == Op::Jmp) || !matches!(ins.arg, Arg::Mem(_)) {
             continue;
         }
@@ -391,7 +437,13 @@ fn jumps(lines: &mut Vec<Line>) -> bool {
         let mut hops = 0;
         while let Some(&at) = labels.get(&t) {
             match first_ins(lines, at) {
-                Some(Ins { op: Op::Jmp, arg: Arg::Mem(Opnd { sym: Sym::Label(n), .. }) }) if hops < 8 && n != t => {
+                Some(Ins {
+                    op: Op::Jmp,
+                    arg:
+                        Arg::Mem(Opnd {
+                            sym: Sym::Label(n), ..
+                        }),
+                }) if hops < 8 && n != t => {
                     t = n;
                     hops += 1;
                 }
@@ -417,9 +469,14 @@ fn jumps(lines: &mut Vec<Line>) -> bool {
     // Branch over jump: `bxx L1; jmp L2; L1:` → `b!xx L2; L1:`.
     let mut i = 0;
     while i + 2 < lines.len() {
-        if let (Line::Ins(b), Line::Ins(j), Line::Label(l1)) = (&lines[i], &lines[i + 1], &lines[i + 2]) {
+        if let (Line::Ins(b), Line::Ins(j), Line::Label(l1)) =
+            (&lines[i], &lines[i + 1], &lines[i + 2])
+        {
             if b.op.is_branch() && j.op == Op::Jmp && matches!(j.arg, Arg::Mem(_)) {
-                if let Some(Opnd { sym: Sym::Label(t), .. }) = b.arg.opnd() {
+                if let Some(Opnd {
+                    sym: Sym::Label(t), ..
+                }) = b.arg.opnd()
+                {
                     if t == l1 {
                         let inv = Ins::new(b.op.inverse(), j.arg.clone());
                         lines[i] = Line::Ins(inv);
@@ -447,7 +504,10 @@ fn jumps(lines: &mut Vec<Line>) -> bool {
             }
             Line::Ins(ins) => {
                 if (ins.op == Op::Jmp || ins.op.is_branch()) && matches!(ins.arg, Arg::Mem(_)) {
-                    if let Some(Opnd { sym: Sym::Label(t), .. }) = ins.arg.opnd() {
+                    if let Some(Opnd {
+                        sym: Sym::Label(t), ..
+                    }) = ins.arg.opnd()
+                    {
                         let mut k = i + 1;
                         let mut falls = false;
                         while k < lines.len() {
@@ -479,7 +539,10 @@ fn jumps(lines: &mut Vec<Line>) -> bool {
     for l in &out {
         match l {
             Line::Ins(ins) => {
-                if let Some(Opnd { sym: Sym::Label(n), .. }) = ins.arg.opnd() {
+                if let Some(Opnd {
+                    sym: Sym::Label(n), ..
+                }) = ins.arg.opnd()
+                {
                     used.insert(n.clone());
                 }
             }
@@ -500,7 +563,12 @@ fn jumps(lines: &mut Vec<Line>) -> bool {
             in_asm = !in_asm;
             true
         }
-        Line::Label(n) => in_asm || used.contains(n) || !n.contains("_b") && !n.contains("_l") || !n.starts_with("__f"),
+        Line::Label(n) => {
+            in_asm
+                || used.contains(n)
+                || !n.contains("_b") && !n.contains("_l")
+                || !n.starts_with("__f")
+        }
         _ => true,
     });
     if out.len() != before {

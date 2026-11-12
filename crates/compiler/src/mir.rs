@@ -117,7 +117,11 @@ pub enum Ex {
 impl Ex {
     pub fn sc(&self) -> Sc {
         match self {
-            Ex::Const(_, s) | Ex::Var(_, s) | Ex::Load(_, _, s) | Ex::Deref(_, _, s) | Ex::Un(_, _, s) => *s,
+            Ex::Const(_, s)
+            | Ex::Var(_, s)
+            | Ex::Load(_, _, s)
+            | Ex::Deref(_, _, s)
+            | Ex::Un(_, _, s) => *s,
             Ex::Addr(..) => Sc::U16,
             Ex::Peek(_) => Sc::U8,
             Ex::Bin(op, _, _, s) => {
@@ -346,8 +350,16 @@ impl Mir {
                 "fn {} [{:?}] ({}) -> ({})",
                 inst.name,
                 inst.ctx,
-                inst.params.iter().map(|v| self.var_name(inst, *v)).collect::<Vec<_>>().join(", "),
-                inst.rets.iter().map(|v| self.var_name(inst, *v)).collect::<Vec<_>>().join(", ")
+                inst.params
+                    .iter()
+                    .map(|v| self.var_name(inst, *v))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                inst.rets
+                    .iter()
+                    .map(|v| self.var_name(inst, *v))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             for (b, block) in inst.blocks.iter().enumerate() {
                 let _ = writeln!(out, "  b{b}:");
@@ -361,7 +373,9 @@ impl Mir {
                 }
                 let t = match &block.term {
                     Term::Goto(t) => format!("goto b{}", t.0),
-                    Term::Branch(c, t, f) => format!("if {} then b{} else b{}", self.ex(inst, c), t.0, f.0),
+                    Term::Branch(c, t, f) => {
+                        format!("if {} then b{} else b{}", self.ex(inst, c), t.0, f.0)
+                    }
                     Term::Return => "return".into(),
                     Term::Open => "<open>".into(),
                 };
@@ -376,14 +390,34 @@ impl Mir {
     pub fn ex(&self, inst: &Inst, e: &Ex) -> String {
         match e {
             Ex::Const(n, s) => format!("{n}{}", s.name()),
-            Ex::Addr(o, hi) => format!("&{}{}", self.objs[o.0 as usize].name, if *hi { ".hi" } else { "" }),
+            Ex::Addr(o, hi) => format!(
+                "&{}{}",
+                self.objs[o.0 as usize].name,
+                if *hi { ".hi" } else { "" }
+            ),
             Ex::Var(v, _) => self.var_name(inst, *v),
             Ex::Load(o, None, _) => self.objs[o.0 as usize].name.clone(),
-            Ex::Load(o, Some(i), _) => format!("{}[{}]", self.objs[o.0 as usize].name, self.ex(inst, i)),
+            Ex::Load(o, Some(i), _) => {
+                format!("{}[{}]", self.objs[o.0 as usize].name, self.ex(inst, i))
+            }
             Ex::Deref(p, i, _) => format!("*({} + {})", self.ex(inst, p), self.ex(inst, i)),
             Ex::Peek(a) => format!("peek({})", self.ex(inst, a)),
-            Ex::Un(op, a, _) => format!("{}{}", match op { UnOp::Neg => "-", UnOp::Not => "!", UnOp::BitNot => "~" }, self.ex(inst, a)),
-            Ex::Bin(op, a, b, s) => format!("({} {}{} {})", self.ex(inst, a), op.symbol(), s.name(), self.ex(inst, b)),
+            Ex::Un(op, a, _) => format!(
+                "{}{}",
+                match op {
+                    UnOp::Neg => "-",
+                    UnOp::Not => "!",
+                    UnOp::BitNot => "~",
+                },
+                self.ex(inst, a)
+            ),
+            Ex::Bin(op, a, b, s) => format!(
+                "({} {}{} {})",
+                self.ex(inst, a),
+                op.symbol(),
+                s.name(),
+                self.ex(inst, b)
+            ),
             Ex::Cast(a, _, to) => format!("{}({})", to.name(), self.ex(inst, a)),
         }
     }
@@ -391,7 +425,9 @@ impl Mir {
         match p {
             Place::Var(v) => self.var_name(inst, *v),
             Place::Mem(o, None) => self.objs[o.0 as usize].name.clone(),
-            Place::Mem(o, Some(i)) => format!("{}[{}]", self.objs[o.0 as usize].name, self.ex(inst, i)),
+            Place::Mem(o, Some(i)) => {
+                format!("{}[{}]", self.objs[o.0 as usize].name, self.ex(inst, i))
+            }
             Place::Deref(p, i) => format!("*({} + {})", self.ex(inst, p), self.ex(inst, i)),
             Place::Poke(a) => format!("poke({})", self.ex(inst, a)),
         }
@@ -399,12 +435,42 @@ impl Mir {
     pub fn stmt(&self, inst: &Inst, s: &St) -> String {
         match s {
             St::Assign(p, e) => format!("{} = {}", self.place(inst, p), self.ex(inst, e)),
-            St::Call { target, args, rets, saved, .. } => format!(
+            St::Call {
+                target,
+                args,
+                rets,
+                saved,
+                ..
+            } => format!(
                 "{}call {}({}){}",
-                if rets.is_empty() { String::new() } else { format!("{} = ", rets.iter().map(|r| self.place(inst, r)).collect::<Vec<_>>().join(", ")) },
+                if rets.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "{} = ",
+                        rets.iter()
+                            .map(|r| self.place(inst, r))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                },
                 self.insts[target.0 as usize].name,
-                args.iter().map(|a| self.ex(inst, a)).collect::<Vec<_>>().join(", "),
-                if saved.is_empty() { String::new() } else { format!(" saving {}", saved.iter().map(|v| self.var_name(inst, *v)).collect::<Vec<_>>().join(", ")) }
+                args.iter()
+                    .map(|a| self.ex(inst, a))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if saved.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " saving {}",
+                        saved
+                            .iter()
+                            .map(|v| self.var_name(inst, *v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
             ),
             St::Asm { body, .. } => format!("asm {{ {} }}", body.trim().replace('\n', "; ")),
             St::Line(_) => String::new(),

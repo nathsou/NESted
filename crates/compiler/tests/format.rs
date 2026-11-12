@@ -3,15 +3,29 @@ use nested_compiler::lexer::{lex, Tok};
 
 fn tokens(src: &str) -> Vec<Tok> {
     let mut d = Default::default();
-    lex(Default::default(), src, &mut d).tokens.into_iter().map(|t| match t.tok {
-        Tok::Asm(body) => Tok::Asm(body.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")),
-        t => t,
-    }).collect()
+    lex(Default::default(), src, &mut d)
+        .tokens
+        .into_iter()
+        .map(|t| match t.tok {
+            Tok::Asm(body) => Tok::Asm(
+                body.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            t => t,
+        })
+        .collect()
 }
 
 pub fn check_file(name: &str, src: &str) {
     let out = format(src, &Style::default());
-    assert_eq!(tokens(src), tokens(&out), "{name}: formatting changed tokens\n{out}");
+    assert_eq!(
+        tokens(src),
+        tokens(&out),
+        "{name}: formatting changed tokens\n{out}"
+    );
     let again = format(&out, &Style::default());
     assert_eq!(out, again, "{name}: formatting is not idempotent");
 }

@@ -734,6 +734,29 @@ impl PPU {
         self.increment_data_address();
     }
 
+    /// Debugger view of PPU memory: no side effects on rendering state.
+    pub fn inspect(&mut self, addr: u16) -> u8 {
+        let addr = addr & 0x3fff;
+        match addr {
+            0..=0x1fff => self.rom.mapper.read(&mut self.rom.cart, addr),
+            0x2000..=0x3eff => {
+                let a = self.nametable_mirrored_addr(addr);
+                self.vram[a as usize]
+            }
+            _ => self.palette[Self::palette_index(addr)],
+        }
+    }
+
+    /// Sprite memory (64 entries of y, tile, attributes, x).
+    pub fn oam(&self) -> &[u8] {
+        &self.attributes
+    }
+
+    /// The current PPUCTRL and PPUMASK values.
+    pub fn control(&self) -> (u8, u8) {
+        (self.regs.ctrl.bits(), self.regs.mask.bits())
+    }
+
     pub fn read_oam_data_reg(&mut self) -> u8 {
         self.attributes[self.regs.oam_addr as usize]
     }

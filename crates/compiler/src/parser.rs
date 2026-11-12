@@ -149,7 +149,14 @@ impl<'a> Parser<'a> {
                 if let Tok::Ident(w) = self.peek() {
                     if matches!(
                         w.as_str(),
-                        "fn" | "const" | "var" | "struct" | "enum" | "type" | "use" | "pub" | "cartridge"
+                        "fn" | "const"
+                            | "var"
+                            | "struct"
+                            | "enum"
+                            | "type"
+                            | "use"
+                            | "pub"
+                            | "cartridge"
                     ) {
                         return;
                     }
@@ -586,8 +593,8 @@ impl<'a> Parser<'a> {
                     value,
                 }
             } else {
-                let block_like = matches!(e.kind, ExprKind::Match(..))
-                    || matches!(e.kind, ExprKind::Asm(..));
+                let block_like =
+                    matches!(e.kind, ExprKind::Match(..)) || matches!(e.kind, ExprKind::Asm(..));
                 if !(block_like && !self.is(";")) {
                     self.expect(";")?;
                 }
@@ -724,7 +731,11 @@ impl<'a> Parser<'a> {
             self.expect(";")?;
             let len = Some(Box::new(self.expr()?));
             self.expect("]")?;
-            return Ok(TypeExpr::Array(Box::new(elem), len, start.to(self.prev_span())));
+            return Ok(TypeExpr::Array(
+                Box::new(elem),
+                len,
+                start.to(self.prev_span()),
+            ));
         }
         Ok(TypeExpr::Path(self.path()?))
     }
@@ -783,12 +794,7 @@ impl<'a> Parser<'a> {
     fn primary(&mut self) -> PResult<Expr> {
         let start = self.span();
         let tok = self.peek().clone();
-        let simple = |kind| {
-            Ok(Expr {
-                kind,
-                span: start,
-            })
-        };
+        let simple = |kind| Ok(Expr { kind, span: start });
         match tok {
             Tok::Int(n) => {
                 self.bump();
@@ -1004,7 +1010,10 @@ fn starts_upper(p: &Path) -> bool {
         .is_some_and(|c| c.is_ascii_uppercase())
 }
 
-pub fn parse(file: FileId, src: &str) -> (Module, Vec<Token>, Vec<crate::lexer::Comment>, Diagnostics) {
+pub fn parse(
+    file: FileId,
+    src: &str,
+) -> (Module, Vec<Token>, Vec<crate::lexer::Comment>, Diagnostics) {
     let mut diags = Diagnostics::default();
     let lexed = crate::lexer::lex(file, src, &mut diags);
     let (module, d) = parse_module(file, &lexed.tokens);

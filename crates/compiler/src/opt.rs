@@ -58,7 +58,12 @@ fn stmt_effects(s: &St) -> (Live, Live) {
                 }
             }
         }
-        St::Asm { operands, inputs, output, .. } => {
+        St::Asm {
+            operands,
+            inputs,
+            output,
+            ..
+        } => {
             for (_, e) in inputs {
                 ex_uses(e, &mut uses);
             }
@@ -214,11 +219,20 @@ pub fn prepare(mir: &mut Mir, diags: &mut Diagnostics) {
             continue;
         }
         if inst.recursive.is_none() {
-            diags.error(inst.span, format!("'{}' calls itself; mark it @recursive(N) with its maximum depth", inst.name));
+            diags.error(
+                inst.span,
+                format!(
+                    "'{}' calls itself; mark it @recursive(N) with its maximum depth",
+                    inst.name
+                ),
+            );
             continue;
         }
         if inst.ctx != crate::hir::Context::Main {
-            diags.error(inst.span, "Recursive functions cannot run in interrupt handlers");
+            diags.error(
+                inst.span,
+                "Recursive functions cannot run in interrupt handlers",
+            );
             continue;
         }
         let (_, live_out) = liveness(inst);
@@ -230,7 +244,8 @@ pub fn prepare(mir: &mut Mir, diags: &mut Diagnostics) {
                 let (u, d) = stmt_effects(s);
                 if let St::Call { target, .. } = s {
                     if *target == id {
-                        let after: Vec<VarId> = live.iter().copied().filter(|v| !d.contains(v)).collect();
+                        let after: Vec<VarId> =
+                            live.iter().copied().filter(|v| !d.contains(v)).collect();
                         saves.push((b, k, after));
                     }
                 }
@@ -287,14 +302,29 @@ pub fn simplify(e: &mut Ex) {
                     let kb = b.konst().map(|k| sc.wrap(k));
                     let all = sc.wrap(-1);
                     match (op, ka, kb) {
-                        (BinOp::Add | BinOp::Sub | BinOp::Or | BinOp::Xor | BinOp::Shl | BinOp::Shr, _, Some(0)) => Some((**a).clone()),
+                        (
+                            BinOp::Add
+                            | BinOp::Sub
+                            | BinOp::Or
+                            | BinOp::Xor
+                            | BinOp::Shl
+                            | BinOp::Shr,
+                            _,
+                            Some(0),
+                        ) => Some((**a).clone()),
                         (BinOp::Add | BinOp::Or | BinOp::Xor, Some(0), _) => Some((**b).clone()),
                         (BinOp::Mul, _, Some(1)) | (BinOp::Div, _, Some(1)) => Some((**a).clone()),
                         (BinOp::Mul, Some(1), _) => Some((**b).clone()),
                         (BinOp::Mul | BinOp::And, _, Some(0)) => Some(Ex::Const(0, sc)),
                         (BinOp::Mul | BinOp::And, Some(0), _) => Some(Ex::Const(0, sc)),
-                        (BinOp::Shl | BinOp::Shr, _, Some(k)) if !sc.signed() && k >= (sc.size() * 8) as i64 => Some(Ex::Const(0, sc)),
-                        (BinOp::Shl, _, Some(k)) if k >= (sc.size() * 8) as i64 => Some(Ex::Const(0, sc)),
+                        (BinOp::Shl | BinOp::Shr, _, Some(k))
+                            if !sc.signed() && k >= (sc.size() * 8) as i64 =>
+                        {
+                            Some(Ex::Const(0, sc))
+                        }
+                        (BinOp::Shl, _, Some(k)) if k >= (sc.size() * 8) as i64 => {
+                            Some(Ex::Const(0, sc))
+                        }
                         (BinOp::And, _, Some(k)) if k == all => Some((**a).clone()),
                         (BinOp::And, Some(k), _) if k == all => Some((**b).clone()),
                         _ => None,
@@ -364,7 +394,6 @@ fn clobbers(s: &St, e: &Ex, objs: &[Obj]) -> bool {
         St::Call { .. } | St::Asm { .. } => e.reads_memory() || e.volatile(objs),
     }
 }
-
 
 /// Uses and definitions of every variable in a function.
 fn use_counts(inst: &Inst) -> (BTreeMap<VarId, usize>, BTreeMap<VarId, usize>) {
@@ -489,7 +518,8 @@ fn propagate(inst: &mut Inst, b: usize, objs: &[Obj]) -> bool {
         known.retain(|_, e| !clobbers(&s, e, objs));
         if let St::Assign(Place::Var(v), e) = &block.stmts[k] {
             let v = *v;
-            let simple = matches!(e, Ex::Const(..) | Ex::Addr(..)) || matches!(e, Ex::Var(w, _) if *w != v);
+            let simple =
+                matches!(e, Ex::Const(..) | Ex::Addr(..)) || matches!(e, Ex::Var(w, _) if *w != v);
             if simple && !pointers.contains(&v) && !e.reads_var(v) {
                 known.insert(v, e.clone());
             }
@@ -511,7 +541,12 @@ fn propagate(inst: &mut Inst, b: usize, objs: &[Obj]) -> bool {
         let t = *t;
         let e = e.clone();
         let temp = inst.vars[t.0 as usize].temp;
-        if !temp || count.get(&t).copied().unwrap_or(0) != 1 || defs.get(&t).copied().unwrap_or(0) != 1 || e.volatile(objs) || pointers.contains(&t) {
+        if !temp
+            || count.get(&t).copied().unwrap_or(0) != 1
+            || defs.get(&t).copied().unwrap_or(0) != 1
+            || e.volatile(objs)
+            || pointers.contains(&t)
+        {
             k += 1;
             continue;
         }
@@ -529,8 +564,13 @@ fn propagate(inst: &mut Inst, b: usize, objs: &[Obj]) -> bool {
             if uses_t {
                 // Only into plain assignments and call arguments.
                 let ok = match s {
-                    St::Assign(p, val) => val.reads_var(t) && !place_reads_var(p, t) || place_reads_var(p, t) && !val.reads_var(t),
-                    St::Call { args, .. } => args.iter().filter(|a| a.reads_var(t)).count() == 1 && !e.reads_memory(),
+                    St::Assign(p, val) => {
+                        val.reads_var(t) && !place_reads_var(p, t)
+                            || place_reads_var(p, t) && !val.reads_var(t)
+                    }
+                    St::Call { args, .. } => {
+                        args.iter().filter(|a| a.reads_var(t)).count() == 1 && !e.reads_memory()
+                    }
                     _ => false,
                 };
                 if ok {
@@ -585,7 +625,9 @@ fn propagate(inst: &mut Inst, b: usize, objs: &[Obj]) -> bool {
         }
         simplify(c);
     }
-    block.stmts.retain(|s| !matches!(s, St::Line(sp) if *sp == crate::source::Span::default()));
+    block
+        .stmts
+        .retain(|s| !matches!(s, St::Line(sp) if *sp == crate::source::Span::default()));
     changed
 }
 
@@ -601,7 +643,13 @@ fn dead_assignments(inst: &mut Inst, objs: &[Obj]) -> bool {
         .flat_map(|s| match s {
             St::Asm { operands, .. } => operands
                 .iter()
-                .filter_map(|o| if let AsmOperand::Var(v) = o { Some(*v) } else { None })
+                .filter_map(|o| {
+                    if let AsmOperand::Var(v) = o {
+                        Some(*v)
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>(),
             _ => vec![],
         })
@@ -623,7 +671,12 @@ fn dead_assignments(inst: &mut Inst, objs: &[Obj]) -> bool {
         for (k, s) in block.stmts.iter().enumerate().rev() {
             let (u, d) = stmt_effects(s);
             if let St::Assign(Place::Var(v), e) = s {
-                if !live.contains(v) && !rets.contains(v) && !asm_vars.contains(v) && !e.volatile(objs) && !params.contains(v) {
+                if !live.contains(v)
+                    && !rets.contains(v)
+                    && !asm_vars.contains(v)
+                    && !e.volatile(objs)
+                    && !params.contains(v)
+                {
                     keep[k] = false;
                     changed = true;
                     continue;
@@ -666,7 +719,9 @@ fn simplify_cfg(inst: &mut Inst) -> bool {
         while seen < n {
             let block = &inst.blocks[b.0 as usize];
             match block.term {
-                Term::Goto(t) if block.stmts.iter().all(|s| matches!(s, St::Line(_))) && t != b => b = t,
+                Term::Goto(t) if block.stmts.iter().all(|s| matches!(s, St::Line(_))) && t != b => {
+                    b = t
+                }
                 _ => break,
             }
             seen += 1;
@@ -720,7 +775,11 @@ fn simplify_cfg(inst: &mut Inst) -> bool {
         }
         while let Term::Goto(t) = inst.blocks[b].term {
             let ti = t.0 as usize;
-            if ti == b || preds[ti] != 1 || ti == inst.entry.0 as usize || matches!(inst.blocks[ti].term, Term::Return) {
+            if ti == b
+                || preds[ti] != 1
+                || ti == inst.entry.0 as usize
+                || matches!(inst.blocks[ti].term, Term::Return)
+            {
                 break;
             }
             let moved = std::mem::take(&mut inst.blocks[ti].stmts);
@@ -879,12 +938,18 @@ fn inline(mir: &mut Mir) {
 }
 
 fn inline_at(caller: &mut Inst, b: usize, k: usize, callee: &Inst) {
-    let St::Call { args, rets, .. } = caller.blocks[b].stmts[k].clone() else { return };
+    let St::Call { args, rets, .. } = caller.blocks[b].stmts[k].clone() else {
+        return;
+    };
     // Fresh variables for the callee's.
     let base = caller.vars.len() as u32;
     for v in &callee.vars {
         let mut v = v.clone();
-        v.name = format!("{}.{}", callee.name.rsplit("::").next().unwrap_or(""), v.name);
+        v.name = format!(
+            "{}.{}",
+            callee.name.rsplit("::").next().unwrap_or(""),
+            v.name
+        );
         v.temp = true;
         caller.vars.push(v);
     }
@@ -895,11 +960,16 @@ fn inline_at(caller: &mut Inst, b: usize, k: usize, callee: &Inst) {
     // Split the caller block.
     let tail_stmts = caller.blocks[b].stmts.split_off(k + 1);
     caller.blocks[b].stmts.pop();
-    let tail_term = std::mem::replace(&mut caller.blocks[b].term, Term::Goto(map_block(callee.entry)));
+    let tail_term = std::mem::replace(
+        &mut caller.blocks[b].term,
+        Term::Goto(map_block(callee.entry)),
+    );
     let cont = BlockId(block_base + callee.blocks.len() as u32);
     // Arguments.
     for (p, a) in callee.params.iter().zip(args) {
-        caller.blocks[b].stmts.push(St::Assign(Place::Var(map_var(*p)), a));
+        caller.blocks[b]
+            .stmts
+            .push(St::Assign(Place::Var(map_var(*p)), a));
     }
     let rename_ex = |e: &mut Ex| {
         e.walk_mut(&mut |x| {
@@ -927,12 +997,19 @@ fn inline_at(caller: &mut Inst, b: usize, k: usize, callee: &Inst) {
                     rename_place(p);
                     rename_ex(e);
                 }
-                St::Call { args, rets, saved, .. } => {
+                St::Call {
+                    args, rets, saved, ..
+                } => {
                     args.iter_mut().for_each(rename_ex);
                     rets.iter_mut().for_each(rename_place);
                     saved.iter_mut().for_each(|v| *v = map_var(*v));
                 }
-                St::Asm { inputs, output, operands, .. } => {
+                St::Asm {
+                    inputs,
+                    output,
+                    operands,
+                    ..
+                } => {
                     inputs.iter_mut().for_each(|(_, e)| rename_ex(e));
                     if let Some(p) = output {
                         rename_place(p);

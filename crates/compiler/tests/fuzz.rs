@@ -28,7 +28,15 @@ fn literal(r: &mut Rng, t: &str) -> String {
         "u16" => r.below(65536) as i64,
         _ => r.below(65536) as i64 - 32768,
     };
-    let v = if r.below(3) == 0 { [0, 1, 2, 7, 8, 127, 128, 255][r.below(8) as usize].min(if t.starts_with('u') { 65535 } else { 127 }) } else { v };
+    let v = if r.below(3) == 0 {
+        [0, 1, 2, 7, 8, 127, 128, 255][r.below(8) as usize].min(if t.starts_with('u') {
+            65535
+        } else {
+            127
+        })
+    } else {
+        v
+    };
     let v = match t {
         "u8" => v.clamp(0, 255),
         "i8" => v.clamp(-128, 127),
@@ -46,7 +54,12 @@ fn expr(r: &mut Rng, t: &str, depth: u32) -> String {
     if depth > 1 && r.below(9) == 0 {
         // Calls to the helper functions (small ones are inlined).
         let k = r.below(3);
-        return format!("{t}(h{k}_{}({}, {}))", "x", expr(r, "u8", depth - 1), expr(r, "u16", depth - 1));
+        return format!(
+            "{t}(h{k}_{}({}, {}))",
+            "x",
+            expr(r, "u8", depth - 1),
+            expr(r, "u16", depth - 1)
+        );
     }
     if depth == 0 || r.below(4) == 0 {
         return match r.below(4) {
@@ -63,7 +76,11 @@ fn expr(r: &mut Rng, t: &str, depth: u32) -> String {
         }
         6 => {
             let op = *r.pick(&["<<", ">>"]);
-            format!("({} {op} {})", expr(r, t, depth - 1), r.below(if t.ends_with('8') { 9 } else { 17 }))
+            format!(
+                "({} {op} {})",
+                expr(r, t, depth - 1),
+                r.below(if t.ends_with('8') { 9 } else { 17 })
+            )
         }
         7 => {
             // Division by a nonzero constant.
@@ -76,7 +93,11 @@ fn expr(r: &mut Rng, t: &str, depth: u32) -> String {
             format!("{t}({})", expr(r, from, depth - 1))
         }
         _ => {
-            let op = if t.starts_with('i') { *r.pick(&["-", "~"]) } else { "~" };
+            let op = if t.starts_with('i') {
+                *r.pick(&["-", "~"])
+            } else {
+                "~"
+            };
             format!("{op}{}", expr(r, t, depth - 1))
         }
     }
@@ -114,14 +135,25 @@ fn program(seed: u64) -> (String, usize) {
     for k in 0..n {
         let t = *r.pick(&TYPES);
         match r.below(4) {
-            0 => src.push_str(&format!("    if {} {{ out[{k}] = u16({}); }} else {{ out[{k}] = 7; }}\n", cond(&mut r, 2), expr(&mut r, t, 3))),
+            0 => src.push_str(&format!(
+                "    if {} {{ out[{k}] = u16({}); }} else {{ out[{k}] = 7; }}\n",
+                cond(&mut r, 2),
+                expr(&mut r, t, 3)
+            )),
             1 => {
                 src.push_str(&format!("    l_{t} = {};\n", expr(&mut r, t, 3)));
                 src.push_str(&format!("    out[{k}] = u16(l_{t});\n"));
             }
             2 => {
-                src.push_str(&format!("    for j in 0..{} {{ i += 1; g_{t}[i & 3] = {}; }}\n", 1 + r.below(5), expr(&mut r, t, 2)));
-                src.push_str(&format!("    out[{k}] = u16(g_{t}[{}]) + u16(i);\n", r.below(4)));
+                src.push_str(&format!(
+                    "    for j in 0..{} {{ i += 1; g_{t}[i & 3] = {}; }}\n",
+                    1 + r.below(5),
+                    expr(&mut r, t, 2)
+                ));
+                src.push_str(&format!(
+                    "    out[{k}] = u16(g_{t}[{}]) + u16(i);\n",
+                    r.below(4)
+                ));
             }
             _ => src.push_str(&format!("    out[{k}] = u16({});\n", expr(&mut r, t, 4))),
         }
@@ -132,33 +164,80 @@ fn program(seed: u64) -> (String, usize) {
 
 fn reference(src: &str, n: usize) -> Vec<u16> {
     let a = nested_compiler::analyze(&Project::single(src));
-    assert!(!a.diagnostics.has_errors(), "{}\n{}", src, a.diagnostics.items.iter().map(|d| d.render(&a.sources)).collect::<Vec<_>>().join("\n"));
+    assert!(
+        !a.diagnostics.has_errors(),
+        "{}\n{}",
+        src,
+        a.diagnostics
+            .items
+            .iter()
+            .map(|d| d.render(&a.sources))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     let mut env = nested_compiler::consteval::ProgramEnv::new(&a.program);
-    let run = a.program.functions.iter().position(|f| f.name == "run").unwrap();
+    let run = a
+        .program
+        .functions
+        .iter()
+        .position(|f| f.name == "run")
+        .unwrap();
     let mut interp = nested_compiler::consteval::Interp::new(&mut env);
     interp.mutable_globals = true;
-    interp.call(nested_compiler::hir::FnId(run as u32), vec![], Default::default()).unwrap();
-    let g = a.program.globals.iter().position(|g| g.name == "out").unwrap();
-    let v = interp.global_writes.iter().rev().find(|(x, _)| x.0 as usize == g).map(|(_, v)| v.clone()).unwrap();
+    interp
+        .call(
+            nested_compiler::hir::FnId(run as u32),
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+    let g = a
+        .program
+        .globals
+        .iter()
+        .position(|g| g.name == "out")
+        .unwrap();
+    let v = interp
+        .global_writes
+        .iter()
+        .rev()
+        .find(|(x, _)| x.0 as usize == g)
+        .map(|(_, v)| v.clone())
+        .unwrap();
     let out: Vec<u16> = v.items().iter().map(|x| x.int() as u16).collect();
     assert_eq!(out.len(), n);
     out
 }
 
 fn emulate(src: &str, n: usize, optimize: bool) -> Vec<u16> {
-    let out = compile(&Project::single(src), Options { optimize }).unwrap_or_else(|e| panic!("{src}\n{}", e.render()));
+    let out = compile(&Project::single(src), Options { optimize })
+        .unwrap_or_else(|e| panic!("{src}\n{}", e.render()));
     let mut emu = Emulator::new(out.rom.clone(), 44100.0).unwrap();
     for _ in 0..30 {
         emu.frame(0).unwrap();
     }
-    let base = out.linked.symbols.iter().find(|s| s.name == "out").unwrap().address;
-    (0..n as u16).map(|i| emu.read_ram(base + i) as u16 | (emu.read_ram(base + n as u16 + i) as u16) << 8).collect()
+    let base = out
+        .linked
+        .symbols
+        .iter()
+        .find(|s| s.name == "out")
+        .unwrap()
+        .address;
+    (0..n as u16)
+        .map(|i| emu.read_ram(base + i) as u16 | (emu.read_ram(base + n as u16 + i) as u16) << 8)
+        .collect()
 }
 
 #[test]
 fn random_programs() {
-    let count: u64 = std::env::var("FUZZ").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-    let first: u64 = std::env::var("FUZZ_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let count: u64 = std::env::var("FUZZ")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    let first: u64 = std::env::var("FUZZ_FROM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     for seed in first..count {
         eprintln!("seed {seed}");
         let (src, n) = program(seed);

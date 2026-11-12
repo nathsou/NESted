@@ -45,8 +45,15 @@ pub struct Thought {
 impl Cartridge {
     pub fn load(source_path: &Path) -> Result<Self, String> {
         // A project directory (games/chess) or its main.nst.
-        let dir = if source_path.is_dir() { source_path.to_path_buf() } else { source_path.parent().unwrap_or(Path::new(".")).to_path_buf() };
-        let mut project = nested_compiler::Project { entry: "main.nst".into(), ..Default::default() };
+        let dir = if source_path.is_dir() {
+            source_path.to_path_buf()
+        } else {
+            source_path.parent().unwrap_or(Path::new(".")).to_path_buf()
+        };
+        let mut project = nested_compiler::Project {
+            entry: "main.nst".into(),
+            ..Default::default()
+        };
         fn walk(d: &Path, base: &Path, p: &mut nested_compiler::Project) {
             for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
                 let path = e.path();
@@ -54,17 +61,24 @@ impl Cartridge {
                     walk(&path, base, p);
                     continue;
                 }
-                let rel = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 if rel.ends_with(".nst") {
-                    p.sources.insert(rel, std::fs::read_to_string(&path).unwrap_or_default());
+                    p.sources
+                        .insert(rel, std::fs::read_to_string(&path).unwrap_or_default());
                 } else if rel.starts_with("assets/") {
-                    p.assets.insert(rel, std::fs::read(&path).unwrap_or_default());
+                    p.assets
+                        .insert(rel, std::fs::read(&path).unwrap_or_default());
                 }
             }
         }
         walk(&dir, &dir, &mut project);
         let source = project.sources.get("main.nst").cloned().unwrap_or_default();
-        let compiled = nested_compiler::compile(&project, Default::default()).map_err(|f| f.render())?;
+        let compiled =
+            nested_compiler::compile(&project, Default::default()).map_err(|f| f.render())?;
         let mut m = Machine::new(&compiled.rom)?;
         LAST_ROM.with(|r| *r.borrow_mut() = compiled.rom.clone());
         // Boot: run init and settle into the frame loop.
@@ -78,20 +92,42 @@ impl Cartridge {
                 .linked
                 .symbols
                 .iter()
-                .map(|s| (if s.kind.starts_with("fn") { format!("fn:{}", s.name) } else { s.name.clone() }, s.address))
+                .map(|s| {
+                    (
+                        if s.kind.starts_with("fn") {
+                            format!("fn:{}", s.name)
+                        } else {
+                            s.name.clone()
+                        },
+                        s.address,
+                    )
+                })
                 .collect(),
             listing: compiled
                 .linked
                 .listing
                 .iter()
                 .filter(|(bank, _)| bank.is_none())
-                .map(|(_, i)| (i.address, (i.text.clone(), i.src.filter(|(f, _)| Some(*f) == main_file).map(|(_, s)| (s as usize, s as usize + 40)))))
+                .map(|(_, i)| {
+                    (
+                        i.address,
+                        (
+                            i.text.clone(),
+                            i.src
+                                .filter(|(f, _)| Some(*f) == main_file)
+                                .map(|(_, s)| (s as usize, s as usize + 40)),
+                        ),
+                    )
+                })
                 .collect(),
             source,
         })
     }
     pub fn symbol(&self, name: &str) -> u16 {
-        *self.symbols.get(name).unwrap_or_else(|| panic!("missing symbol {name}"))
+        *self
+            .symbols
+            .get(name)
+            .unwrap_or_else(|| panic!("missing symbol {name}"))
     }
     fn command(&mut self, cmd: u8, args: &[u8], max_frames: u64) -> Result<(), String> {
         let arg = self.symbol("io_arg");

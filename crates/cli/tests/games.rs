@@ -1,5 +1,5 @@
 //! Play the example cartridges through controller input.
-use nested_compiler::{compile, Output, Options, Project};
+use nested_compiler::{compile, Options, Output, Project};
 use nested_runtime::Emulator;
 use std::path::{Path, PathBuf};
 
@@ -34,9 +34,14 @@ pub fn project(dir: &Path) -> Project {
                 walk(&path, base, p);
                 continue;
             }
-            let rel = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
             if rel.ends_with(".nst") {
-                p.sources.insert(rel, std::fs::read_to_string(&path).unwrap());
+                p.sources
+                    .insert(rel, std::fs::read_to_string(&path).unwrap());
             } else if rel.starts_with("assets/") {
                 p.assets.insert(rel, std::fs::read(&path).unwrap());
             }
@@ -48,9 +53,17 @@ pub fn project(dir: &Path) -> Project {
 
 impl Game {
     pub fn load(name: &str) -> Game {
-        let out = compile(&project(&root().join("games").join(name)), Options::default()).unwrap_or_else(|e| panic!("{}", e.render()));
+        let out = compile(
+            &project(&root().join("games").join(name)),
+            Options::default(),
+        )
+        .unwrap_or_else(|e| panic!("{}", e.render()));
         let emu = Emulator::new(out.rom.clone(), 44100.0).unwrap();
-        let mut g = Game { out, emu, frames: 0 };
+        let mut g = Game {
+            out,
+            emu,
+            frames: 0,
+        };
         g.wait(30);
         g
     }
@@ -58,7 +71,11 @@ impl Game {
         self.emu.frame(buttons).unwrap();
         self.frames += 1;
         let dropped = self.byte("std::video::dropped");
-        assert_eq!(dropped, 0, "background updates were dropped (frame {})", self.frames);
+        assert_eq!(
+            dropped, 0,
+            "background updates were dropped (frame {})",
+            self.frames
+        );
     }
     pub fn wait(&mut self, n: usize) {
         for _ in 0..n {
@@ -150,7 +167,12 @@ mod glide {
             }
             play(&mut g, sol);
             g.until("mode", CLEAR, 200);
-            assert_eq!(g.word("moves") as usize, sol.len(), "level {} moves", level + 1);
+            assert_eq!(
+                g.word("moves") as usize,
+                sol.len(),
+                "level {} moves",
+                level + 1
+            );
             g.wait(70);
             if level == 0 {
                 g.shot("glide-clear");
@@ -189,7 +211,11 @@ mod sprout {
         let text = std::fs::read_to_string(root().join("games/sprout/levels.nst")).unwrap();
         let marker = format!("const TEXT{level}: [u8; _] = \"\n");
         let start = text.find(&marker).unwrap() + marker.len();
-        text[start..].lines().take(13).map(|l| l.as_bytes().to_vec()).collect()
+        text[start..]
+            .lines()
+            .take(13)
+            .map(|l| l.as_bytes().to_vec())
+            .collect()
     }
 
     fn start(level: u8) -> Game {
@@ -219,7 +245,8 @@ mod sprout {
     fn scrolls_collects_gems_and_reaches_the_first_flag() {
         let mut g = start(0);
         let map = grid(0);
-        let solid = |c: usize, r: usize| r < 13 && c < map[0].len() && b"=#BSJ".contains(&map[r][c]);
+        let solid =
+            |c: usize, r: usize| r < 13 && c < map[0].len() && b"=#BSJ".contains(&map[r][c]);
         let mut jump = 0;
         let mut best = 0u16;
         for f in 0..3000 {
@@ -234,7 +261,9 @@ mod sprout {
             let ahead = col + 1;
             let grounded = g.byte("grounded") != 0;
             let blocked = solid(ahead, row) || solid(ahead, row.saturating_sub(1));
-            let hole = |c: usize| !solid(c, row + 1) || map.get(row + 1).is_some_and(|r| r.get(c) == Some(&b'^'));
+            let hole = |c: usize| {
+                !solid(c, row + 1) || map.get(row + 1).is_some_and(|r| r.get(c) == Some(&b'^'))
+            };
             // Jump at the last moment before a gap.
             let front = px as usize + 13;
             let gap = hole((front + 3) / 16) && !hole(front / 16);
@@ -259,9 +288,14 @@ mod sprout {
             }
         }
         assert!(g.byte("gems") > 0, "no gems collected");
-        assert!(g.word("cam") > 256, "the camera did not scroll (x reached {best})");
+        assert!(
+            g.word("cam") > 256,
+            "the camera did not scroll (x reached {best})"
+        );
         // Whatever the bot managed, the flag must finish the world.
-        let flag_col = (0..map[0].len()).find(|c| (0..13).any(|r| map[r][*c] == b'F')).unwrap();
+        let flag_col = (0..map[0].len())
+            .find(|c| (0..13).any(|r| map[r][*c] == b'F'))
+            .unwrap();
         let flag_row = (0..13).find(|r| map[*r][flag_col] == b'F').unwrap();
         if g.byte("mode") != CLEAR {
             g.until("mode", PLAY, 300);
@@ -274,7 +308,14 @@ mod sprout {
         g.until("mode", PLAY, 100);
         g.wait(30);
         g.shot("sprout-cavern");
-        eprintln!("direct {} split {} {} {} cam {}", g.byte("std::video::direct"), g.byte("split_hi"), g.byte("split_x"), g.byte("split_lo"), g.word("cam"));
+        eprintln!(
+            "direct {} split {} {} {} cam {}",
+            g.byte("std::video::direct"),
+            g.byte("split_hi"),
+            g.byte("split_x"),
+            g.byte("split_lo"),
+            g.word("cam")
+        );
         g.wait(60);
         g.shot("sprout-cavern2");
     }
@@ -320,7 +361,11 @@ fn sprout_trace() {
         let py = g.word("y") >> 4;
         let vy = g.word("vy") as i16;
         if f > 250 {
-            println!("{f}: x {px} y {py} vy {vy} grounded {} pound {}", g.byte("grounded"), g.byte("pounding"));
+            println!(
+                "{f}: x {px} y {py} vy {vy} grounded {} pound {}",
+                g.byte("grounded"),
+                g.byte("pounding")
+            );
         }
         if g.byte("grounded") != 0 && jump == 0 && f % 40 == 0 {
             jump = 18;
@@ -353,12 +398,22 @@ fn sprout_irq_trace() {
             g.wait(220);
             println!("level now {}", g.emu.read_ram(lv));
         }
-        let irq = g.out.linked.symbols.iter().find(|s| s.name == "scanline@irq").map(|s| s.address).unwrap();
+        let irq = g
+            .out
+            .linked
+            .symbols
+            .iter()
+            .find(|s| s.name == "scanline@irq")
+            .map(|s| s.address)
+            .unwrap();
         for _ in 0..2 {
             g.emu.cpu.bus.ppu.frame_complete = false;
             while !g.emu.cpu.bus.ppu.frame_complete {
                 if g.emu.cpu.pc == irq {
-                    println!("world {world}: IRQ at scanline {} cycle {}", g.emu.cpu.bus.ppu.scanline, g.emu.cpu.bus.ppu.cycle);
+                    println!(
+                        "world {world}: IRQ at scanline {} cycle {}",
+                        g.emu.cpu.bus.ppu.scanline, g.emu.cpu.bus.ppu.cycle
+                    );
                 }
                 g.emu.cpu.step();
             }
@@ -432,8 +487,13 @@ mod chess {
         assert_eq!(g.byte("pondering"), 0, "a button stops pondering");
         let after: Vec<u8> = (0..128).map(|i| g.emu.read_ram(board + i)).collect();
         let occupied = |i: usize| i & 8 == 0 || before[i & !8] != 0;
-        let diff: Vec<usize> = (0..128).filter(|&i| occupied(i) && before[i] != after[i]).collect();
-        assert!(diff.is_empty(), "pondering leaves the position as it was: {diff:?}");
+        let diff: Vec<usize> = (0..128)
+            .filter(|&i| occupied(i) && before[i] != after[i])
+            .collect();
+        assert!(
+            diff.is_empty(),
+            "pondering leaves the position as it was: {diff:?}"
+        );
     }
 
     #[test]
@@ -492,5 +552,10 @@ fn chess_speed() {
         best = best.max(n);
     }
     let (n0, n1) = (0u32, best * 10 / frames.max(1) * 6);
-    println!("nodes in 10 s: {} ({} per second), plies {}", n1 - n0, (n1 - n0) / 10, g.byte("game_plies"));
+    println!(
+        "nodes in 10 s: {} ({} per second), plies {}",
+        n1 - n0,
+        (n1 - n0) / 10,
+        g.byte("game_plies")
+    );
 }

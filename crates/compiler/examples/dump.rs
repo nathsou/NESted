@@ -4,9 +4,16 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let src = std::fs::read_to_string(&args[1]).unwrap();
     let mut p = Project::single(&src);
-    let dir = std::path::Path::new(&args[1]).parent().unwrap().to_path_buf();
+    let dir = std::path::Path::new(&args[1])
+        .parent()
+        .unwrap()
+        .to_path_buf();
     for e in walk(&dir) {
-        let rel = e.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/");
+        let rel = e
+            .strip_prefix(&dir)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         if rel.ends_with(".nst") {
             p.sources.insert(rel, std::fs::read_to_string(&e).unwrap());
         } else {
@@ -30,7 +37,11 @@ fn walk(d: &std::path::Path) -> Vec<std::path::PathBuf> {
     if let Ok(rd) = std::fs::read_dir(d) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() { out.extend(walk(&p)); } else { out.push(p); }
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p);
+            }
         }
     }
     out

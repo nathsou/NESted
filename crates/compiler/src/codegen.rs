@@ -34,11 +34,14 @@ pub fn fn_label(inst: InstId) -> String {
 }
 
 pub fn helper_label(name: &str, ctx: Context) -> String {
-    format!("{name}_{}", match ctx {
-        Context::Main => "m",
-        Context::Nmi => "n",
-        Context::Irq => "i",
-    })
+    format!(
+        "{name}_{}",
+        match ctx {
+            Context::Main => "m",
+            Context::Nmi => "n",
+            Context::Irq => "i",
+        }
+    )
 }
 
 struct Gen<'a> {
@@ -269,13 +272,21 @@ impl Gen<'_> {
             }
             Ex::Var(v, sc) => {
                 if b >= sc.size() {
-                    return if sc.signed() { None } else { Some(Arg::Imm(Opnd::num(0))) };
+                    return if sc.signed() {
+                        None
+                    } else {
+                        Some(Arg::Imm(Opnd::num(0)))
+                    };
                 }
                 Some(Arg::Mem(byte_of(&self.var(*v), b)))
             }
             Ex::Load(o, idx, sc) => {
                 if b >= sc.size() {
-                    return if sc.signed() { None } else { Some(Arg::Imm(Opnd::num(0))) };
+                    return if sc.signed() {
+                        None
+                    } else {
+                        Some(Arg::Imm(Opnd::num(0)))
+                    };
                 }
                 let base = self.obj_byte(*o, b);
                 let big = self.obj(*o).len.unwrap_or(0) > 256;
@@ -337,7 +348,9 @@ impl Gen<'_> {
     fn shifted_byte(&mut self, e: &Ex, b: usize) -> Option<Arg> {
         match e {
             Ex::Cast(x, from, Sc::U8 | Sc::I8) if from.wide() => match &**x {
-                Ex::Bin(BinOp::Shr, w, k, _) if k.konst() == Some(8) && b == 0 => self.operand(w, 1),
+                Ex::Bin(BinOp::Shr, w, k, _) if k.konst() == Some(8) && b == 0 => {
+                    self.operand(w, 1)
+                }
                 _ => None,
             },
             Ex::Bin(BinOp::Shr, w, k, sc) if k.konst() == Some(8) && !sc.signed() && sc.wide() => {
@@ -354,7 +367,11 @@ impl Gen<'_> {
     /// Load a simple index into X (or Y when X is busy). Returns the register.
     fn index_operand(&mut self, i: &Ex) -> Option<char> {
         let reg = if self.x_busy { 'y' } else { 'x' };
-        let (lop, _) = if reg == 'x' { (Op::Ldx, ()) } else { (Op::Ldy, ()) };
+        let (lop, _) = if reg == 'x' {
+            (Op::Ldx, ())
+        } else {
+            (Op::Ldy, ())
+        };
         match i {
             Ex::Const(k, _) => {
                 self.imm(lop, *k);
@@ -511,7 +528,11 @@ impl Gen<'_> {
     fn big_address(&mut self, o: ObjId, b: usize, i: &Ex) -> Opnd {
         let p = self.tmp16();
         let base = self.obj_byte(o, b);
-        let i16 = if i.sc().wide() { i.clone() } else { Ex::Cast(Box::new(i.clone()), i.sc(), Sc::U16) };
+        let i16 = if i.sc().wide() {
+            i.clone()
+        } else {
+            Ex::Cast(Box::new(i.clone()), i.sc(), Sc::U16)
+        };
         // p = base + i
         self.eval16(&i16, &p);
         self.ins(Op::Lda, Arg::Mem(p.clone()));
@@ -545,26 +566,35 @@ impl Gen<'_> {
             Ex::Load(o, idx, _) => {
                 let big = self.obj(*o).len.unwrap_or(0) > 256;
                 if let Some((x, _)) = idx.as_deref().and_then(offset_index) {
-                    return !big && (x.konst().is_some() || self.is_index_simple(x) || matches!(x, Ex::Load(_, Some(k), s) if !s.wide() && k.konst().is_some()));
+                    return !big
+                        && (x.konst().is_some()
+                            || self.is_index_simple(x)
+                            || matches!(x, Ex::Load(_, Some(k), s) if !s.wide() && k.konst().is_some()));
                 }
                 match idx.as_deref() {
                     None => true,
                     Some(Ex::Const(..)) => true,
-                    Some(i) if !big => matches!(i, Ex::Var(_, s) if !s.wide())
-                        || matches!(i, Ex::Load(_, None, s) if !s.wide())
-                        || matches!(i, Ex::Load(_, Some(k), s) if !s.wide() && k.konst().is_some())
-                        || matches!(i, Ex::Cast(x, f, _) if f.wide() && matches!(**x, Ex::Var(..))),
+                    Some(i) if !big => {
+                        matches!(i, Ex::Var(_, s) if !s.wide())
+                            || matches!(i, Ex::Load(_, None, s) if !s.wide())
+                            || matches!(i, Ex::Load(_, Some(k), s) if !s.wide() && k.konst().is_some())
+                            || matches!(i, Ex::Cast(x, f, _) if f.wide() && matches!(**x, Ex::Var(..)))
+                    }
                     _ => false,
                 }
             }
             Ex::Cast(x, from, to) => {
                 if from.size() >= to.size() || !from.signed() {
-                    self.is_operand(x) && (from.size() <= 1 || matches!(**x, Ex::Var(..) | Ex::Const(..) | Ex::Load(..)))
+                    self.is_operand(x)
+                        && (from.size() <= 1
+                            || matches!(**x, Ex::Var(..) | Ex::Const(..) | Ex::Load(..)))
                 } else {
                     matches!(**x, Ex::Const(..))
                 }
             }
-            Ex::Bin(BinOp::Shr, w, k, sc) if k.konst() == Some(8) && !sc.signed() && sc.wide() => self.is_operand16(w),
+            Ex::Bin(BinOp::Shr, w, k, sc) if k.konst() == Some(8) && !sc.signed() && sc.wide() => {
+                self.is_operand16(w)
+            }
             _ => false,
         }
     }
@@ -586,7 +616,11 @@ impl Gen<'_> {
     fn bin8(&mut self, op: BinOp, a: &Ex, b: &Ex, sc: Sc) {
         let commutative = matches!(op, BinOp::Add | BinOp::And | BinOp::Or | BinOp::Xor);
         // Prefer the complex operand on the left.
-        let (a, b) = if commutative && self.is_operand(a) && !self.is_operand(b) { (b, a) } else { (a, b) };
+        let (a, b) = if commutative && self.is_operand(a) && !self.is_operand(b) {
+            (b, a)
+        } else {
+            (a, b)
+        };
         match op {
             BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Or | BinOp::Xor => {
                 let b = self.spill8(b);
@@ -637,7 +671,10 @@ impl Gen<'_> {
                 }
             }
             BinOp::Div | BinOp::Rem => {
-                if let Some(k) = b.konst().filter(|k| *k > 0 && (k & (k - 1)) == 0 && !sc.signed()) {
+                if let Some(k) = b
+                    .konst()
+                    .filter(|k| *k > 0 && (k & (k - 1)) == 0 && !sc.signed())
+                {
                     self.load_a(a);
                     if op == BinOp::Div {
                         self.shift8_const(BinOp::Shr, k.trailing_zeros() as i64, sc);
@@ -701,7 +738,9 @@ impl Gen<'_> {
         match k {
             0 => self.imm(Op::Lda, 0),
             1 => {}
-            k if k & (k - 1) == 0 => self.shift8_const(BinOp::Shl, k.trailing_zeros() as i64, Sc::U8),
+            k if k & (k - 1) == 0 => {
+                self.shift8_const(BinOp::Shl, k.trailing_zeros() as i64, Sc::U8)
+            }
             k if k.count_ones() <= 3 => {
                 // Shift-and-add through a temporary.
                 let t = self.tmp8();
@@ -814,7 +853,11 @@ impl Gen<'_> {
                     let lo_base = self.obj_byte(*o, 0);
                     let _ = lo_base;
                     let p2 = self.tmp16();
-                    let i16 = if i.sc().wide() { (**i).clone() } else { Ex::Cast(i.clone(), i.sc(), Sc::U16) };
+                    let i16 = if i.sc().wide() {
+                        (**i).clone()
+                    } else {
+                        Ex::Cast(i.clone(), i.sc(), Sc::U16)
+                    };
                     self.eval16(&i16, &p2);
                     self.ins(Op::Lda, Arg::Mem(p2.clone()));
                     self.imp(Op::Clc);
@@ -828,7 +871,9 @@ impl Gen<'_> {
                     self.ins(Op::Lda, Arg::Mem(t));
                     self.store_byte(dst, 0);
                 } else {
-                    let (ix, k) = offset_index(i).map(|(x, k)| (x.clone(), k)).unwrap_or(((**i).clone(), 0));
+                    let (ix, k) = offset_index(i)
+                        .map(|(x, k)| (x.clone(), k))
+                        .unwrap_or(((**i).clone(), 0));
                     self.load_a(&ix);
                     self.imp(Op::Tax);
                     for b in 0..2 {
@@ -838,7 +883,9 @@ impl Gen<'_> {
                     }
                 }
             }
-            Ex::Bin(op, a, b, sc) if !op.is_compare() && !op.is_logic() => self.bin16(*op, a, b, *sc, dst),
+            Ex::Bin(op, a, b, sc) if !op.is_compare() && !op.is_logic() => {
+                self.bin16(*op, a, b, *sc, dst)
+            }
             Ex::Un(op, a, _) => {
                 let a = self.spill16(a);
                 match op {
@@ -876,7 +923,11 @@ impl Gen<'_> {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Or | BinOp::Xor => {
                 let commutative = op != BinOp::Sub;
-                let (a, b) = if commutative && self.is_operand16(a) && !self.is_operand16(b) { (b, a) } else { (a, b) };
+                let (a, b) = if commutative && self.is_operand16(a) && !self.is_operand16(b) {
+                    (b, a)
+                } else {
+                    (a, b)
+                };
                 let b = self.spill16(b);
                 let a = self.spill16(a);
                 match op {
@@ -921,14 +972,26 @@ impl Gen<'_> {
                 if op == BinOp::Mul {
                     if let Some(k) = b.konst() {
                         if k & (k - 1) == 0 && k > 0 {
-                            return self.shift16_const(BinOp::Shl, a, k.trailing_zeros() as i64, sc, dst);
+                            return self.shift16_const(
+                                BinOp::Shl,
+                                a,
+                                k.trailing_zeros() as i64,
+                                sc,
+                                dst,
+                            );
                         }
                     }
                 }
                 if op != BinOp::Mul && !sc.signed() {
                     if let Some(k) = b.konst().filter(|k| *k > 0 && k & (k - 1) == 0) {
                         if op == BinOp::Div {
-                            return self.shift16_const(BinOp::Shr, a, k.trailing_zeros() as i64, sc, dst);
+                            return self.shift16_const(
+                                BinOp::Shr,
+                                a,
+                                k.trailing_zeros() as i64,
+                                sc,
+                                dst,
+                            );
                         }
                         let m = Ex::Const(k - 1, sc);
                         return self.bin16(BinOp::And, a, &m, sc, dst);
@@ -1332,7 +1395,9 @@ impl Gen<'_> {
                 o == o2
                     && match (i, j) {
                         (None, None) => true,
-                        (Some(a), Some(b)) => a == &**b && (a.konst().is_some() || self.is_index_simple(a)),
+                        (Some(a), Some(b)) => {
+                            a == &**b && (a.konst().is_some() || self.is_index_simple(a))
+                        }
                         _ => false,
                     }
             }
@@ -1397,7 +1462,9 @@ impl Gen<'_> {
             }
             Place::Mem(o, idx) => {
                 let big = self.obj(*o).len.unwrap_or(0) > 256;
-                let simple_idx = idx.as_ref().is_none_or(|i| i.konst().is_some() || self.is_index_simple(i));
+                let simple_idx = idx
+                    .as_ref()
+                    .is_none_or(|i| i.konst().is_some() || self.is_index_simple(i));
                 if !big && simple_idx {
                     // Direct byte stores; operands may be computed.
                     let t = self.tmp16();
@@ -1429,7 +1496,9 @@ impl Gen<'_> {
                             self.ins(Op::Sta, Arg::IndY(ptr));
                         }
                     } else {
-                        let (ix, k) = offset_index(&i).map(|(x, k)| (x.clone(), k)).unwrap_or((i.clone(), 0));
+                        let (ix, k) = offset_index(&i)
+                            .map(|(x, k)| (x.clone(), k))
+                            .unwrap_or((i.clone(), 0));
                         self.load_a(&ix);
                         self.imp(Op::Tax);
                         for b in 0..2 {
@@ -1452,11 +1521,23 @@ impl Gen<'_> {
                 self.out.push(Line::Src(span.file.0, span.start));
             }
             St::Assign(p, e) => self.assign(p, e),
-            St::Call { target, args, rets, saved, span } => {
+            St::Call {
+                target,
+                args,
+                rets,
+                saved,
+                span,
+            } => {
                 self.span = *span;
                 self.call(*target, args, rets, saved);
             }
-            St::Asm { body, operands, inputs, output, span } => {
+            St::Asm {
+                body,
+                operands,
+                inputs,
+                output,
+                span,
+            } => {
                 self.span = *span;
                 self.out.push(Line::Barrier);
                 let mut regs: Vec<(char, Ex)> = inputs.clone();
@@ -1497,7 +1578,13 @@ impl Gen<'_> {
                     // A holds the result.
                     let t = self.tmp8();
                     self.ins(Op::Sta, Arg::Mem(t.clone()));
-                    let ex = Ex::Var(match t.sym { Sym::Var(_, v) => v, _ => unreachable!() }, Sc::U8);
+                    let ex = Ex::Var(
+                        match t.sym {
+                            Sym::Var(_, v) => v,
+                            _ => unreachable!(),
+                        },
+                        Sc::U8,
+                    );
                     self.assign(p, &ex);
                 }
                 self.data_bank = None;
@@ -1579,9 +1666,15 @@ impl Gen<'_> {
             self.jump(Op::Jsr, &fn_label(target));
         }
         // Results.
-        let ret_scs: Vec<Sc> = callee.rets.iter().map(|r| callee.vars[r.0 as usize].sc).collect();
+        let ret_scs: Vec<Sc> = callee
+            .rets
+            .iter()
+            .map(|r| callee.vars[r.0 as usize].sc)
+            .collect();
         let callee_rets = callee.rets.clone();
-        if let ([sc], [Place::Var(v)], false) = (ret_scs.as_slice(), rets, recursive && !saved.is_empty()) {
+        if let ([sc], [Place::Var(v)], false) =
+            (ret_scs.as_slice(), rets, recursive && !saved.is_empty())
+        {
             let dst = self.var(*v);
             self.ins(Op::Sta, Arg::Mem(dst.clone()));
             if sc.wide() {
@@ -1632,13 +1725,19 @@ impl Gen<'_> {
                             self.ins(Op::Lda, Arg::Mem(src.plus(b)));
                             self.ins(Op::Sta, Arg::Mem(t.plus(b)));
                         }
-                        let tv = match t.sym { Sym::Var(_, v) => v, _ => unreachable!() };
+                        let tv = match t.sym {
+                            Sym::Var(_, v) => v,
+                            _ => unreachable!(),
+                        };
                         self.assign(p, &Ex::Var(tv, sc));
                     } else {
                         self.ins(Op::Lda, Arg::Mem(src));
                         let t = self.tmp8();
                         self.ins(Op::Sta, Arg::Mem(t.clone()));
-                        let tv = match t.sym { Sym::Var(_, v) => v, _ => unreachable!() };
+                        let tv = match t.sym {
+                            Sym::Var(_, v) => v,
+                            _ => unreachable!(),
+                        };
                         self.assign(p, &Ex::Var(tv, sc));
                     }
                 }
@@ -1718,7 +1817,11 @@ impl Gen<'_> {
                     match (placed[t.0 as usize], placed[f.0 as usize]) {
                         (false, false) => {
                             // A private successor first; joins come later.
-                            if preds[t.0 as usize] < preds[f.0 as usize] { Some(t) } else { Some(f) }
+                            if preds[t.0 as usize] < preds[f.0 as usize] {
+                                Some(t)
+                            } else {
+                                Some(f)
+                            }
                         }
                         (false, true) => Some(t),
                         _ => Some(f),
@@ -1754,10 +1857,17 @@ impl Gen<'_> {
             // `ret = e; return`: compute e straight into A (and X).
             let mut direct_ret = None;
             if let (Term::Goto(t), [r]) = (&block.term, self.inst.rets.as_slice()) {
-                if self.is_return_block(*t) && !interrupt && self.saved_bank.is_none() && !self.inst.reset {
+                if self.is_return_block(*t)
+                    && !interrupt
+                    && self.saved_bank.is_none()
+                    && !self.inst.reset
+                {
                     if let Some(pos) = stmts.iter().rposition(|s| !matches!(s, St::Line(_))) {
                         if let St::Assign(Place::Var(v), e) = &stmts[pos] {
-                            if v == r && pos + 1 == stmts.len() || v == r && stmts[pos + 1..].iter().all(|s| matches!(s, St::Line(_))) {
+                            if v == r && pos + 1 == stmts.len()
+                                || v == r
+                                    && stmts[pos + 1..].iter().all(|s| matches!(s, St::Line(_)))
+                            {
                                 direct_ret = Some(e.clone());
                                 stmts.truncate(pos);
                             }
@@ -1776,10 +1886,13 @@ impl Gen<'_> {
                     let lo = self.operand(&x, 0).unwrap();
                     self.ins(Op::Lda, lo);
                     let hi = self.operand(&x, 1).unwrap();
-                    self.ins(Op::Ldx, match hi {
-                        Arg::MemY(o) => Arg::MemY(o),
-                        a => a,
-                    });
+                    self.ins(
+                        Op::Ldx,
+                        match hi {
+                            Arg::MemY(o) => Arg::MemY(o),
+                            a => a,
+                        },
+                    );
                 } else {
                     self.load_a(&e);
                 }

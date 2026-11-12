@@ -62,7 +62,13 @@ fn const_functions() {
          const SQUARES: [u16; 8] = table();
          const N: u16 = SQUARES[7];",
     ));
-    let errs: Vec<_> = a.diagnostics.items.iter().filter(|d| d.is_error()).map(|d| d.render(&a.sources)).collect();
+    let errs: Vec<_> = a
+        .diagnostics
+        .items
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| d.render(&a.sources))
+        .collect();
     assert!(errs.is_empty(), "{errs:?}");
     let n = a.program.globals.iter().find(|g| g.name == "N").unwrap();
     assert_eq!(n.value.int(), 49);
@@ -70,7 +76,8 @@ fn const_functions() {
 
 #[test]
 fn exhaustive() {
-    let e = errors("enum D { A, B, C } fn f(d: D) -> u8 { return match d { D::A => 1, D::B => 2 }; }");
+    let e =
+        errors("enum D { A, B, C } fn f(d: D) -> u8 { return match d { D::A => 1, D::B => 2 }; }");
     assert!(e[0].contains("does not cover C"), "{e:?}");
     let e = errors("fn f(d: u8) -> u8 { return match d { 0..=100 => 1, 102..=255 => 2 }; }");
     assert!(e[0].contains("does not cover 101"), "{e:?}");
@@ -78,12 +85,27 @@ fn exhaustive() {
 
 #[test]
 fn modules() {
-    let mut p = Project::single("use util; use util::double; fn update() { let x = util::triple(2); let y = double(x); }");
+    let mut p = Project::single(
+        "use util; use util::double; fn update() { let x = util::triple(2); let y = double(x); }",
+    );
     p.sources.insert("util.nst".into(), "pub fn double(x: u8) -> u8 { return x * 2; } pub fn triple(x: u8) -> u8 { return x * 3; } fn hidden() {}".into());
     let a = analyze(&p);
-    let errs: Vec<_> = a.diagnostics.items.iter().filter(|d| d.is_error()).map(|d| d.render(&a.sources)).collect();
+    let errs: Vec<_> = a
+        .diagnostics
+        .items
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| d.render(&a.sources))
+        .collect();
     assert!(errs.is_empty(), "{errs:?}");
-    p.sources.insert("main.nst".into(), "use util; fn update() { util::hidden(); }".into());
+    p.sources.insert(
+        "main.nst".into(),
+        "use util; fn update() { util::hidden(); }".into(),
+    );
     let a = analyze(&p);
-    assert!(a.diagnostics.items.iter().any(|d| d.message.contains("private")));
+    assert!(a
+        .diagnostics
+        .items
+        .iter()
+        .any(|d| d.message.contains("private")));
 }

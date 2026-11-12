@@ -184,9 +184,11 @@ impl<'p> Checker<'p> {
         };
         let Some(text) = text else {
             if let Some(span) = span {
-                self.diags.error(span, format!("Cannot find module file '{path}'"));
+                self.diags
+                    .error(span, format!("Cannot find module file '{path}'"));
             } else {
-                self.diags.error(Span::default(), format!("Cannot find source file '{path}'"));
+                self.diags
+                    .error(Span::default(), format!("Cannot find source file '{path}'"));
             }
             return None;
         };
@@ -230,10 +232,13 @@ impl<'p> Checker<'p> {
             for item in &root.ast.items {
                 if let ItemKind::Cartridge(fields) = &item.kind {
                     for (name, value) in fields {
-                        if let (ast::ExprKind::Int(n), "queue") = (&value.kind, name.name.as_str()) {
+                        if let (ast::ExprKind::Int(n), "queue") = (&value.kind, name.name.as_str())
+                        {
                             queue = (*n).clamp(16, 250);
                         }
-                        if let (ast::ExprKind::Bool(b), "sprites") = (&value.kind, name.name.as_str()) {
+                        if let (ast::ExprKind::Bool(b), "sprites") =
+                            (&value.kind, name.name.as_str())
+                        {
                             sprites = *b;
                         }
                     }
@@ -258,14 +263,27 @@ impl<'p> Checker<'p> {
         let board = crate::link::Board::from_name(&mapper).unwrap_or(crate::link::Board::Nrom);
         let chr_ram = chr_ram || !board.chr_rom();
         let mut out = String::from("//! Constants describing this program's cartridge board.\n");
-        out.push_str(&format!("/// iNES mapper number.\npub const MAPPER: u16 = {};\n", board.ines()));
+        out.push_str(&format!(
+            "/// iNES mapper number.\npub const MAPPER: u16 = {};\n",
+            board.ines()
+        ));
         for n in crate::link::Board::NAMES {
             let b = crate::link::Board::from_name(n).unwrap();
-            out.push_str(&format!("pub const {}: bool = {};\n", n.to_uppercase(), b == board));
+            out.push_str(&format!(
+                "pub const {}: bool = {};\n",
+                n.to_uppercase(),
+                b == board
+            ));
         }
         out.push_str(&format!("/// Pattern tables are RAM (uploaded by the program).\npub const CHR_RAM: bool = {chr_ram};\n"));
-        out.push_str(&format!("pub const HORIZONTAL: bool = {};\n", mirroring == "horizontal"));
-        out.push_str(&format!("pub const PRG_BANKING: bool = {};\n", board.banking() != crate::codegen::Banking::None));
+        out.push_str(&format!(
+            "pub const HORIZONTAL: bool = {};\n",
+            mirroring == "horizontal"
+        ));
+        out.push_str(&format!(
+            "pub const PRG_BANKING: bool = {};\n",
+            board.banking() != crate::codegen::Banking::None
+        ));
         out.push_str(&format!("/// Bytes of background updates per frame (`queue` in the cartridge block).\npub const QUEUE: u8 = {queue};\n"));
         out.push_str(&format!("/// Sprites are drawn (`sprites = false` frees the shadow sprite page).\npub const SPRITES: bool = {sprites};\n"));
         out
@@ -491,7 +509,10 @@ impl<'p> Checker<'p> {
         }
         let file = format!(
             "{}.nst",
-            segs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("/")
+            segs.iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join("/")
         );
         self.modules
             .iter()
@@ -504,8 +525,10 @@ impl<'p> Checker<'p> {
         let bind = |c: &mut Self, name: &ast::Ident, def: Def| {
             if let Some(old) = c.modules[m].names.insert(name.name.clone(), def) {
                 if old != def {
-                    c.diags
-                        .error(name.span, format!("'{}' is already defined here", name.name));
+                    c.diags.error(
+                        name.span,
+                        format!("'{}' is already defined here", name.name),
+                    );
                 }
             }
         };
@@ -518,7 +541,10 @@ impl<'p> Checker<'p> {
             if u.glob {
                 self.modules[m].globs.push(target);
             } else if u.names.is_empty() {
-                let name = u.alias.clone().unwrap_or_else(|| segs.last().unwrap().clone());
+                let name = u
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| segs.last().unwrap().clone());
                 bind(self, &name, Def::Module(target));
             } else {
                 for (n, alias) in &u.names {
@@ -549,7 +575,15 @@ impl<'p> Checker<'p> {
                     }
                     None => self.diags.error(
                         n.span,
-                        format!("Cannot find '{}' in '{}'", n.name, segs[..segs.len() - 1].iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")),
+                        format!(
+                            "Cannot find '{}' in '{}'",
+                            n.name,
+                            segs[..segs.len() - 1]
+                                .iter()
+                                .map(|s| s.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join("::")
+                        ),
                     ),
                 }
                 return;
@@ -572,8 +606,10 @@ impl<'p> Checker<'p> {
         let item = &self.modules[r.module as usize].ast.items[r.item as usize];
         if !item.public {
             let name = item.name().map(|n| n.name.clone()).unwrap_or_default();
-            self.diags
-                .error(span, format!("'{name}' is private to its module; mark it 'pub'"));
+            self.diags.error(
+                span,
+                format!("'{name}' is private to its module; mark it 'pub'"),
+            );
         }
     }
 
@@ -620,8 +656,10 @@ impl<'p> Checker<'p> {
             }
             if def.is_none() {
                 if report {
-                    self.diags
-                        .error(segs[0].span, format!("Cannot find '{}' in this scope", segs[0].name));
+                    self.diags.error(
+                        segs[0].span,
+                        format!("Cannot find '{}' in this scope", segs[0].name),
+                    );
                 }
                 return None;
             }
@@ -653,8 +691,10 @@ impl<'p> Checker<'p> {
                 }
                 None => {
                     if report {
-                        self.diags
-                            .error(seg.span, format!("Cannot find '{}' in '{}'", seg.name, path.text()));
+                        self.diags.error(
+                            seg.span,
+                            format!("Cannot find '{}' in '{}'", seg.name, path.text()),
+                        );
                     }
                     return None;
                 }
@@ -694,7 +734,8 @@ impl<'p> Checker<'p> {
                     self.alias_types[a as usize].clone().unwrap_or(Type::Error)
                 }
                 Some(_) => {
-                    self.diags.error(p.span, format!("'{}' is not a type", p.text()));
+                    self.diags
+                        .error(p.span, format!("'{}' is not a type", p.text()));
                     Type::Error
                 }
                 None => Type::Error,
@@ -709,7 +750,8 @@ impl<'p> Checker<'p> {
                 match self.const_int(m, len) {
                     Some(n) if (1..=65535).contains(&n) => Type::Array(Box::new(elem), n as u32),
                     Some(_) => {
-                        self.diags.error(len.span, "Array length must be between 1 and 65535");
+                        self.diags
+                            .error(len.span, "Array length must be between 1 and 65535");
                         Type::Error
                     }
                     None => Type::Error,
@@ -718,7 +760,8 @@ impl<'p> Checker<'p> {
             TypeExpr::Slice(elem, span) => {
                 let elem = self.resolve_type(m, elem);
                 if self.types.size(&elem) != 1 || !self.types.is_scalar(&elem) {
-                    self.diags.error(*span, "Slices hold byte-sized scalar elements");
+                    self.diags
+                        .error(*span, "Slices hold byte-sized scalar elements");
                     return Type::Error;
                 }
                 Type::Slice(Box::new(elem))
@@ -734,7 +777,12 @@ impl<'p> Checker<'p> {
     }
 
     /// Type of an array with inferred length, from its initializer.
-    pub(crate) fn resolve_decl_type(&mut self, m: usize, t: &TypeExpr, init: Option<&ast::Expr>) -> (Type, Option<Expr>) {
+    pub(crate) fn resolve_decl_type(
+        &mut self,
+        m: usize,
+        t: &TypeExpr,
+        init: Option<&ast::Expr>,
+    ) -> (Type, Option<Expr>) {
         if let TypeExpr::Array(elem, None, _) = t {
             if let Some(init) = init {
                 let elem_ty = self.resolve_type(m, elem);
@@ -764,8 +812,7 @@ impl<'p> Checker<'p> {
             Some(State::Busy) => {
                 if !matches!(def, Def::Fn(_)) {
                     let span = self.defs.get(&def).copied().unwrap_or_default();
-                    self.diags
-                        .error(span, "This definition depends on itself");
+                    self.diags.error(span, "This definition depends on itself");
                 }
                 return;
             }
@@ -782,7 +829,8 @@ impl<'p> Checker<'p> {
                 for (name, t) in fields {
                     let ty = self.resolve_type(m, t);
                     if !seen.insert(name.name.clone()) {
-                        self.diags.error(name.span, format!("Field '{}' is repeated", name.name));
+                        self.diags
+                            .error(name.span, format!("Field '{}' is repeated", name.name));
                     }
                     if matches!(ty, Type::Array(..) | Type::Slice(_)) {
                         self.diags.error(
@@ -800,7 +848,8 @@ impl<'p> Checker<'p> {
                     None => Type::U8,
                 };
                 if !repr_ty.is_machine_int() && !repr_ty.is_error() {
-                    self.diags.error(item.span, "Enum representation must be an integer type");
+                    self.diags
+                        .error(item.span, "Enum representation must be an integer type");
                 }
                 let mut next = 0i64;
                 let mut out: Vec<(String, i64)> = Vec::new();
@@ -812,10 +861,12 @@ impl<'p> Checker<'p> {
                         }
                     }
                     if next < lo || next > hi {
-                        self.diags.error(name.span, "Variant value does not fit the representation");
+                        self.diags
+                            .error(name.span, "Variant value does not fit the representation");
                     }
                     if out.iter().any(|(n, _)| *n == name.name) {
-                        self.diags.error(name.span, format!("Variant '{}' is repeated", name.name));
+                        self.diags
+                            .error(name.span, format!("Variant '{}' is repeated", name.name));
                     }
                     if out.iter().any(|(_, v)| *v == next) {
                         self.diags.error(name.span, "Two variants share a value");
@@ -824,7 +875,8 @@ impl<'p> Checker<'p> {
                     next += 1;
                 }
                 if out.is_empty() {
-                    self.diags.error(item.span, "An enum needs at least one variant");
+                    self.diags
+                        .error(item.span, "An enum needs at least one variant");
                 }
                 let def = &mut self.types.enums[e.0 as usize];
                 def.repr = repr_ty;
@@ -834,7 +886,8 @@ impl<'p> Checker<'p> {
                 if let TypeExpr::Range(base, lo, hi, inclusive, span) = ty {
                     let base = self.resolve_type(m, base);
                     if !base.is_machine_int() {
-                        self.diags.error(*span, "A range refines u8, i8, u16 or i16");
+                        self.diags
+                            .error(*span, "A range refines u8, i8, u16 or i16");
                     }
                     let lo = self.const_int(m, lo).unwrap_or(0);
                     let mut hi = self.const_int(m, hi).unwrap_or(0);
@@ -843,7 +896,13 @@ impl<'p> Checker<'p> {
                     }
                     let (blo, bhi) = self.types.bounds(&base);
                     if lo > hi || lo < blo || hi > bhi {
-                        self.diags.error(*span, format!("Range {lo}..={hi} is empty or does not fit {}", self.types.name(&base)));
+                        self.diags.error(
+                            *span,
+                            format!(
+                                "Range {lo}..={hi} is empty or does not fit {}",
+                                self.types.name(&base)
+                            ),
+                        );
                     }
                     let def = &mut self.types.ranges[r.0 as usize];
                     def.base = base;
@@ -913,7 +972,14 @@ impl<'p> Checker<'p> {
         }
     }
 
-    fn check_const(&mut self, m: usize, g: GlobalId, ty: Option<&TypeExpr>, value: &ast::Expr, item: &Item) {
+    fn check_const(
+        &mut self,
+        m: usize,
+        g: GlobalId,
+        ty: Option<&TypeExpr>,
+        value: &ast::Expr,
+        item: &Item,
+    ) {
         self.global_attrs(g, item, true);
         let mut scope = crate::check_expr::Scope::constant(m);
         let (t, e) = match ty {
@@ -944,16 +1010,26 @@ impl<'p> Checker<'p> {
         }
     }
 
-    fn check_var(&mut self, m: usize, g: GlobalId, ty: &TypeExpr, value: Option<&ast::Expr>, item: &Item) {
+    fn check_var(
+        &mut self,
+        m: usize,
+        g: GlobalId,
+        ty: &TypeExpr,
+        value: Option<&ast::Expr>,
+        item: &Item,
+    ) {
         self.global_attrs(g, item, false);
         let (t, pre) = self.resolve_decl_type(m, ty, value);
         self.globals[g.0 as usize].ty = t.clone();
         if matches!(t, Type::Slice(_)) {
-            self.diags.error(ty.span(), "Slices cannot be stored in RAM in this version");
+            self.diags
+                .error(ty.span(), "Slices cannot be stored in RAM in this version");
         }
         let io = matches!(self.globals[g.0 as usize].kind, GlobalKind::Io(_));
         match value {
-            Some(v) if io => self.diags.error(v.span, "Hardware registers have no initializer"),
+            Some(v) if io => self
+                .diags
+                .error(v.span, "Hardware registers have no initializer"),
             Some(v) => {
                 let mut scope = crate::check_expr::Scope::constant(m);
                 let e = match pre {
@@ -985,7 +1061,12 @@ impl<'p> Checker<'p> {
                     .map(|(_, t)| self.zero(t))
                     .collect(),
             ),
-            Type::Enum(e) => Value::Int(self.types.enums[e.0 as usize].variants.first().map_or(0, |v| v.1)),
+            Type::Enum(e) => Value::Int(
+                self.types.enums[e.0 as usize]
+                    .variants
+                    .first()
+                    .map_or(0, |v| v.1),
+            ),
             Type::Range(r) => Value::Int(self.types.ranges[r.0 as usize].lo),
             _ => Value::Int(0),
         }
@@ -996,7 +1077,10 @@ impl<'p> Checker<'p> {
         for p in &f.params {
             let t = self.resolve_type(m, &p.ty);
             if matches!(t, Type::Array(..)) {
-                self.diags.error(p.ty.span(), "Arrays cannot be passed by value; pass an index or a slice");
+                self.diags.error(
+                    p.ty.span(),
+                    "Arrays cannot be passed by value; pass an index or a slice",
+                );
             }
             params.push((p.name.name.clone(), t, p.mutable));
         }
@@ -1022,7 +1106,9 @@ impl<'p> Checker<'p> {
                 "cold" => attrs.cold = true,
                 "recursive" => match int(self) {
                     Some(n) if (1..=64).contains(&n) => attrs.recursive = Some(n as u32),
-                    _ => self.diags.error(a.span, "@recursive(N) needs a depth from 1 to 64"),
+                    _ => self
+                        .diags
+                        .error(a.span, "@recursive(N) needs a depth from 1 to 64"),
                 },
                 "budget" => match int(self) {
                     Some(n) if n > 0 => attrs.budget = Some(n as u32),
@@ -1038,7 +1124,8 @@ impl<'p> Checker<'p> {
             }
         }
         if attrs.inline && attrs.noinline {
-            self.diags.error(item.span, "@inline and @noinline conflict");
+            self.diags
+                .error(item.span, "@inline and @noinline conflict");
         }
         attrs
     }
@@ -1096,7 +1183,8 @@ impl<'p> Checker<'p> {
             ..Default::default()
         };
         if items.len() > 1 {
-            self.diags.error(items[1].span, "Only one cartridge block is allowed");
+            self.diags
+                .error(items[1].span, "Only one cartridge block is allowed");
         }
         let Some(item) = items.first() else {
             self.cartridge = cart;
@@ -1130,15 +1218,16 @@ impl<'p> Checker<'p> {
                     Some(w @ ("horizontal" | "vertical" | "single" | "four")) => {
                         cart.mirroring = w.to_owned()
                     }
-                    _ => self.diags.error(
-                        value.span,
-                        "Expected horizontal, vertical, single or four",
-                    ),
+                    _ => self
+                        .diags
+                        .error(value.span, "Expected horizontal, vertical, single or four"),
                 },
                 "chr" => {
                     let mut paths = Vec::new();
                     match &value.kind {
-                        ast::ExprKind::Str(s) => paths.push((String::from_utf8_lossy(s).to_string(), value.span)),
+                        ast::ExprKind::Str(s) => {
+                            paths.push((String::from_utf8_lossy(s).to_string(), value.span))
+                        }
                         ast::ExprKind::Array(items) => {
                             for i in items {
                                 match &i.kind {
@@ -1152,9 +1241,10 @@ impl<'p> Checker<'p> {
                         ast::ExprKind::Path(p) if p.is_single() && p.segments[0].name == "ram" => {
                             cart.chr_ram = true
                         }
-                        _ => self
-                            .diags
-                            .error(value.span, "Expected a CHR asset path, a list of paths or 'ram'"),
+                        _ => self.diags.error(
+                            value.span,
+                            "Expected a CHR asset path, a list of paths or 'ram'",
+                        ),
                     }
                     for (p, span) in paths {
                         match self.asset_bytes(&p) {
@@ -1231,8 +1321,10 @@ impl<'p> Checker<'p> {
                 );
             }
             if !f.params.is_empty() || f.result != Type::Void {
-                self.diags
-                    .error(self.fn_meta[i].2, format!("@{kind} handlers take no parameters and return nothing"));
+                self.diags.error(
+                    self.fn_meta[i].2,
+                    format!("@{kind} handlers take no parameters and return nothing"),
+                );
             }
         }
     }
@@ -1272,7 +1364,11 @@ impl<'p> Checker<'p> {
                 globals: self.globals,
                 functions,
                 cartridge: self.cartridge,
-                modules: self.modules.iter().map(|m| module_path_of_file(&m.path)).collect(),
+                modules: self
+                    .modules
+                    .iter()
+                    .map(|m| module_path_of_file(&m.path))
+                    .collect(),
             },
             diagnostics: self.diags,
             modules: self.modules,

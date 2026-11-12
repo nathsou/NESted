@@ -6,24 +6,79 @@ use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Op {
-    Adc, And, Asl, Bcc, Bcs, Beq, Bit, Bmi, Bne, Bpl, Brk, Bvc, Bvs, Clc, Cld, Cli, Clv, Cmp, Cpx,
-    Cpy, Dec, Dex, Dey, Eor, Inc, Inx, Iny, Jmp, Jsr, Lda, Ldx, Ldy, Lsr, Nop, Ora, Pha, Php, Pla,
-    Plp, Rol, Ror, Rti, Rts, Sbc, Sec, Sed, Sei, Sta, Stx, Sty, Tax, Tay, Tsx, Txa, Txs, Tya,
+    Adc,
+    And,
+    Asl,
+    Bcc,
+    Bcs,
+    Beq,
+    Bit,
+    Bmi,
+    Bne,
+    Bpl,
+    Brk,
+    Bvc,
+    Bvs,
+    Clc,
+    Cld,
+    Cli,
+    Clv,
+    Cmp,
+    Cpx,
+    Cpy,
+    Dec,
+    Dex,
+    Dey,
+    Eor,
+    Inc,
+    Inx,
+    Iny,
+    Jmp,
+    Jsr,
+    Lda,
+    Ldx,
+    Ldy,
+    Lsr,
+    Nop,
+    Ora,
+    Pha,
+    Php,
+    Pla,
+    Plp,
+    Rol,
+    Ror,
+    Rti,
+    Rts,
+    Sbc,
+    Sec,
+    Sed,
+    Sei,
+    Sta,
+    Stx,
+    Sty,
+    Tax,
+    Tay,
+    Tsx,
+    Txa,
+    Txs,
+    Tya,
 }
 
 const NAMES: &[&str] = &[
-    "adc", "and", "asl", "bcc", "bcs", "beq", "bit", "bmi", "bne", "bpl", "brk", "bvc", "bvs", "clc",
-    "cld", "cli", "clv", "cmp", "cpx", "cpy", "dec", "dex", "dey", "eor", "inc", "inx", "iny", "jmp",
-    "jsr", "lda", "ldx", "ldy", "lsr", "nop", "ora", "pha", "php", "pla", "plp", "rol", "ror", "rti",
-    "rts", "sbc", "sec", "sed", "sei", "sta", "stx", "sty", "tax", "tay", "tsx", "txa", "txs", "tya",
+    "adc", "and", "asl", "bcc", "bcs", "beq", "bit", "bmi", "bne", "bpl", "brk", "bvc", "bvs",
+    "clc", "cld", "cli", "clv", "cmp", "cpx", "cpy", "dec", "dex", "dey", "eor", "inc", "inx",
+    "iny", "jmp", "jsr", "lda", "ldx", "ldy", "lsr", "nop", "ora", "pha", "php", "pla", "plp",
+    "rol", "ror", "rti", "rts", "sbc", "sec", "sed", "sei", "sta", "stx", "sty", "tax", "tay",
+    "tsx", "txa", "txs", "tya",
 ];
 
 const ALL: [Op; 56] = {
     use Op::*;
     [
-        Adc, And, Asl, Bcc, Bcs, Beq, Bit, Bmi, Bne, Bpl, Brk, Bvc, Bvs, Clc, Cld, Cli, Clv, Cmp, Cpx,
-        Cpy, Dec, Dex, Dey, Eor, Inc, Inx, Iny, Jmp, Jsr, Lda, Ldx, Ldy, Lsr, Nop, Ora, Pha, Php, Pla,
-        Plp, Rol, Ror, Rti, Rts, Sbc, Sec, Sed, Sei, Sta, Stx, Sty, Tax, Tay, Tsx, Txa, Txs, Tya,
+        Adc, And, Asl, Bcc, Bcs, Beq, Bit, Bmi, Bne, Bpl, Brk, Bvc, Bvs, Clc, Cld, Cli, Clv, Cmp,
+        Cpx, Cpy, Dec, Dex, Dey, Eor, Inc, Inx, Iny, Jmp, Jsr, Lda, Ldx, Ldy, Lsr, Nop, Ora, Pha,
+        Php, Pla, Plp, Rol, Ror, Rti, Rts, Sbc, Sec, Sed, Sei, Sta, Stx, Sty, Tax, Tay, Tsx, Txa,
+        Txs, Tya,
     ]
 };
 
@@ -272,7 +327,10 @@ pub fn cycles(op: Op, mode: Mode) -> (u8, u8) {
         }
         _ => 2,
     };
-    (n, n + u8::from(!store && !rmw && matches!(mode, AbsX | AbsY | IndY)))
+    (
+        n,
+        n + u8::from(!store && !rmw && matches!(mode, AbsX | AbsY | IndY)),
+    )
 }
 
 /// A symbolic address.
@@ -358,13 +416,25 @@ pub enum Arg {
 impl Arg {
     pub fn opnd(&self) -> Option<&Opnd> {
         match self {
-            Arg::Imm(o) | Arg::Mem(o) | Arg::MemX(o) | Arg::MemY(o) | Arg::Ind(o) | Arg::IndX(o) | Arg::IndY(o) => Some(o),
+            Arg::Imm(o)
+            | Arg::Mem(o)
+            | Arg::MemX(o)
+            | Arg::MemY(o)
+            | Arg::Ind(o)
+            | Arg::IndX(o)
+            | Arg::IndY(o) => Some(o),
             _ => None,
         }
     }
     pub fn opnd_mut(&mut self) -> Option<&mut Opnd> {
         match self {
-            Arg::Imm(o) | Arg::Mem(o) | Arg::MemX(o) | Arg::MemY(o) | Arg::Ind(o) | Arg::IndX(o) | Arg::IndY(o) => Some(o),
+            Arg::Imm(o)
+            | Arg::Mem(o)
+            | Arg::MemX(o)
+            | Arg::MemY(o)
+            | Arg::Ind(o)
+            | Arg::IndX(o)
+            | Arg::IndY(o) => Some(o),
             _ => None,
         }
     }
@@ -478,7 +548,9 @@ pub fn parse(
             Some((w, r)) => (w, r.trim()),
             None => (code, ""),
         };
-        let value = |s: &str| -> Result<Opnd, (usize, String)> { expr(s, prefix, &local, refs).map_err(|e| (line, e)) };
+        let value = |s: &str| -> Result<Opnd, (usize, String)> {
+            expr(s, prefix, &local, refs).map_err(|e| (line, e))
+        };
         match word.to_ascii_lowercase().as_str() {
             ".byte" | ".db" => {
                 let mut v = Vec::new();
@@ -493,12 +565,17 @@ pub fn parse(
                 continue;
             }
             ".word" | ".dw" => {
-                let v = split_args(rest).iter().map(|p| value(p)).collect::<Result<_, _>>()?;
+                let v = split_args(rest)
+                    .iter()
+                    .map(|p| value(p))
+                    .collect::<Result<_, _>>()?;
                 out.push(Line::Words(v));
                 continue;
             }
             ".res" => {
-                let n = value(rest)?.number().ok_or((line, "'.res' needs a number".to_owned()))?;
+                let n = value(rest)?
+                    .number()
+                    .ok_or((line, "'.res' needs a number".to_owned()))?;
                 out.push(Line::Fill(n as usize));
                 continue;
             }
@@ -551,8 +628,11 @@ pub fn parse(
 
 fn is_ident(s: &str) -> bool {
     !s.is_empty()
-        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '@' || c == '.')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '@' || c == '.')
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '@' || c == '.')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '@' || c == '.')
 }
 
 fn split_args(s: &str) -> Vec<String> {
@@ -746,10 +826,11 @@ pub fn encode(
             if let Line::Ins(ins) = l {
                 if ins.op.is_branch() {
                     if !long[i] {
-                        let target = ins
-                            .arg
-                            .opnd()
-                            .and_then(|o| value(o, resolve, &|n| labels.get(n).map(|v| *v as i64).or_else(|| external(n))));
+                        let target = ins.arg.opnd().and_then(|o| {
+                            value(o, resolve, &|n| {
+                                labels.get(n).map(|v| *v as i64).or_else(|| external(n))
+                            })
+                        });
                         if let Some(t) = target {
                             let d = t - (pc + 2);
                             if !(-128..=127).contains(&d) {
@@ -787,7 +868,10 @@ pub fn encode(
                 Line::Src(f, s) => src = Some((*f, *s)),
                 Line::Ins(ins) => {
                     let start = bytes.len();
-                    let get = |o: &Opnd| value(o, resolve, &lookup).ok_or_else(|| format!("Unresolved symbol in '{ins}'"));
+                    let get = |o: &Opnd| {
+                        value(o, resolve, &lookup)
+                            .ok_or_else(|| format!("Unresolved symbol in '{ins}'"))
+                    };
                     let cyc;
                     if ins.op.is_branch() {
                         let t = get(ins.arg.opnd().unwrap())?;
@@ -814,14 +898,24 @@ pub fn encode(
                             Some(o) => get(o)?,
                             None => 0,
                         };
-                        if matches!(m, Mode::Zp | Mode::ZpX | Mode::ZpY | Mode::IndX | Mode::IndY) && !(0..256).contains(&v) {
-                            return Err(format!("'{ins}' needs a zero-page address, found ${v:04X}"));
+                        if matches!(
+                            m,
+                            Mode::Zp | Mode::ZpX | Mode::ZpY | Mode::IndX | Mode::IndY
+                        ) && !(0..256).contains(&v)
+                        {
+                            return Err(format!(
+                                "'{ins}' needs a zero-page address, found ${v:04X}"
+                            ));
                         }
                         if m == Mode::Imm && !(-128..256).contains(&v) {
-                            return Err(format!("Immediate value {v} does not fit a byte in '{ins}'"));
+                            return Err(format!(
+                                "Immediate value {v} does not fit a byte in '{ins}'"
+                            ));
                         }
                         if m == Mode::Ind && v & 0xff == 0xff {
-                            return Err(format!("'{ins}' triggers the 6502 indirect-jump page bug"));
+                            return Err(format!(
+                                "'{ins}' triggers the 6502 indirect-jump page bug"
+                            ));
                         }
                         bytes.push(opcode(ins.op, m).unwrap());
                         match size(m) {
@@ -875,7 +969,11 @@ pub fn encode(
     Err("Branch relaxation did not converge".into())
 }
 
-pub fn value(o: &Opnd, resolve: &dyn Fn(&Sym) -> Option<i64>, labels: &dyn Fn(&str) -> Option<i64>) -> Option<i64> {
+pub fn value(
+    o: &Opnd,
+    resolve: &dyn Fn(&Sym) -> Option<i64>,
+    labels: &dyn Fn(&str) -> Option<i64>,
+) -> Option<i64> {
     let base = match &o.sym {
         Sym::Num => 0,
         Sym::Label(l) => labels(l)?,

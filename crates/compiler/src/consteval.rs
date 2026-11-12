@@ -26,7 +26,10 @@ impl Env for Checker<'_> {
         self.ensure(crate::check::Def::Global(g));
         let gl = &self.globals[g.0 as usize];
         if !gl.is_const() {
-            return Err(format!("'{}' is a variable, not a compile-time constant", gl.name));
+            return Err(format!(
+                "'{}' is a variable, not a compile-time constant",
+                gl.name
+            ));
         }
         Ok(gl.value.clone())
     }
@@ -92,7 +95,10 @@ impl<'e, E: Env> Interp<'e, E> {
 
     fn tick(&mut self, span: Span) -> R<()> {
         if self.fuel == 0 {
-            return Err(Diagnostic::error(span, "Compile-time evaluation ran too long (50 million steps)"));
+            return Err(Diagnostic::error(
+                span,
+                "Compile-time evaluation ran too long (50 million steps)",
+            ));
         }
         self.fuel -= 1;
         Ok(())
@@ -118,10 +124,19 @@ impl<'e, E: Env> Interp<'e, E> {
             return Err(Diagnostic::error(span, "This function is not available at compile time (it may depend on the constant being defined)"));
         };
         if self.depth > 200 {
-            return Err(Diagnostic::error(span, "Compile-time recursion is too deep"));
+            return Err(Diagnostic::error(
+                span,
+                "Compile-time recursion is too deep",
+            ));
         }
         if func.has_asm {
-            return Err(Diagnostic::error(span, format!("'{}' uses hardware access or assembly and cannot run at compile time", func.name)));
+            return Err(Diagnostic::error(
+                span,
+                format!(
+                    "'{}' uses hardware access or assembly and cannot run at compile time",
+                    func.name
+                ),
+            ));
         }
         let mut frame = vec![Value::Void; func.locals.len()];
         for (p, v) in func.params.iter().zip(args) {
@@ -170,7 +185,11 @@ impl<'e, E: Env> Interp<'e, E> {
                     return Ok(Value::Int(1));
                 }
                 let y = self.expr(b)?.int();
-                Value::Int(binary(self.env.types(), *op, x, y, &a.ty).ok_or_else(|| Diagnostic::error(e.span, "Division by zero at compile time"))?)
+                Value::Int(
+                    binary(self.env.types(), *op, x, y, &a.ty).ok_or_else(|| {
+                        Diagnostic::error(e.span, "Division by zero at compile time")
+                    })?,
+                )
             }
             ExprKind::Cast(x) => {
                 let v = self.expr(x)?.int();
@@ -180,11 +199,17 @@ impl<'e, E: Env> Interp<'e, E> {
                 let i = self.expr(i)?.int();
                 match self.expr(b)? {
                     Value::Aggregate(v) => v.get(i as usize).cloned().ok_or_else(|| {
-                        Diagnostic::error(e.span, format!("Index {i} is out of bounds for length {}", v.len()))
+                        Diagnostic::error(
+                            e.span,
+                            format!("Index {i} is out of bounds for length {}", v.len()),
+                        )
                     })?,
                     Value::Slice(g, start, len) => {
                         if i < 0 || i >= len as i64 {
-                            return Err(Diagnostic::error(e.span, format!("Index {i} is out of bounds for slice length {len}")));
+                            return Err(Diagnostic::error(
+                                e.span,
+                                format!("Index {i} is out of bounds for slice length {len}"),
+                            ));
                         }
                         let data = self.read_global(g, e.span)?;
                         data.items()[(start as i64 + i) as usize].clone()
@@ -192,7 +217,12 @@ impl<'e, E: Env> Interp<'e, E> {
                     _ => return Err(Diagnostic::error(e.span, "Cannot index this value")),
                 }
             }
-            ExprKind::Field(b, f) => self.expr(b)?.items().get(*f).cloned().unwrap_or(Value::Void),
+            ExprKind::Field(b, f) => self
+                .expr(b)?
+                .items()
+                .get(*f)
+                .cloned()
+                .unwrap_or(Value::Void),
             ExprKind::Struct(fields) | ExprKind::Array(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
                 for f in fields {
@@ -216,10 +246,16 @@ impl<'e, E: Env> Interp<'e, E> {
                     _ => Value::Int(0),
                 },
                 Intrinsic::Addr => {
-                    return Err(Diagnostic::error(e.span, "Addresses are only known after linking"))
+                    return Err(Diagnostic::error(
+                        e.span,
+                        "Addresses are only known after linking",
+                    ))
                 }
                 Intrinsic::Peek | Intrinsic::Poke => {
-                    return Err(Diagnostic::error(e.span, "Hardware access cannot run at compile time"))
+                    return Err(Diagnostic::error(
+                        e.span,
+                        "Hardware access cannot run at compile time",
+                    ))
                 }
             },
             ExprKind::Match(x, arms) => {
@@ -239,13 +275,17 @@ impl<'e, E: Env> Interp<'e, E> {
                 }
             }
             ExprKind::Asm(_) => {
-                return Err(Diagnostic::error(e.span, "Assembly cannot run at compile time"))
+                return Err(Diagnostic::error(
+                    e.span,
+                    "Assembly cannot run at compile time",
+                ))
             }
         })
     }
 
     fn arm_matches<B>(&mut self, arm: &Arm<B>, v: i64) -> R<bool> {
-        let hit = arm.patterns.is_empty() || arm.patterns.iter().any(|(lo, hi)| *lo <= v && v <= *hi);
+        let hit =
+            arm.patterns.is_empty() || arm.patterns.iter().any(|(lo, hi)| *lo <= v && v <= *hi);
         if !hit {
             return Ok(false);
         }
@@ -285,10 +325,16 @@ impl<'e, E: Env> Interp<'e, E> {
         }
         path.reverse();
         let mut root = match &cur.kind {
-            ExprKind::Local(id) => std::mem::replace(&mut self.frames.last_mut().unwrap()[id.0 as usize], Value::Void),
+            ExprKind::Local(id) => std::mem::replace(
+                &mut self.frames.last_mut().unwrap()[id.0 as usize],
+                Value::Void,
+            ),
             ExprKind::Global(g) if self.mutable_globals => self.read_global(*g, cur.span)?,
             ExprKind::Global(_) => {
-                return Err(Diagnostic::error(cur.span, "Globals cannot be modified at compile time"))
+                return Err(Diagnostic::error(
+                    cur.span,
+                    "Globals cannot be modified at compile time",
+                ))
             }
             _ => return Err(Diagnostic::error(cur.span, "Cannot assign here")),
         };
@@ -299,9 +345,12 @@ impl<'e, E: Env> Interp<'e, E> {
             };
             let v = Rc::make_mut(v);
             let len = v.len();
-            slot = v
-                .get_mut(*i)
-                .ok_or_else(|| Diagnostic::error(*span, format!("Index {i} is out of bounds for length {len}")))?;
+            slot = v.get_mut(*i).ok_or_else(|| {
+                Diagnostic::error(
+                    *span,
+                    format!("Index {i} is out of bounds for length {len}"),
+                )
+            })?;
         }
         *slot = value;
         match &cur.kind {
@@ -329,8 +378,10 @@ impl<'e, E: Env> Interp<'e, E> {
                             Type::Range(_) => self.env.types().base(&place.ty),
                             ref t => t.clone(),
                         };
-                        let r = binary(self.env.types(), *op, old, v.int(), &t)
-                            .ok_or_else(|| Diagnostic::error(*span, "Division by zero at compile time"))?;
+                        let r =
+                            binary(self.env.types(), *op, old, v.int(), &t).ok_or_else(|| {
+                                Diagnostic::error(*span, "Division by zero at compile time")
+                            })?;
                         Value::Int(r)
                     }
                 };
@@ -363,7 +414,14 @@ impl<'e, E: Env> Interp<'e, E> {
                     _ => {}
                 }
             },
-            Stmt::For { var, start, end, inclusive, reverse, body } => {
+            Stmt::For {
+                var,
+                start,
+                end,
+                inclusive,
+                reverse,
+                body,
+            } => {
                 let a = self.expr(start)?.int();
                 let b = self.expr(end)?.int() - !inclusive as i64;
                 let values: Box<dyn Iterator<Item = i64>> = if *reverse {
@@ -415,7 +473,13 @@ pub fn binary(types: &TypeTable, op: BinOp, a: i64, b: i64, t: &Type) -> Option<
         Type::U16 | Type::I16 => 16,
         _ => 63,
     };
-    let wrap = |v: i64| if base == Type::Int { v } else { types.wrap(&base, v) };
+    let wrap = |v: i64| {
+        if base == Type::Int {
+            v
+        } else {
+            types.wrap(&base, v)
+        }
+    };
     let unsigned = |v: i64| if bits >= 63 { v } else { v & ((1 << bits) - 1) };
     Some(match op {
         BinOp::Add => wrap(a.wrapping_add(b)),

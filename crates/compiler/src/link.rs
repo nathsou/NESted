@@ -21,7 +21,15 @@ pub enum Board {
 
 impl Board {
     pub const NAMES: &'static [&'static str] = &[
-        "nrom", "cnrom", "uxrom", "axrom", "bnrom", "gxrom", "colordreams", "mmc1", "mmc3",
+        "nrom",
+        "cnrom",
+        "uxrom",
+        "axrom",
+        "bnrom",
+        "gxrom",
+        "colordreams",
+        "mmc1",
+        "mmc3",
     ];
     pub fn from_name(n: &str) -> Option<Board> {
         Some(match n {
@@ -73,7 +81,10 @@ impl Board {
     }
     /// Boards whose banks replace all of $8000-$FFFF.
     pub fn whole(self) -> bool {
-        matches!(self, Board::Axrom | Board::Bnrom | Board::Gxrom | Board::ColorDreams)
+        matches!(
+            self,
+            Board::Axrom | Board::Bnrom | Board::Gxrom | Board::ColorDreams
+        )
     }
     pub fn banking(self) -> Banking {
         match self {
@@ -127,6 +138,8 @@ pub struct Linked {
     pub chr_bytes: usize,
     pub fixed_used: usize,
     pub fixed_size: usize,
+    /// Capacity of one switchable bank.
+    pub bank_size: usize,
     pub banks_used: BTreeMap<u32, usize>,
     pub zp_used: usize,
     pub ram_used: usize,
@@ -300,7 +313,16 @@ fn mapper_init(board: Board, cart: &Cartridge) -> String {
         Board::Mmc3 => {
             let m = if mirror == "horizontal" { 1 } else { 0 };
             let mut s = String::new();
-            for (r, v) in [(0, 0), (1, 2), (2, 4), (3, 5), (4, 6), (5, 7), (6, 0), (7, 1)] {
+            for (r, v) in [
+                (0, 0),
+                (1, 2),
+                (2, 4),
+                (3, 5),
+                (4, 6),
+                (5, 7),
+                (6, 0),
+                (7, 1),
+            ] {
                 s.push_str(&format!(" lda #{r}\n sta $8000\n lda #{v}\n sta $8001\n"));
             }
             s.push_str(&format!(
@@ -317,13 +339,24 @@ fn mapper_init(board: Board, cart: &Cartridge) -> String {
 }
 
 pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
-    let LinkInput { mir, units, cart, board, interference } = input;
+    let LinkInput {
+        mir,
+        units,
+        cart,
+        board,
+        interference,
+    } = input;
     let mut errors = Vec::new();
     let banking = board.banking();
     let mut out = Linked::default();
 
     // ------------------------------------------------------------- RAM
-    let stack: u16 = cart.fields.get("stack").map(|s| *s as u16).unwrap_or(64).clamp(16, 256);
+    let stack: u16 = cart
+        .fields
+        .get("stack")
+        .map(|s| *s as u16)
+        .unwrap_or(64)
+        .clamp(16, 256);
     let mut ram = Ram {
         free: vec![(0x0000, 0x0100), (0x0100, 0x0200 - stack), (0x0200, 0x0800)],
     };
@@ -339,7 +372,11 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         for l in &u.lines {
             match l {
                 Line::Ins(ins) => {
-                    if let Some(Opnd { sym: Sym::Obj(o, _), .. }) = ins.arg.opnd() {
+                    if let Some(Opnd {
+                        sym: Sym::Obj(o, _),
+                        ..
+                    }) = ins.arg.opnd()
+                    {
                         used_objs.insert(o.0);
                     }
                 }
@@ -377,8 +414,18 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
                 for b in &inst.blocks {
                     for s in &b.stmts {
                         if let St::Call { saved, target, .. } = s {
-                            if *target == InstId(mir.insts.iter().position(|x| std::ptr::eq(x, inst)).unwrap() as u32) {
-                                let bytes: usize = saved.iter().map(|v| inst.vars[v.0 as usize].sc.size()).sum();
+                            if *target
+                                == InstId(
+                                    mir.insts
+                                        .iter()
+                                        .position(|x| std::ptr::eq(x, inst))
+                                        .unwrap() as u32,
+                                )
+                            {
+                                let bytes: usize = saved
+                                    .iter()
+                                    .map(|v| inst.vars[v.0 as usize].sc.size())
+                                    .sum();
                                 max_level = max_level.max(bytes);
                             }
                         }
@@ -389,7 +436,13 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         }
         max_level * depth as usize
     };
-    let mut glue_zp: Vec<(&str, u16)> = vec![("__bank_shadow", 1), ("__code_shadow", 1), ("__chr_shadow", 1), ("__far_a", 1), ("__far_x", 1)];
+    let mut glue_zp: Vec<(&str, u16)> = vec![
+        ("__bank_shadow", 1),
+        ("__code_shadow", 1),
+        ("__chr_shadow", 1),
+        ("__far_a", 1),
+        ("__far_x", 1),
+    ];
     if recursive_bytes > 0 {
         glue_zp.push(("__save_sp", 1));
     }
@@ -450,8 +503,15 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     for (i, lines) in lines_of.iter().enumerate() {
         for l in lines {
             if let Line::Ins(ins) = l {
-                if let Some(Opnd { sym: Sym::Label(name), .. }) = ins.arg.opnd() {
-                    if let Some(rest) = name.strip_prefix("__f").or_else(|| name.strip_prefix("__far")) {
+                if let Some(Opnd {
+                    sym: Sym::Label(name),
+                    ..
+                }) = ins.arg.opnd()
+                {
+                    if let Some(rest) = name
+                        .strip_prefix("__f")
+                        .or_else(|| name.strip_prefix("__far"))
+                    {
                         if let Ok(j) = rest.parse::<usize>() {
                             if j != i && j < n {
                                 callees[i].insert(j);
@@ -467,7 +527,11 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     for lines in lines_of.iter() {
         for l in lines {
             if let Line::Ins(ins) = l {
-                if let Some(Opnd { sym: Sym::Var(inst, v), .. }) = ins.arg.opnd() {
+                if let Some(Opnd {
+                    sym: Sym::Var(inst, v),
+                    ..
+                }) = ins.arg.opnd()
+                {
                     *uses.entry((inst.0 as usize, v.0)).or_default() += 1;
                 }
             }
@@ -477,7 +541,14 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     let mut order = Vec::new();
     {
         let mut state = vec![0u8; n];
-        fn visit(i: usize, callees: &[BTreeSet<usize>], state: &mut [u8], order: &mut Vec<usize>, errors: &mut Vec<String>, mir: &Mir) {
+        fn visit(
+            i: usize,
+            callees: &[BTreeSet<usize>],
+            state: &mut [u8],
+            order: &mut Vec<usize>,
+            errors: &mut Vec<String>,
+            mir: &Mir,
+        ) {
             if state[i] == 2 {
                 return;
             }
@@ -503,7 +574,11 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     // Every variable starts in zero page except non-pointer ones demoted
     // until the overlaid zero-page frames fit.
     let zp_free = |ram: &Ram| -> u16 {
-        ram.free.iter().filter(|(s, _)| *s < 0x100).map(|(s, e)| e.min(&0x100) - s).sum()
+        ram.free
+            .iter()
+            .filter(|(s, _)| *s < 0x100)
+            .map(|(s, e)| e.min(&0x100) - s)
+            .sum()
     };
     let mut in_zp: Vec<Vec<bool>> = vars_of.iter().map(|v| vec![true; v.len()]).collect();
     let ctx_of: Vec<Context> = mir.insts.iter().map(|i| i.ctx).collect();
@@ -526,7 +601,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
                         return false;
                     }
                     // Codegen scratch never shares; MIR variables share when they never coexist.
-                    let conflict = k >= mir_vars || j >= mir_vars || edges.is_none_or(|e| e[k].contains(&(j as u32)));
+                    let conflict = k >= mir_vars
+                        || j >= mir_vars
+                        || edges.is_none_or(|e| e[k].contains(&(j as u32)));
                     let jl = vars[j].sc.size() as u16;
                     conflict && offset[j] < at + len && at < offset[j] + jl
                 });
@@ -574,7 +651,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         let total: u16 = peak.values().sum();
         if total <= budget || next >= candidates.len() {
             if total > budget + reserve {
-                errors.push(format!("Zero-page frames need {total} bytes; only {budget} are free"));
+                errors.push(format!(
+                    "Zero-page frames need {total} bytes; only {budget} are free"
+                ));
             }
             break;
         }
@@ -596,7 +675,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
             Some(a) => {
                 zp_base.insert(*ctx, a);
             }
-            None => errors.push(format!("Zero page cannot hold {size} bytes of {ctx:?} frames")),
+            None => errors.push(format!(
+                "Zero page cannot hold {size} bytes of {ctx:?} frames"
+            )),
         }
     }
     for (ctx, size) in &ram_peak {
@@ -620,7 +701,11 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         let (_, ram_slots) = layout(i, &in_zp, false);
         for (k, v) in vars_of[i].iter().enumerate() {
             let size = v.sc.size() as u16;
-            let addr = if in_zp[i][k] { zo + zp_slots[k] } else { ro + ram_slots[k] };
+            let addr = if in_zp[i][k] {
+                zo + zp_slots[k]
+            } else {
+                ro + ram_slots[k]
+            };
             var_addr.insert((InstId(i as u32), VarId(k as u32)), addr);
             frame_bytes += size as usize;
             if !v.temp {
@@ -648,30 +733,54 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     for lines in &lines_of {
         for l in lines {
             if let Line::Ins(ins) = l {
-                if let Some(Opnd { sym: Sym::Obj(o, _), .. }) = ins.arg.opnd() {
+                if let Some(Opnd {
+                    sym: Sym::Obj(o, _),
+                    ..
+                }) = ins.arg.opnd()
+                {
                     *global_uses.entry(o.0).or_default() += 1;
                 }
             }
         }
     }
     let mut pending: Vec<usize> = (0..mir.objs.len())
-        .filter(|i| matches!(mir.objs[*i].kind, ObjKind::Ram(Placement::Auto | Placement::Ram)) && !obj_addr.contains_key(&(ObjId(*i as u32), false)) && used_objs.contains(&(*i as u32)))
+        .filter(|i| {
+            matches!(
+                mir.objs[*i].kind,
+                ObjKind::Ram(Placement::Auto | Placement::Ram)
+            ) && !obj_addr.contains_key(&(ObjId(*i as u32), false))
+                && used_objs.contains(&(*i as u32))
+        })
         .collect();
-    pending.sort_by_key(|i| std::cmp::Reverse((global_uses.get(&(*i as u32)).copied().unwrap_or(0) * 4) / mir.objs[*i].bytes().max(1)));
+    pending.sort_by_key(|i| {
+        std::cmp::Reverse(
+            (global_uses.get(&(*i as u32)).copied().unwrap_or(0) * 4) / mir.objs[*i].bytes().max(1),
+        )
+    });
     // Recursion save stack.
     if recursive_bytes > 0 {
         match ram.alloc(recursive_bytes as u16, 0x100, 0x800) {
             Some(a) => {
                 extra_ram.insert("__save_stack".into(), a);
             }
-            None => errors.push(format!("RAM cannot hold the {recursive_bytes}-byte recursion save stack")),
+            None => errors.push(format!(
+                "RAM cannot hold the {recursive_bytes}-byte recursion save stack"
+            )),
         }
     }
     for i in pending {
         let o = &mir.objs[i];
         let size = o.bytes() as u16;
-        let zp_ok = o.kind == ObjKind::Ram(Placement::Auto) && o.len.is_none() && global_uses.get(&(i as u32)).copied().unwrap_or(0) > 0;
-        let addr = if zp_ok { ram.alloc(size, 0, 0x100) } else { None }.or_else(|| ram.alloc(size, 0x100, 0x800)).or_else(|| ram.alloc(size, 0, 0x100));
+        let zp_ok = o.kind == ObjKind::Ram(Placement::Auto)
+            && o.len.is_none()
+            && global_uses.get(&(i as u32)).copied().unwrap_or(0) > 0;
+        let addr = if zp_ok {
+            ram.alloc(size, 0, 0x100)
+        } else {
+            None
+        }
+        .or_else(|| ram.alloc(size, 0x100, 0x800))
+        .or_else(|| ram.alloc(size, 0, 0x100));
         match addr {
             Some(a) => place_obj(&mut obj_addr, ObjId(i as u32), o, a),
             None => {
@@ -682,7 +791,10 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
                         .objs
                         .iter()
                         .enumerate()
-                        .filter(|(k, x)| matches!(x.kind, ObjKind::Ram(_) | ObjKind::Frame(_)) && used_objs.contains(&(*k as u32)))
+                        .filter(|(k, x)| {
+                            matches!(x.kind, ObjKind::Ram(_) | ObjKind::Frame(_))
+                                && used_objs.contains(&(*k as u32))
+                        })
                         .map(|(_, x)| (x.bytes(), x.name.clone()))
                         .collect();
                     for (ctx, size) in &ram_peak {
@@ -693,7 +805,11 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
                     }
                     users.sort_by(|a, b| b.cmp(a));
                     let total: usize = users.iter().map(|u| u.0).sum();
-                    let top: Vec<String> = users.iter().take(12).map(|(n, name)| format!("{name} {n}")).collect();
+                    let top: Vec<String> = users
+                        .iter()
+                        .take(12)
+                        .map(|(n, name)| format!("{name} {n}"))
+                        .collect();
                     errors.push(format!(
                         "RAM is full: '{}' needs {size} bytes (largest free block {} bytes). {total} bytes requested; largest: {}",
                         o.name,
@@ -711,7 +827,16 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
                 name: o.name.clone(),
                 address: *a,
                 size: o.bytes(),
-                kind: format!("{} {}{}", if matches!(o.kind, ObjKind::Frame(_)) { "local" } else { "var" }, o.sc.name(), o.len.map(|n| format!("[{n}]")).unwrap_or_default()),
+                kind: format!(
+                    "{} {}{}",
+                    if matches!(o.kind, ObjKind::Frame(_)) {
+                        "local"
+                    } else {
+                        "var"
+                    },
+                    o.sc.name(),
+                    o.len.map(|n| format!("[{n}]")).unwrap_or_default()
+                ),
                 bank: None,
             });
         } else if let ObjKind::Io(a) = o.kind {
@@ -726,7 +851,12 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     }
     out.zp_used = 256 - zp_free(&ram) as usize;
     out.ram_used = {
-        let free: u16 = ram.free.iter().filter(|(s, _)| *s >= 0x100).map(|(s, e)| e - s).sum();
+        let free: u16 = ram
+            .free
+            .iter()
+            .filter(|(s, _)| *s >= 0x100)
+            .map(|(s, e)| e - s)
+            .sum();
         (0x700 - stack) as usize - free as usize
     };
 
@@ -740,12 +870,22 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         }
         let bank = mir.insts[i].bank;
         if bank.is_some() && banking == Banking::None {
-            errors.push(format!("'{}' uses @bank but {} has no PRG banking", mir.insts[i].name, board.name()));
+            errors.push(format!(
+                "'{}' uses @bank but {} has no PRG banking",
+                mir.insts[i].name,
+                board.name()
+            ));
         }
         if bank.is_some() && mir.insts[i].ctx != Context::Main {
-            errors.push(format!("Interrupt code '{}' must stay in the fixed bank", mir.insts[i].name));
+            errors.push(format!(
+                "Interrupt code '{}' must stay in the fixed bank",
+                mir.insts[i].name
+            ));
         }
-        sections.entry(bank).or_default().extend(lines_of[i].clone());
+        let section = sections.entry(bank).or_default();
+        section.extend(lines_of[i].clone());
+        // Marks the end of the function so the report can give its size.
+        section.push(Line::Label(format!("{}_end", fn_label(InstId(i as u32)))));
     }
     // Constant data.
     for (i, o) in mir.objs.iter().enumerate() {
@@ -757,17 +897,29 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
             continue;
         }
         if o.bank.is_some() && banking == Banking::None {
-            errors.push(format!("'{}' uses @bank but {} has no PRG banking", o.name, board.name()));
+            errors.push(format!(
+                "'{}' uses @bank but {} has no PRG banking",
+                o.name,
+                board.name()
+            ));
         }
         let sec = sections.entry(o.bank).or_default();
-        let values: Vec<i64> = if o.init.is_empty() { vec![0; o.len.unwrap_or(1) as usize] } else { o.init.clone() };
+        let values: Vec<i64> = if o.init.is_empty() {
+            vec![0; o.len.unwrap_or(1) as usize]
+        } else {
+            o.init.clone()
+        };
         sec.push(Line::Label(format!("__o{i}")));
-        sec.push(Line::Bytes(values.iter().map(|v| Opnd::num(v & 0xff)).collect()));
+        sec.push(Line::Bytes(
+            values.iter().map(|v| Opnd::num(v & 0xff)).collect(),
+        ));
         if o.sc.wide() {
             if o.len.is_some() {
                 sec.push(Line::Label(format!("__o{i}h")));
             }
-            sec.push(Line::Bytes(values.iter().map(|v| Opnd::num((v >> 8) & 0xff)).collect()));
+            sec.push(Line::Bytes(
+                values.iter().map(|v| Opnd::num((v >> 8) & 0xff)).collect(),
+            ));
         }
     }
     // Glue: helpers, bank routines, trampolines, start-up, vectors.
@@ -778,12 +930,23 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     fixed_text.push_str("__bank_data:\n");
     fixed_text.push_str(&bank_routine(board, "data"));
     fixed_text.push_str("__bank_code:\n");
-    fixed_text.push_str(&bank_routine(board, if board == Board::Mmc3 { "code" } else { "data" }));
+    fixed_text.push_str(&bank_routine(
+        board,
+        if board == Board::Mmc3 { "code" } else { "data" },
+    ));
     if board == Board::Mmc1 {
         fixed_text.push_str("__mmc1_chr0:\n sta $A000\n lsr a\n sta $A000\n lsr a\n sta $A000\n lsr a\n sta $A000\n lsr a\n sta $A000\n rts\n");
         fixed_text.push_str("__mmc1_chr1:\n sta $C000\n lsr a\n sta $C000\n lsr a\n sta $C000\n lsr a\n sta $C000\n lsr a\n sta $C000\n rts\n");
     }
-    if matches!(board, Board::Uxrom | Board::Bnrom | Board::Axrom | Board::Gxrom | Board::ColorDreams | Board::Cnrom) {
+    if matches!(
+        board,
+        Board::Uxrom
+            | Board::Bnrom
+            | Board::Axrom
+            | Board::Gxrom
+            | Board::ColorDreams
+            | Board::Cnrom
+    ) {
         fixed_text.push_str("__bank_table:\n");
         let bytes: Vec<String> = (0..256).map(|v| v.to_string()).collect();
         for chunk in bytes.chunks(32) {
@@ -796,7 +959,11 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     }
     for t in &far_targets {
         let bank = mir.insts[t.0 as usize].bank.unwrap_or(0);
-        let shadow = if board == Board::Mmc3 { "__code_shadow" } else { "__bank_shadow" };
+        let shadow = if board == Board::Mmc3 {
+            "__code_shadow"
+        } else {
+            "__bank_shadow"
+        };
         fixed_text.push_str(&format!(
             "__far{0}:\n lda {shadow}\n pha\n lda #{bank}\n jsr __bank_code\n jsr {1}\n sta __far_a\n stx __far_x\n pla\n jsr __bank_code\n ldx __far_x\n lda __far_a\n rts\n",
             t.0,
@@ -810,9 +977,21 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         // Copied from PRG at boot; 8 KiB at most.
         chr_upload.push_str(" lda $2002\n lda #0\n sta $2006\n sta $2006\n lda #<__chr_data\n sta __far_a\n lda #>__chr_data\n sta __far_x\n ldy #0\n ldx #32\n__chr_copy:\n lda (__far_a),y\n sta $2007\n iny\n bne __chr_copy\n inc __far_x\n dex\n bne __chr_copy\n");
     }
-    let reset = mir.insts.iter().position(|i| i.reset).map(|i| fn_label(InstId(i as u32)));
-    let nmi = mir.insts.iter().position(|i| i.interrupt == Some(Context::Nmi)).map(|i| fn_label(InstId(i as u32)));
-    let irq = mir.insts.iter().position(|i| i.interrupt == Some(Context::Irq)).map(|i| fn_label(InstId(i as u32)));
+    let reset = mir
+        .insts
+        .iter()
+        .position(|i| i.reset)
+        .map(|i| fn_label(InstId(i as u32)));
+    let nmi = mir
+        .insts
+        .iter()
+        .position(|i| i.interrupt == Some(Context::Nmi))
+        .map(|i| fn_label(InstId(i as u32)));
+    let irq = mir
+        .insts
+        .iter()
+        .position(|i| i.interrupt == Some(Context::Irq))
+        .map(|i| fn_label(InstId(i as u32)));
     if reset.is_none() {
         errors.push("No @reset entry point (the standard runtime provides one)".into());
     }
@@ -823,7 +1002,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         if !matches!(o.kind, ObjKind::Ram(_)) || o.init.iter().all(|v| *v == 0) {
             continue;
         }
-        let Some(lo) = obj_addr.get(&(ObjId(i as u32), false)).copied() else { continue };
+        let Some(lo) = obj_addr.get(&(ObjId(i as u32), false)).copied() else {
+            continue;
+        };
         let hi = obj_addr.get(&(ObjId(i as u32), true)).copied();
         let mut bytes: Vec<(u16, u8)> = Vec::new();
         for (k, v) in o.init.iter().enumerate() {
@@ -849,7 +1030,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
             let mut runs: Vec<(u16, Vec<u8>)> = Vec::new();
             for (a, v) in bytes {
                 match runs.last_mut() {
-                    Some((start, data)) if *start + data.len() as u16 == a && data.len() < 256 => data.push(v),
+                    Some((start, data)) if *start + data.len() as u16 == a && data.len() < 256 => {
+                        data.push(v)
+                    }
                     _ => runs.push((a, vec![v])),
                 }
             }
@@ -858,7 +1041,14 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
                 init.push_str(&format!(" ldx #0\n{label}_l:\n lda {label},x\n sta ${start:04X},x\n inx\n cpx #{}\n bne {label}_l\n", data.len() & 0xff));
                 init_tables.push_str(&format!("{label}:\n"));
                 for chunk in data.chunks(32) {
-                    init_tables.push_str(&format!(" .byte {}\n", chunk.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",")));
+                    init_tables.push_str(&format!(
+                        " .byte {}\n",
+                        chunk
+                            .iter()
+                            .map(|b| b.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ));
                 }
             }
         }
@@ -877,7 +1067,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         fixed.push(Line::Label("__chr_data".into()));
         let mut data = cart.chr.clone();
         data.resize(8192, 0);
-        fixed.push(Line::Bytes(data.iter().map(|b| Opnd::num(*b as i64)).collect()));
+        fixed.push(Line::Bytes(
+            data.iter().map(|b| Opnd::num(*b as i64)).collect(),
+        ));
     }
 
     // Symbol resolution for RAM and objects.
@@ -895,7 +1087,11 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
                 if let Sym::Obj(id, hi) = o.sym {
                     if mir.objs[id.0 as usize].kind == ObjKind::Rom {
                         let wide_scalar = mir.objs[id.0 as usize].len.is_none();
-                        o.sym = Sym::Label(format!("__o{}{}", id.0, if hi && !wide_scalar { "h" } else { "" }));
+                        o.sym = Sym::Label(format!(
+                            "__o{}{}",
+                            id.0,
+                            if hi && !wide_scalar { "h" } else { "" }
+                        ));
                     }
                 }
             };
@@ -923,7 +1119,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     };
     let vector_bytes = 6usize;
     let size_of = |lines: &[Line], base: u16| -> Result<asm::Encoded, String> {
-        asm::encode(lines, base, &resolve, &|n| external_names.get(n).map(|a| *a as i64).or(Some(0x8000)))
+        asm::encode(lines, base, &resolve, &|n| {
+            external_names.get(n).map(|a| *a as i64).or(Some(0x8000))
+        })
     };
     let fixed_lines = sections.remove(&fixed_key).unwrap();
     let fixed_trial = match size_of(&fixed_lines, 0x8000) {
@@ -938,7 +1136,8 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         Board::Nrom | Board::Cnrom => 0x8000,
         Board::Uxrom | Board::Mmc1 | Board::Mmc3 => 0x4000,
         _ => 0x8000,
-    } - vector_bytes - if board == Board::Mmc1 { 16 } else { 0 };
+    } - vector_bytes
+        - if board == Board::Mmc1 { 16 } else { 0 };
     let fixed_base = if board.whole() {
         // Common code sits at the top of every 32 KiB bank.
         let start = (0x10000 - vector_bytes - fixed_len) & !0xff;
@@ -956,7 +1155,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
             .iter()
             .filter(|(k, _)| {
                 let digits = |r: &str| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit());
-                k.strip_prefix("__f").is_some_and(digits) || k.strip_prefix("__o").is_some_and(|r| digits(r.trim_end_matches('h')))
+                k.strip_prefix("__f").is_some_and(digits)
+                    || k.strip_prefix("__o")
+                        .is_some_and(|r| digits(r.trim_end_matches('h')))
             })
             .map(|(k, v)| (*v, k.clone()))
             .collect();
@@ -970,14 +1171,21 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         let name = |k: &str| -> String {
             if let Some(i) = k.strip_prefix("__f").and_then(|x| x.parse::<usize>().ok()) {
                 mir.insts[i].name.clone()
-            } else if let Some(i) = k.strip_prefix("__o").and_then(|x| x.trim_end_matches('h').parse::<usize>().ok()) {
+            } else if let Some(i) = k
+                .strip_prefix("__o")
+                .and_then(|x| x.trim_end_matches('h').parse::<usize>().ok())
+            {
                 mir.objs[i].name.clone()
             } else {
                 k.to_owned()
             }
         };
         sizes.sort_by(|a, b| b.cmp(a));
-        let top: Vec<String> = sizes.iter().take(10).map(|(n, k)| format!("{} {n}", name(k))).collect();
+        let top: Vec<String> = sizes
+            .iter()
+            .take(10)
+            .map(|(n, k)| format!("{} {n}", name(k)))
+            .collect();
         errors.push(format!(
             "Fixed code and data use {fixed_len} bytes, exceeding {fixed_cap} on {}; move functions or constants into @bank(N). Largest: {}",
             board.name(),
@@ -993,7 +1201,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         }
     };
     let mut all_labels: BTreeMap<String, u16> = BTreeMap::new();
-    let first = asm::encode(&fixed_lines, fixed_base, &resolve, &|n| external_names.get(n).map(|a| *a as i64).or(Some(0x8000)));
+    let first = asm::encode(&fixed_lines, fixed_base, &resolve, &|n| {
+        external_names.get(n).map(|a| *a as i64).or(Some(0x8000))
+    });
     let first = match first {
         Ok(e) => e,
         Err(e) => {
@@ -1006,12 +1216,25 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     for (b, lines) in &sections {
         let b = b.unwrap();
         // MMC3 data-only banks map at $A000.
-        let base = if board == Board::Mmc3 && !lines.iter().any(|l| matches!(l, Line::Ins(_))) { 0xA000 } else { bank_base(b) };
-        match asm::encode(lines, base, &resolve, &|n| external_names.get(n).map(|a| *a as i64).or(Some(0x8000))) {
+        let base = if board == Board::Mmc3 && !lines.iter().any(|l| matches!(l, Line::Ins(_))) {
+            0xA000
+        } else {
+            bank_base(b)
+        };
+        match asm::encode(lines, base, &resolve, &|n| {
+            external_names.get(n).map(|a| *a as i64).or(Some(0x8000))
+        }) {
             Ok(e) => {
-                let cap = if board.whole() { fixed_base as usize - 0x8000 } else { board.bank_size() };
+                let cap = if board.whole() {
+                    fixed_base as usize - 0x8000
+                } else {
+                    board.bank_size()
+                };
                 if e.bytes.len() > cap {
-                    errors.push(format!("Bank {b} uses {} bytes, exceeding {cap}", e.bytes.len()));
+                    errors.push(format!(
+                        "Bank {b} uses {} bytes, exceeding {cap}",
+                        e.bytes.len()
+                    ));
                 }
                 all_labels.extend(e.labels.clone());
                 bank_trials.insert(b, base);
@@ -1042,8 +1265,12 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     }
     if board == Board::Mmc3 {
         for (b, base) in &bank_trials {
-            let has_code = sections[&Some(*b)].iter().any(|l| matches!(l, Line::Ins(_)));
-            let has_data = sections[&Some(*b)].iter().any(|l| matches!(l, Line::Bytes(_)));
+            let has_code = sections[&Some(*b)]
+                .iter()
+                .any(|l| matches!(l, Line::Ins(_)));
+            let has_data = sections[&Some(*b)]
+                .iter()
+                .any(|l| matches!(l, Line::Bytes(_)));
             if has_code && has_data {
                 errors.push(format!("MMC3 bank {b} mixes code and constants; give banked functions and banked data different bank numbers"));
             }
@@ -1052,7 +1279,9 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     }
     // Vectors.
     let vec_of = |l: &Option<String>| -> u16 {
-        l.as_ref().and_then(|l| all_labels.get(l).copied()).unwrap_or(all_labels["__rti"])
+        l.as_ref()
+            .and_then(|l| all_labels.get(l).copied())
+            .unwrap_or(all_labels["__rti"])
     };
     let vectors = [vec_of(&nmi), all_labels["__start"], vec_of(&irq)];
 
@@ -1072,12 +1301,19 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         Board::Uxrom | Board::Mmc1 | Board::Mmc3 => {
             let fixed_banks = if board == Board::Mmc3 { 2 } else { 1 };
             let switch = max_bank.map_or(0, |b| b as usize + 1);
-            let mut banks = (switch + fixed_banks).max(if board == Board::Mmc3 { 4 } else { 2 }).next_power_of_two();
+            let mut banks = (switch + fixed_banks)
+                .max(if board == Board::Mmc3 { 4 } else { 2 })
+                .next_power_of_two();
             if let Some(kib) = cart.prg_kib {
                 banks = banks.max(kib as usize * 1024 / bank_size);
             }
             if banks > board.max_prg_banks() {
-                return Err(vec![format!("{} PRG banks exceed the {} limit of {}", banks, board.name(), board.max_prg_banks())]);
+                return Err(vec![format!(
+                    "{} PRG banks exceed the {} limit of {}",
+                    banks,
+                    board.name(),
+                    board.max_prg_banks()
+                )]);
             }
             prg = vec![0xff; banks * bank_size];
             let fixed_at = prg.len() - 0x4000;
@@ -1097,7 +1333,17 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
             if board == Board::Mmc1 {
                 // A reset stub at the top of every 16 KiB bank.
                 let stub_addr: u16 = 0xBFF0;
-                let stub = [0x78, 0xa9, 0x80, 0x8d, 0x00, 0x80, 0x4c, all_labels["__start"] as u8, (all_labels["__start"] >> 8) as u8];
+                let stub = [
+                    0x78,
+                    0xa9,
+                    0x80,
+                    0x8d,
+                    0x00,
+                    0x80,
+                    0x4c,
+                    all_labels["__start"] as u8,
+                    (all_labels["__start"] >> 8) as u8,
+                ];
                 let banks = prg.len() / 0x4000;
                 for b in 0..banks - 1 {
                     let at = b * 0x4000 + 0x3ff0;
@@ -1111,13 +1357,18 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         _ => {
             let banks = max_bank.map_or(1, |b| b as usize + 1).next_power_of_two();
             if banks > board.max_prg_banks() {
-                return Err(vec![format!("{} PRG banks exceed the {} limit", banks, board.name())]);
+                return Err(vec![format!(
+                    "{} PRG banks exceed the {} limit",
+                    banks,
+                    board.name()
+                )]);
             }
             prg = vec![0xff; banks * 0x8000];
             let common_at = fixed_base as usize - 0x8000;
             for b in 0..banks {
                 let at = b * 0x8000;
-                prg[at + common_at..at + common_at + fixed_enc.bytes.len()].copy_from_slice(&fixed_enc.bytes);
+                prg[at + common_at..at + common_at + fixed_enc.bytes.len()]
+                    .copy_from_slice(&fixed_enc.bytes);
                 if let Some(e) = bank_encs.get(&(b as u32)) {
                     prg[at..at + e.bytes.len()].copy_from_slice(&e.bytes);
                 }
@@ -1137,7 +1388,12 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         }
         let size = chr.len().div_ceil(8192).max(1).next_power_of_two() * 8192;
         if size > board.max_chr() {
-            return Err(vec![format!("{} KiB of CHR exceed the {} limit of {} KiB", size / 1024, board.name(), board.max_chr() / 1024)]);
+            return Err(vec![format!(
+                "{} KiB of CHR exceed the {} limit of {} KiB",
+                size / 1024,
+                board.name(),
+                board.max_chr() / 1024
+            )]);
         }
         chr.resize(size, 0);
     }
@@ -1160,10 +1416,14 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     // ------------------------------------------------------------ report
     for (i, inst) in mir.insts.iter().enumerate() {
         if let Some(a) = all_labels.get(&fn_label(InstId(i as u32))) {
+            let end = all_labels
+                .get(&format!("{}_end", fn_label(InstId(i as u32))))
+                .copied()
+                .unwrap_or(*a);
             symbols.push(Symbol {
                 name: inst.name.clone(),
                 address: *a,
-                size: 0,
+                size: end.saturating_sub(*a) as usize,
                 kind: format!("fn {:?}", inst.ctx).to_lowercase(),
                 bank: inst.bank,
             });
@@ -1176,7 +1436,11 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
                     name: o.name.clone(),
                     address: *a,
                     size: o.bytes(),
-                    kind: format!("const {}{}", o.sc.name(), o.len.map(|n| format!("[{n}]")).unwrap_or_default()),
+                    kind: format!(
+                        "const {}{}",
+                        o.sc.name(),
+                        o.len.map(|n| format!("[{n}]")).unwrap_or_default()
+                    ),
                     bank: o.bank,
                 });
             }
@@ -1199,14 +1463,25 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         stack
     );
     for (b, e) in &bank_encs {
-        layout.push_str(&format!("bank {b}: {} / {} bytes at ${:04X}\n", e.bytes.len(), if board.whole() { fixed_base as usize - 0x8000 } else { bank_size }, bank_trials[b]));
+        layout.push_str(&format!(
+            "bank {b}: {} / {} bytes at ${:04X}\n",
+            e.bytes.len(),
+            if board.whole() {
+                fixed_base as usize - 0x8000
+            } else {
+                bank_size
+            },
+            bank_trials[b]
+        ));
         out.banks_used.insert(*b, e.bytes.len());
     }
     layout.push('\n');
     for s in &symbols {
         layout.push_str(&format!(
             "{}${:04X} {:>5} {:<10} {}\n",
-            s.bank.map(|b| format!("{b:>2}:")).unwrap_or_else(|| "   ".into()),
+            s.bank
+                .map(|b| format!("{b:>2}:"))
+                .unwrap_or_else(|| "   ".into()),
             s.address,
             s.size,
             s.kind,
@@ -1215,10 +1490,16 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     }
     out.listing = fixed_enc.listing.into_iter().map(|l| (None, l)).collect();
     for (b, e) in bank_encs {
-        out.listing.extend(e.listing.into_iter().map(|l| (Some(b), l)));
+        out.listing
+            .extend(e.listing.into_iter().map(|l| (Some(b), l)));
     }
     out.fixed_used = fixed_enc.bytes.len();
     out.fixed_size = fixed_cap;
+    out.bank_size = if board.whole() {
+        fixed_base as usize - 0x8000
+    } else {
+        board.bank_size()
+    };
     out.prg_bytes = prg.len();
     out.chr_bytes = chr.len();
     out.rom = rom;
@@ -1240,6 +1521,13 @@ fn place_obj(map: &mut BTreeMap<(ObjId, bool), u16>, id: ObjId, o: &Obj, addr: u
     if o.sc.wide() {
         let len = o.len.unwrap_or(1) as u16;
         // Arrays: the high table follows the low table. Scalars: little endian.
-        map.insert((id, true), if o.len.is_some() { addr + len } else { addr + 1 });
+        map.insert(
+            (id, true),
+            if o.len.is_some() {
+                addr + len
+            } else {
+                addr + 1
+            },
+        );
     }
 }

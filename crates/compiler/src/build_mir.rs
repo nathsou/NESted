@@ -194,7 +194,13 @@ pub fn build(p: &Program, diags: &mut Diagnostics) -> Mir {
     mir
 }
 
-fn instance(mir: &mut Mir, p: &Program, f: FnId, ctx: Context, queue: &mut Vec<(FnId, Context)>) -> InstId {
+fn instance(
+    mir: &mut Mir,
+    p: &Program,
+    f: FnId,
+    ctx: Context,
+    queue: &mut Vec<(FnId, Context)>,
+) -> InstId {
     if let Some(i) = mir.inst_of.get(&(f, ctx)) {
         return *i;
     }
@@ -242,11 +248,23 @@ fn effectful(e: &hir::Expr) -> bool {
     match &e.kind {
         ExprKind::Call(..) | ExprKind::Asm(_) => true,
         ExprKind::Intrinsic(Intrinsic::Peek | Intrinsic::Poke, _) => true,
-        ExprKind::Const(_) | ExprKind::Local(_) | ExprKind::Global(_) | ExprKind::SliceOf(_) => false,
-        ExprKind::Unary(_, a) | ExprKind::Cast(a) | ExprKind::Field(a, _) | ExprKind::Repeat(a, _) => effectful(a),
+        ExprKind::Const(_) | ExprKind::Local(_) | ExprKind::Global(_) | ExprKind::SliceOf(_) => {
+            false
+        }
+        ExprKind::Unary(_, a)
+        | ExprKind::Cast(a)
+        | ExprKind::Field(a, _)
+        | ExprKind::Repeat(a, _) => effectful(a),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b, _) => effectful(a) || effectful(b),
-        ExprKind::Struct(v) | ExprKind::Array(v) | ExprKind::Intrinsic(_, v) => v.iter().any(effectful),
-        ExprKind::Match(x, arms) => effectful(x) || arms.iter().any(|a| effectful(&a.body) || a.guard.as_ref().is_some_and(effectful)),
+        ExprKind::Struct(v) | ExprKind::Array(v) | ExprKind::Intrinsic(_, v) => {
+            v.iter().any(effectful)
+        }
+        ExprKind::Match(x, arms) => {
+            effectful(x)
+                || arms
+                    .iter()
+                    .any(|a| effectful(&a.body) || a.guard.as_ref().is_some_and(effectful))
+        }
         ExprKind::If(c, a, b) => effectful(c) || effectful(a) || effectful(b),
     }
 }
@@ -369,9 +387,14 @@ impl Builder<'_, '_> {
             }
             ExprKind::Field(b, f) => {
                 let mut pr = self.place_ref(b)?;
-                let Type::Struct(sid) = &pr.ty else { return None };
+                let Type::Struct(sid) = &pr.ty else {
+                    return None;
+                };
                 let fields = &self.p.types.structs[sid.0 as usize].fields;
-                let offset: usize = fields[..*f].iter().map(|(_, t)| leaves(self.types(), t).len()).sum();
+                let offset: usize = fields[..*f]
+                    .iter()
+                    .map(|(_, t)| leaves(self.types(), t).len())
+                    .sum();
                 let ft = fields[*f].1.clone();
                 pr.leaf += offset;
                 pr.count = leaves(self.types(), &ft).len();
@@ -383,9 +406,15 @@ impl Builder<'_, '_> {
                     return None;
                 }
                 let mut pr = self.place_ref(b)?;
-                let Type::Array(elem, n) = pr.ty.clone() else { return None };
+                let Type::Array(elem, n) = pr.ty.clone() else {
+                    return None;
+                };
                 let inner = flat_len(&elem).unwrap_or(1);
-                let total = flat_len(&pr.ty).unwrap_or(1) * match pr.index { Some(_) => 1, None => 1 };
+                let total = flat_len(&pr.ty).unwrap_or(1)
+                    * match pr.index {
+                        Some(_) => 1,
+                        None => 1,
+                    };
                 let _ = total;
                 let root_len = match pr.root {
                     Root::Global(g) => flat_len(&self.p.globals[g.0 as usize].ty).unwrap_or(1),
@@ -398,13 +427,20 @@ impl Builder<'_, '_> {
                 let isc = if wide { Sc::U16 } else { Sc::U8 };
                 // `a[raw i + k]` addresses element i + k without wrapping, so
                 // the constant folds into the address.
-                if let (ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), x, k), true, false, 1) = (&i.kind, *raw_index(e), wide, inner) {
+                if let (ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), x, k), true, false, 1) =
+                    (&i.kind, *raw_index(e), wide, inner)
+                {
                     if let (Some(k), Sc::U8) = (k.constant(), self.sc(&x.ty)) {
                         if pr.index.is_none() && k >= 0 && k < 256 {
                             let base = self.scalar(x);
                             let wide_x = self.convert(base, Sc::U16);
                             let off = if *op == BinOp::Add { k } else { -k };
-                            let idx = Ex::Bin(BinOp::Add, Box::new(wide_x), Box::new(Ex::Const(off & 0xffff, Sc::U16)), Sc::U16);
+                            let idx = Ex::Bin(
+                                BinOp::Add,
+                                Box::new(wide_x),
+                                Box::new(Ex::Const(off & 0xffff, Sc::U16)),
+                                Sc::U16,
+                            );
                             pr.index = Some(idx);
                             pr.ty = *elem;
                             return Some(pr);
@@ -464,7 +500,9 @@ impl Builder<'_, '_> {
         let mut out = Vec::new();
         match pr.root {
             Root::Local(l) if matches!(self.locals[l.0 as usize], LocalRepr::Scalars(_)) => {
-                let LocalRepr::Scalars(vars) = &self.locals[l.0 as usize] else { unreachable!() };
+                let LocalRepr::Scalars(vars) = &self.locals[l.0 as usize] else {
+                    unreachable!()
+                };
                 for v in &vars[pr.leaf..pr.leaf + pr.count] {
                     out.push(Ex::Var(*v, self.inst.vars[v.0 as usize].sc));
                 }
@@ -479,7 +517,9 @@ impl Builder<'_, '_> {
                         out.push(Ex::Const(obj.init.first().copied().unwrap_or(0), sc));
                         continue;
                     }
-                    if let (ObjKind::Rom, Some(Ex::Const(k, _)), None) = (&obj.kind, &pr.index, obj.bank) {
+                    if let (ObjKind::Rom, Some(Ex::Const(k, _)), None) =
+                        (&obj.kind, &pr.index, obj.bank)
+                    {
                         if let Some(v) = obj.init.get(*k as usize) {
                             out.push(Ex::Const(*v, sc));
                             continue;
@@ -496,7 +536,9 @@ impl Builder<'_, '_> {
         self.stable_index(&mut pr);
         match pr.root {
             Root::Local(l) if matches!(self.locals[l.0 as usize], LocalRepr::Scalars(_)) => {
-                let LocalRepr::Scalars(vars) = self.locals[l.0 as usize].clone() else { unreachable!() };
+                let LocalRepr::Scalars(vars) = self.locals[l.0 as usize].clone() else {
+                    unreachable!()
+                };
                 for (v, e) in vars[pr.leaf..pr.leaf + pr.count].iter().zip(values) {
                     self.emit(St::Assign(Place::Var(*v), e));
                 }
@@ -542,7 +584,8 @@ impl Builder<'_, '_> {
                     .map(|v| Ex::Var(*v, self.inst.vars[v.0 as usize].sc))
                     .collect(),
                 LocalRepr::Array(_) => {
-                    self.diags.error(e.span, "Whole arrays cannot be copied; index them");
+                    self.diags
+                        .error(e.span, "Whole arrays cannot be copied; index them");
                     vec![]
                 }
             },
@@ -556,9 +599,14 @@ impl Builder<'_, '_> {
                     if self.place_ref(b).is_none() {
                         // Field of an rvalue struct.
                         let all = self.expr(b);
-                        let Type::Struct(sid) = &b.ty else { return vec![] };
+                        let Type::Struct(sid) = &b.ty else {
+                            return vec![];
+                        };
                         let fields = &self.p.types.structs[sid.0 as usize].fields;
-                        let offset: usize = fields[..*f].iter().map(|(_, t)| leaves(&self.p.types, t).len()).sum();
+                        let offset: usize = fields[..*f]
+                            .iter()
+                            .map(|(_, t)| leaves(&self.p.types, t).len())
+                            .sum();
                         let count = leaves(&self.p.types, &fields[*f].1).len();
                         return all.into_iter().skip(offset).take(count).collect();
                     }
@@ -581,7 +629,12 @@ impl Builder<'_, '_> {
                 let sc = self.sc(&e.ty);
                 let a = self.scalar(x);
                 vec![match op {
-                    UnOp::Not => Ex::Bin(BinOp::Eq, Box::new(a), Box::new(Ex::Const(0, Sc::U8)), Sc::U8),
+                    UnOp::Not => Ex::Bin(
+                        BinOp::Eq,
+                        Box::new(a),
+                        Box::new(Ex::Const(0, Sc::U8)),
+                        Sc::U8,
+                    ),
                     op => Ex::Un(*op, Box::new(a), sc),
                 }]
             }
@@ -627,7 +680,10 @@ impl Builder<'_, '_> {
                 for (i, f) in fields.iter().enumerate() {
                     let mut v = self.expr(f);
                     if fields[i + 1..n].iter().any(effectful) {
-                        v = v.into_iter().map(|x| if x.simple() { x } else { self.materialize(x) }).collect();
+                        v = v
+                            .into_iter()
+                            .map(|x| if x.simple() { x } else { self.materialize(x) })
+                            .collect();
                     }
                     out.extend(v);
                 }
@@ -660,10 +716,12 @@ impl Builder<'_, '_> {
                     vec![]
                 }
                 Intrinsic::Addr => match &args[0].kind {
-                    ExprKind::Global(g) => match self.mir.global_objs.get(g).and_then(|o| o.first()) {
-                        Some(o) => vec![Ex::Addr(*o, false)],
-                        None => vec![Ex::Const(0, Sc::U16)],
-                    },
+                    ExprKind::Global(g) => {
+                        match self.mir.global_objs.get(g).and_then(|o| o.first()) {
+                            Some(o) => vec![Ex::Addr(*o, false)],
+                            None => vec![Ex::Const(0, Sc::U16)],
+                        }
+                    }
                     _ => {
                         let v = self.expr(&args[0]);
                         vec![v.into_iter().next().unwrap_or(Ex::Const(0, Sc::U16))]
@@ -678,7 +736,11 @@ impl Builder<'_, '_> {
                 let ls = leaves(types, &e.ty);
                 let temps: Vec<VarId> = ls.iter().map(|(_, sc)| self.temp(*sc)).collect();
                 let scrut = self.scalar(x);
-                let scrut = if scrut.simple() { scrut } else { self.materialize(scrut) };
+                let scrut = if scrut.simple() {
+                    scrut
+                } else {
+                    self.materialize(scrut)
+                };
                 let done = self.new_block();
                 let full = self.types().bounds(&x.ty);
                 self.dispatch(&scrut, arms, full, |b, arm: &hir::Arm<hir::Expr>| {
@@ -689,7 +751,11 @@ impl Builder<'_, '_> {
                     b.term(Term::Goto(done));
                 });
                 self.switch(done);
-                temps.iter().zip(ls).map(|(t, (_, sc))| Ex::Var(*t, sc)).collect()
+                temps
+                    .iter()
+                    .zip(ls)
+                    .map(|(t, (_, sc))| Ex::Var(*t, sc))
+                    .collect()
             }
             ExprKind::If(c, a, b) => {
                 let ls = leaves(types, &e.ty);
@@ -707,7 +773,11 @@ impl Builder<'_, '_> {
                     self.term(Term::Goto(done));
                 }
                 self.switch(done);
-                temps.iter().zip(ls).map(|(t, (_, sc))| Ex::Var(*t, sc)).collect()
+                temps
+                    .iter()
+                    .zip(ls)
+                    .map(|(t, (_, sc))| Ex::Var(*t, sc))
+                    .collect()
             }
             ExprKind::Asm(block) => {
                 let t = self.temp(Sc::U8);
@@ -727,7 +797,11 @@ impl Builder<'_, '_> {
         match parts.first() {
             Some(Ex::Addr(o, false)) => {
                 let small = self.mir.objs[o.0 as usize].len.unwrap_or(1) <= 256;
-                let idx = if small { self.convert(idx, Sc::U8) } else { self.convert(idx, Sc::U16) };
+                let idx = if small {
+                    self.convert(idx, Sc::U8)
+                } else {
+                    self.convert(idx, Sc::U16)
+                };
                 Ex::Load(*o, Some(Box::new(idx)), sc)
             }
             Some(Ex::Var(v, _)) => {
@@ -754,7 +828,10 @@ impl Builder<'_, '_> {
         for (i, a) in args.iter().enumerate() {
             let mut v = self.expr(a);
             if args[i + 1..].iter().any(effectful) {
-                v = v.into_iter().map(|x| if x.simple() { x } else { self.materialize(x) }).collect();
+                v = v
+                    .into_iter()
+                    .map(|x| if x.simple() { x } else { self.materialize(x) })
+                    .collect();
             }
             values.extend(v);
         }
@@ -768,7 +845,11 @@ impl Builder<'_, '_> {
             saved: Vec::new(),
             span,
         });
-        temps.iter().zip(ls).map(|(t, (_, sc))| Ex::Var(*t, sc)).collect()
+        temps
+            .iter()
+            .zip(ls)
+            .map(|(t, (_, sc))| Ex::Var(*t, sc))
+            .collect()
     }
 
     fn asm(&mut self, block: &AsmBlock, output: Option<Place>) {
@@ -796,7 +877,16 @@ impl Builder<'_, '_> {
         // Inputs are evaluated before any register is loaded.
         let inputs = inputs
             .into_iter()
-            .map(|(r, v)| (r, if matches!(v, Ex::Const(..) | Ex::Var(..)) { v } else { self.materialize(v) }))
+            .map(|(r, v)| {
+                (
+                    r,
+                    if matches!(v, Ex::Const(..) | Ex::Var(..)) {
+                        v
+                    } else {
+                        self.materialize(v)
+                    },
+                )
+            })
             .collect();
         self.inst.has_asm = true;
         self.emit(St::Asm {
@@ -837,7 +927,13 @@ impl Builder<'_, '_> {
     }
 
     /// Branch to each arm's body by pattern; `body` lowers an arm.
-    fn dispatch<B>(&mut self, scrut: &Ex, arms: &[hir::Arm<B>], full: (i64, i64), mut body: impl FnMut(&mut Self, &hir::Arm<B>)) {
+    fn dispatch<B>(
+        &mut self,
+        scrut: &Ex,
+        arms: &[hir::Arm<B>],
+        full: (i64, i64),
+        mut body: impl FnMut(&mut Self, &hir::Arm<B>),
+    ) {
         let sc = scrut.sc();
         let n = arms.len();
         for (k, arm) in arms.iter().enumerate() {
@@ -849,8 +945,19 @@ impl Builder<'_, '_> {
                 self.term(Term::Goto(target));
             } else {
                 for (i, (lo, hi)) in arm.patterns.iter().enumerate() {
-                    let fail = if i + 1 == arm.patterns.len() { next } else { self.new_block() };
-                    let c = |op, v: i64| Ex::Bin(op, Box::new(scrut.clone()), Box::new(Ex::Const(sc.wrap(v), sc)), sc);
+                    let fail = if i + 1 == arm.patterns.len() {
+                        next
+                    } else {
+                        self.new_block()
+                    };
+                    let c = |op, v: i64| {
+                        Ex::Bin(
+                            op,
+                            Box::new(scrut.clone()),
+                            Box::new(Ex::Const(sc.wrap(v), sc)),
+                            sc,
+                        )
+                    };
                     if lo == hi {
                         self.term(Term::Branch(c(BinOp::Eq, *lo), target, fail));
                     } else if *lo <= full.0 {
@@ -895,7 +1002,8 @@ impl Builder<'_, '_> {
                             flat
                         }
                         _ => {
-                            self.diags.error(e.span, "Local arrays need a constant initializer");
+                            self.diags
+                                .error(e.span, "Local arrays need a constant initializer");
                             return;
                         }
                     };
@@ -907,16 +1015,25 @@ impl Builder<'_, '_> {
                     for i in 0..len {
                         for (k, o) in objs.iter().enumerate() {
                             let sc = self.mir.objs[o.0 as usize].sc;
-                            let isc = if self.mir.objs[o.0 as usize].len.unwrap_or(0) > 256 { Sc::U16 } else { Sc::U8 };
+                            let isc = if self.mir.objs[o.0 as usize].len.unwrap_or(0) > 256 {
+                                Sc::U16
+                            } else {
+                                Sc::U8
+                            };
                             let v = values[i * n + k].int();
-                            self.emit(St::Assign(Place::Mem(*o, Some(Ex::Const(i as i64, isc))), Ex::Const(sc.wrap(v), sc)));
+                            self.emit(St::Assign(
+                                Place::Mem(*o, Some(Ex::Const(i as i64, isc))),
+                                Ex::Const(sc.wrap(v), sc),
+                            ));
                         }
                     }
                     return;
                 }
                 self.emit(St::Line(e.span));
                 let v = self.expr(e);
-                let LocalRepr::Scalars(vars) = self.locals[id.0 as usize].clone() else { return };
+                let LocalRepr::Scalars(vars) = self.locals[id.0 as usize].clone() else {
+                    return;
+                };
                 for (var, x) in vars.iter().zip(v) {
                     self.emit(St::Assign(Place::Var(*var), x));
                 }
@@ -942,15 +1059,26 @@ impl Builder<'_, '_> {
                     let old = self.read_place(pr.clone());
                     let sc = old.first().map(Ex::sc).unwrap_or(Sc::U8);
                     let v = self.scalar(value);
-                    let v = if matches!(op, BinOp::Shl | BinOp::Shr) { v } else { self.convert(v, sc) };
-                    let new = fold_bin(*op, old.into_iter().next().unwrap_or(Ex::Const(0, sc)), v, sc);
+                    let v = if matches!(op, BinOp::Shl | BinOp::Shr) {
+                        v
+                    } else {
+                        self.convert(v, sc)
+                    };
+                    let new = fold_bin(
+                        *op,
+                        old.into_iter().next().unwrap_or(Ex::Const(0, sc)),
+                        v,
+                        sc,
+                    );
                     self.write_place(pr, vec![new]);
                 } else {
                     let v = self.expr(value);
                     if effectful(value) || pr.count > 1 {
                         // Values computed before the place's index is used.
                         let v: Vec<Ex> = if pr.count > 1 {
-                            v.into_iter().map(|x| if x.simple() { x } else { self.materialize(x) }).collect()
+                            v.into_iter()
+                                .map(|x| if x.simple() { x } else { self.materialize(x) })
+                                .collect()
                         } else {
                             v
                         };
@@ -969,7 +1097,10 @@ impl Builder<'_, '_> {
                         for (i, a) in args.iter().enumerate() {
                             let mut v = self.expr(a);
                             if args[i + 1..].iter().any(effectful) {
-                                v = v.into_iter().map(|x| if x.simple() { x } else { self.materialize(x) }).collect();
+                                v = v
+                                    .into_iter()
+                                    .map(|x| if x.simple() { x } else { self.materialize(x) })
+                                    .collect();
                             }
                             values.extend(v);
                         }
@@ -995,7 +1126,11 @@ impl Builder<'_, '_> {
             }
             Stmt::If(c, a, b) => {
                 let yes = self.new_block();
-                let no = if b.is_empty() { None } else { Some(self.new_block()) };
+                let no = if b.is_empty() {
+                    None
+                } else {
+                    Some(self.new_block())
+                };
                 let done = self.new_block();
                 self.branch(c, yes, no.unwrap_or(done));
                 self.switch(yes);
@@ -1043,10 +1178,21 @@ impl Builder<'_, '_> {
                 self.depth -= 1;
                 self.switch(done);
             }
-            Stmt::For { var, start, end, inclusive, reverse, body } => self.for_loop(*var, start, end, *inclusive, *reverse, body),
+            Stmt::For {
+                var,
+                start,
+                end,
+                inclusive,
+                reverse,
+                body,
+            } => self.for_loop(*var, start, end, *inclusive, *reverse, body),
             Stmt::Match(x, arms) => {
                 let scrut = self.scalar(x);
-                let scrut = if scrut.simple() { scrut } else { self.materialize(scrut) };
+                let scrut = if scrut.simple() {
+                    scrut
+                } else {
+                    self.materialize(scrut)
+                };
                 let done = self.new_block();
                 let full = self.types().bounds(&x.ty);
                 self.dispatch(&scrut, arms, full, |b, arm: &hir::Arm<Vec<Stmt>>| {
@@ -1087,8 +1233,18 @@ impl Builder<'_, '_> {
         }
     }
 
-    fn for_loop(&mut self, var: LocalId, start: &hir::Expr, end: &hir::Expr, inclusive: bool, reverse: bool, body: &[Stmt]) {
-        let LocalRepr::Scalars(vars) = self.locals[var.0 as usize].clone() else { return };
+    fn for_loop(
+        &mut self,
+        var: LocalId,
+        start: &hir::Expr,
+        end: &hir::Expr,
+        inclusive: bool,
+        reverse: bool,
+        body: &[Stmt],
+    ) {
+        let LocalRepr::Scalars(vars) = self.locals[var.0 as usize].clone() else {
+            return;
+        };
         let v = vars[0];
         let sc = self.inst.vars[v.0 as usize].sc;
         let a = self.scalar(start);
@@ -1108,7 +1264,11 @@ impl Builder<'_, '_> {
         } else {
             let b = self.scalar(end);
             let b = self.convert(b, sc);
-            if b.simple() { b } else { self.materialize(b) }
+            if b.simple() {
+                b
+            } else {
+                self.materialize(b)
+            }
         };
         let body_b = {
             self.depth += 1;
@@ -1126,12 +1286,22 @@ impl Builder<'_, '_> {
         // Skip an empty range unless it is statically non-empty.
         let nonempty = match (a.konst(), b.konst()) {
             (Some(x), Some(y)) => {
-                if inclusive { x <= y } else { wraps || x < y }
+                if inclusive {
+                    x <= y
+                } else {
+                    wraps || x < y
+                }
             }
             _ => false,
         };
         let empty_known = match (a.konst(), b.konst()) {
-            (Some(x), Some(y)) => if inclusive { x > y } else { !wraps && x >= y },
+            (Some(x), Some(y)) => {
+                if inclusive {
+                    x > y
+                } else {
+                    !wraps && x >= y
+                }
+            }
             _ => false,
         };
         if empty_known {
@@ -1140,7 +1310,11 @@ impl Builder<'_, '_> {
         let cmp = |op, x: &Ex, y: &Ex| Ex::Bin(op, Box::new(x.clone()), Box::new(y.clone()), sc);
         let init = if reverse {
             if inclusive || wraps {
-                if wraps { Ex::Const(sc.wrap(tmax), sc) } else { b.clone() }
+                if wraps {
+                    Ex::Const(sc.wrap(tmax), sc)
+                } else {
+                    b.clone()
+                }
             } else {
                 fold_bin(BinOp::Sub, b.clone(), Ex::Const(1, sc), sc)
             }
@@ -1149,7 +1323,11 @@ impl Builder<'_, '_> {
         };
         if !nonempty {
             let enter = self.new_block();
-            let c = if inclusive { cmp(BinOp::Le, &a, &b) } else { cmp(BinOp::Lt, &a, &b) };
+            let c = if inclusive {
+                cmp(BinOp::Le, &a, &b)
+            } else {
+                cmp(BinOp::Lt, &a, &b)
+            };
             let _ = tmin;
             self.term(Term::Branch(c, enter, done));
             self.switch(enter);
@@ -1169,16 +1347,25 @@ impl Builder<'_, '_> {
             let step = self.new_block();
             self.term(Term::Branch(cmp(BinOp::Eq, &cur, &a), done, step));
             self.switch(step);
-            self.emit(St::Assign(Place::Var(v), fold_bin(BinOp::Sub, cur.clone(), Ex::Const(1, sc), sc)));
+            self.emit(St::Assign(
+                Place::Var(v),
+                fold_bin(BinOp::Sub, cur.clone(), Ex::Const(1, sc), sc),
+            ));
             self.term(Term::Goto(body_b));
         } else if inclusive {
             let step = self.new_block();
             self.term(Term::Branch(cmp(BinOp::Eq, &cur, &b), done, step));
             self.switch(step);
-            self.emit(St::Assign(Place::Var(v), fold_bin(BinOp::Add, cur.clone(), Ex::Const(1, sc), sc)));
+            self.emit(St::Assign(
+                Place::Var(v),
+                fold_bin(BinOp::Add, cur.clone(), Ex::Const(1, sc), sc),
+            ));
             self.term(Term::Goto(body_b));
         } else {
-            self.emit(St::Assign(Place::Var(v), fold_bin(BinOp::Add, cur.clone(), Ex::Const(1, sc), sc)));
+            self.emit(St::Assign(
+                Place::Var(v),
+                fold_bin(BinOp::Add, cur.clone(), Ex::Const(1, sc), sc),
+            ));
             self.term(Term::Branch(cmp(BinOp::Ne, &cur, &b), body_b, done));
         }
         self.depth -= 1;
@@ -1196,7 +1383,11 @@ pub fn fold_bin(op: BinOp, a: Ex, b: Ex, sc: Sc) -> Ex {
             Sc::I16 => Type::I16,
         };
         if let Some(v) = crate::consteval::binary(&Default::default(), op, x, y, &t) {
-            let rsc = if op.is_compare() || op.is_logic() { Sc::U8 } else { sc };
+            let rsc = if op.is_compare() || op.is_logic() {
+                Sc::U8
+            } else {
+                sc
+            };
             return Ex::Const(rsc.wrap(v), rsc);
         }
     }

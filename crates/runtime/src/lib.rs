@@ -3,6 +3,7 @@
 use nessy::{
     bus::Bus,
     cpu::{memory::Memory, rom::ROM, CPU},
+    savestate::{Save, SaveState},
 };
 
 pub struct Emulator {
@@ -49,6 +50,32 @@ impl Emulator {
     pub fn pc(&self) -> u16 {
         self.cpu.pc
     }
+    /// PPU memory ($0000-$3FFF) as the program sees it, without side effects.
+    pub fn ppu_peek(&mut self, address: u16) -> u8 {
+        self.cpu.bus.ppu.inspect(address)
+    }
+    /// 16 KiB snapshot of the PPU address space.
+    pub fn ppu_memory(&mut self) -> Vec<u8> {
+        (0..0x4000u16).map(|a| self.ppu_peek(a)).collect()
+    }
+    pub fn oam(&self) -> Vec<u8> {
+        self.cpu.bus.ppu.oam().to_vec()
+    }
+    /// PPUCTRL and PPUMASK.
+    pub fn ppu_control(&self) -> (u8, u8) {
+        self.cpu.bus.ppu.control()
+    }
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut state = SaveState::new(&self.cpu.bus.ppu.rom.cart.hash);
+        self.cpu.save(state.get_root_mut());
+        state.encode()
+    }
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut state = SaveState::decode(data).map_err(|e| format!("{e:?}"))?;
+        self.cpu
+            .load(state.get_root_mut())
+            .map_err(|e| format!("{e:?}"))
+    }
     /// The current frame as a PNG image, optionally scaled.
     pub fn png(&self, scale: usize) -> Vec<u8> {
         let src = self.pixels();
@@ -70,7 +97,11 @@ fn crc32(data: &[u8]) -> u32 {
     for &b in data {
         c ^= b as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xedb8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
     }
     !c
