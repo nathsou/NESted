@@ -159,3 +159,32 @@ fn recursion() {
         1,
     );
 }
+
+#[test]
+fn recursion_with_loops() {
+    check(
+        "var count: u16 = 0;
+         var stack: [u8; 64] = [0; 64];
+         var sp: u8 = 0;
+         @recursive(8) fn walk(depth: u8) {
+            let first = sp;
+            let flag = depth & 1;
+            for k in 0..3 { stack[raw sp] = k; sp += 1; }
+            let last = sp;
+            var i: u8 = first;
+            while i < last {
+                let v = stack[raw i];
+                if depth <= 1 {
+                    count += 1;
+                } else {
+                    walk(depth - 1);
+                }
+                count += u16(v) + u16(flag);
+                i += 1;
+            }
+            sp = first;
+         }
+         fn run() { walk(4); out[0] = count; out[1] = u16(sp); }",
+        2,
+    );
+}

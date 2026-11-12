@@ -4,7 +4,7 @@
 Each opening is played twice with colors reversed. Prints the score of
 build A against build B and the implied Elo difference.
 
-  scripts/chess/selfplay.py --a games/chess.nst --b /tmp/old/chess.nst --games 100
+  scripts/chess/selfplay.py --a games/chess --b /tmp/old/chess.nst --games 100
 """
 import argparse
 import concurrent.futures

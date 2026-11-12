@@ -194,6 +194,8 @@ impl Ram {
 
 pub struct LinkInput<'a> {
     pub mir: &'a Mir,
+    /// Per instance: which variables may not share bytes.
+    pub interference: Vec<Vec<BTreeSet<u32>>>,
     pub units: Vec<Unit>,
     pub cart: &'a Cartridge,
     pub board: Board,
@@ -315,7 +317,7 @@ fn mapper_init(board: Board, cart: &Cartridge) -> String {
 }
 
 pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
-    let LinkInput { mir, units, cart, board } = input;
+    let LinkInput { mir, units, cart, board, interference } = input;
     let mut errors = Vec::new();
     let banking = board.banking();
     let mut out = Linked::default();
@@ -505,16 +507,44 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     };
     let mut in_zp: Vec<Vec<bool>> = vars_of.iter().map(|v| vec![true; v.len()]).collect();
     let ctx_of: Vec<Context> = mir.insts.iter().map(|i| i.ctx).collect();
+    // Lay out one instance's frame region: variables that are never live
+    // together share bytes. Returns (size, offset per variable).
+    let layout = |i: usize, in_zp: &Vec<Vec<bool>>, zp: bool| -> (u16, Vec<u16>) {
+        let vars = &vars_of[i];
+        let mir_vars = mir.insts[i].vars.len();
+        let edges = interference.get(i);
+        let mut order: Vec<usize> = (0..vars.len()).filter(|k| in_zp[i][*k] == zp).collect();
+        order.sort_by_key(|k| std::cmp::Reverse(vars[*k].sc.size()));
+        let mut offset = vec![u16::MAX; vars.len()];
+        let mut size = 0u16;
+        for &k in &order {
+            let len = vars[k].sc.size() as u16;
+            let mut at = 0u16;
+            loop {
+                let clash = order.iter().any(|&j| {
+                    if offset[j] == u16::MAX || j == k {
+                        return false;
+                    }
+                    // Codegen scratch never shares; MIR variables share when they never coexist.
+                    let conflict = k >= mir_vars || j >= mir_vars || edges.is_none_or(|e| e[k].contains(&(j as u32)));
+                    let jl = vars[j].sc.size() as u16;
+                    conflict && offset[j] < at + len && at < offset[j] + jl
+                });
+                if !clash {
+                    break;
+                }
+                at += 1;
+            }
+            offset[k] = at;
+            size = size.max(at + len);
+        }
+        (size, offset)
+    };
     let overlay = |in_zp: &Vec<Vec<bool>>, zp: bool| -> (Vec<u16>, BTreeMap<Context, u16>) {
         let mut offset = vec![0u16; n];
         let mut peak: BTreeMap<Context, u16> = BTreeMap::new();
         for &i in &order {
-            let size: u16 = vars_of[i]
-                .iter()
-                .zip(&in_zp[i])
-                .filter(|(_, z)| **z == zp)
-                .map(|(v, _)| v.sc.size() as u16)
-                .sum();
+            let size: u16 = layout(i, in_zp, zp).0;
             let end = offset[i] + size;
             let p = peak.entry(ctx_of[i]).or_default();
             *p = (*p).max(end);
@@ -584,19 +614,13 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
     let mut frame_bytes = 0;
     for i in 0..n {
         let ctx = ctx_of[i];
-        let mut zo = zp_off[i] + zp_base.get(&ctx).copied().unwrap_or(0);
-        let mut ro = ram_off[i] + ram_base.get(&ctx).copied().unwrap_or(0x200);
+        let zo = zp_off[i] + zp_base.get(&ctx).copied().unwrap_or(0);
+        let ro = ram_off[i] + ram_base.get(&ctx).copied().unwrap_or(0x200);
+        let (_, zp_slots) = layout(i, &in_zp, true);
+        let (_, ram_slots) = layout(i, &in_zp, false);
         for (k, v) in vars_of[i].iter().enumerate() {
             let size = v.sc.size() as u16;
-            let addr = if in_zp[i][k] {
-                let a = zo;
-                zo += size;
-                a
-            } else {
-                let a = ro;
-                ro += size;
-                a
-            };
+            let addr = if in_zp[i][k] { zo + zp_slots[k] } else { ro + ram_slots[k] };
             var_addr.insert((InstId(i as u32), VarId(k as u32)), addr);
             frame_bytes += size as usize;
             if !v.temp {
@@ -652,7 +676,31 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
             Some(a) => place_obj(&mut obj_addr, ObjId(i as u32), o, a),
             None => {
                 let (s, e) = ram.largest(0x100, 0x800);
-                errors.push(format!("RAM is full: '{}' needs {size} bytes (largest free block {} bytes)", o.name, e - s));
+                if !errors.iter().any(|e| e.starts_with("RAM is full")) {
+                    // Explain where the memory went.
+                    let mut users: Vec<(usize, String)> = mir
+                        .objs
+                        .iter()
+                        .enumerate()
+                        .filter(|(k, x)| matches!(x.kind, ObjKind::Ram(_) | ObjKind::Frame(_)) && used_objs.contains(&(*k as u32)))
+                        .map(|(_, x)| (x.bytes(), x.name.clone()))
+                        .collect();
+                    for (ctx, size) in &ram_peak {
+                        users.push((*size as usize, format!("{ctx:?} frames in RAM")));
+                    }
+                    for (ctx, size) in &zp_peak {
+                        users.push((*size as usize, format!("{ctx:?} frames in zero page")));
+                    }
+                    users.sort_by(|a, b| b.cmp(a));
+                    let total: usize = users.iter().map(|u| u.0).sum();
+                    let top: Vec<String> = users.iter().take(12).map(|(n, name)| format!("{name} {n}")).collect();
+                    errors.push(format!(
+                        "RAM is full: '{}' needs {size} bytes (largest free block {} bytes). {total} bytes requested; largest: {}",
+                        o.name,
+                        e - s,
+                        top.join(", ")
+                    ));
+                }
             }
         }
     }
@@ -899,9 +947,41 @@ pub fn link(input: LinkInput) -> Result<Linked, Vec<String>> {
         fixed_base
     };
     if fixed_len > fixed_cap {
+        // Sizes by function and constant, largest first.
+        let mut sizes: Vec<(usize, String)> = Vec::new();
+        let mut current: Option<(String, u16)> = None;
+        let mut last = fixed_trial.labels.values().copied().max().unwrap_or(0);
+        let mut starts: Vec<(u16, String)> = fixed_trial
+            .labels
+            .iter()
+            .filter(|(k, _)| {
+                let digits = |r: &str| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit());
+                k.strip_prefix("__f").is_some_and(digits) || k.strip_prefix("__o").is_some_and(|r| digits(r.trim_end_matches('h')))
+            })
+            .map(|(k, v)| (*v, k.clone()))
+            .collect();
+        starts.sort();
+        last = last.max(0x8000 + fixed_len as u16);
+        for (a, k) in starts.iter().rev() {
+            sizes.push(((last - a) as usize, k.clone()));
+            last = *a;
+        }
+        let _ = &mut current;
+        let name = |k: &str| -> String {
+            if let Some(i) = k.strip_prefix("__f").and_then(|x| x.parse::<usize>().ok()) {
+                mir.insts[i].name.clone()
+            } else if let Some(i) = k.strip_prefix("__o").and_then(|x| x.trim_end_matches('h').parse::<usize>().ok()) {
+                mir.objs[i].name.clone()
+            } else {
+                k.to_owned()
+            }
+        };
+        sizes.sort_by(|a, b| b.cmp(a));
+        let top: Vec<String> = sizes.iter().take(10).map(|(n, k)| format!("{} {n}", name(k))).collect();
         errors.push(format!(
-            "Fixed code and data use {fixed_len} bytes, exceeding {fixed_cap} on {}; move functions or constants into @bank(N)",
-            board.name()
+            "Fixed code and data use {fixed_len} bytes, exceeding {fixed_cap} on {}; move functions or constants into @bank(N). Largest: {}",
+            board.name(),
+            top.join(", ")
         ));
         return Err(errors);
     }

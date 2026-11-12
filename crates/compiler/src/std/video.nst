@@ -16,7 +16,7 @@ use std::board;
 @zp var flicker_on: bool = false;
 
 /// Background updates: [address high, address low, count (bit 7: vertical), bytes...], then 0.
-pub var queue: [u8; 160];
+pub var queue: [u8; board::QUEUE];
 @zp pub var queue_end: u8 = 0;
 /// Writes dropped because the queue was full (should stay 0).
 pub var dropped: u8 = 0;
@@ -103,7 +103,7 @@ pub fn flicker(on: bool) {
 /// or 255 if full. Write the bytes into `queue` right after.
 pub fn reserve(address: u16, count: u8, vertical: bool) -> u8 {
     let start = queue_end;
-    if count > 150 || start > 156 - count {
+    if count > board::QUEUE - 6 || start > board::QUEUE - 4 - count {
         dropped += 1;
         return 255;
     }
@@ -175,7 +175,7 @@ pub fn put(address: u16, data: &[u8], vertical: bool) {
         nes::PPUCTRL = ctrl;
         return;
     }
-    if n > 150 {
+    if n > u16(board::QUEUE - 6) {
         dropped += 1;
         return;
     }
@@ -225,10 +225,10 @@ pub fn room() -> u8 {
     if direct {
         return 255;
     }
-    if queue_end > 150 {
+    if queue_end > board::QUEUE - 6 {
         return 0;
     }
-    return 150 - queue_end;
+    return board::QUEUE - 6 - queue_end;
 }
 
 /// Draw text: each byte is a tile number (ASCII when the font is placed so).
@@ -261,7 +261,7 @@ pub fn fill(x: u8, y: u8, count: u8, t: u8) {
         }
         return;
     }
-    if count > 150 {
+    if count > board::QUEUE - 6 {
         return;
     }
     let at = reserve(a, count, false);
@@ -470,7 +470,16 @@ pub fn on() {
 
 /// Publish this frame's sprites and background updates.
 pub fn end_frame() {
-    // Hide unused sprites.
+    if board::SPRITES {
+        hide_unused();
+    }
+    if flicker_on {
+        flicker_offset += 68;
+    }
+    ready = 1;
+}
+
+fn hide_unused() {
     asm {
         ldx {oam_next}
         lda {oam_full}
@@ -485,10 +494,6 @@ pub fn end_frame() {
         bne hide
     done:
     }
-    if flicker_on {
-        flicker_offset += 68;
-    }
-    ready = 1;
 }
 
 /// Wait until the frame prepared with `end_frame` has been published.
@@ -508,23 +513,39 @@ pub fn next_frame() {
 
 /// Called by the runtime's NMI handler: publish a prepared frame.
 pub fn publish() {
+    published = false;
+    if ready == 0 {
+        return;
+    }
+    published = true;
+    if !direct {
+        if board::SPRITES {
+            asm {
+                lda #0
+                sta $2003
+                lda #2
+                sta $4014
+            }
+        }
+        flush();
+    }
     asm {
-        lda #0
-        sta {published}
-        lda {ready}
-        bne go
-        jmp skip
-    go:
-        lda #1
-        sta {published}
-        lda {direct}
-        bne regs
-        ; Sprites.
-        lda #0
-        sta $2003
-        lda #2
-        sta $4014
-        ; Background queue.
+        lda {ctrl}
+        sta $2000
+        bit $2002
+        lda {scroll_x}
+        sta $2005
+        lda {scroll_y}
+        sta $2005
+        lda {mask}
+        sta $2001
+    }
+    ready = 0;
+}
+
+/// Copy the background queue and palette to the PPU (in vblank).
+fn flush() {
+    asm {
         ldx #0
     next:
         lda {queue},x
@@ -559,7 +580,7 @@ pub fn publish() {
         jmp next
     palette:
         lda {colors_dirty}
-        beq regs
+        beq done
         lda #$3f
         sta $2006
         ldx #0
@@ -579,26 +600,16 @@ pub fn publish() {
         sta $2006
         sta $2006
         sta $2006
-    regs:
-        lda {ctrl}
-        sta $2000
-        bit $2002
-        lda {scroll_x}
-        sta $2005
-        lda {scroll_y}
-        sta $2005
-        lda {mask}
-        sta $2001
-        lda #0
-        sta {ready}
-    skip:
+    done:
     }
 }
 
 /// Called once by the runtime before `init`: hide sprites, clear the queue.
 pub fn reset() {
-    for i in 0..64 {
-        oam[i * 4] = 0xff;
+    if board::SPRITES {
+        for i in 0..64 {
+            oam[i * 4] = 0xff;
+        }
     }
     queue[0] = 0;
     direct = true;

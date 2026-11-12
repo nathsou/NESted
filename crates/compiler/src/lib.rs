@@ -56,6 +56,8 @@ pub struct Output {
 pub struct Failure {
     pub diagnostics: Vec<Diagnostic>,
     pub sources: SourceMap,
+    /// Intermediate passes produced before the failure.
+    pub passes: Vec<Pass>,
 }
 
 impl Failure {
@@ -82,6 +84,7 @@ pub fn compile(project: &Project, options: Options) -> Result<Output, Failure> {
         Failure {
             diagnostics: d,
             sources: analysis.sources,
+            passes: Vec::new(),
         }
     };
     if analysis.diagnostics.has_errors() {
@@ -145,8 +148,10 @@ pub fn compile(project: &Project, options: Options) -> Result<Output, Failure> {
         name: "6502".into(),
         text: asm_text,
     });
+    let interference = mir.insts.iter().map(opt::interference).collect();
     let linked = match link::link(link::LinkInput {
         mir: &mir,
+        interference,
         units,
         cart: &analysis.program.cartridge,
         board,
@@ -155,7 +160,9 @@ pub fn compile(project: &Project, options: Options) -> Result<Output, Failure> {
         Err(errors) => {
             let span = analysis.program.cartridge.span;
             let extra = errors.into_iter().map(|e| Diagnostic::error(span, e)).collect();
-            return Err(fail(analysis, extra));
+            let mut f = fail(analysis, extra);
+            f.passes = passes;
+            return Err(f);
         }
     };
     passes.push(Pass {

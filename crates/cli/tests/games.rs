@@ -365,3 +365,132 @@ fn sprout_irq_trace() {
         }
     }
 }
+
+mod chess {
+    use super::*;
+
+    fn at(g: &mut Game, name: &str, i: u16) -> u8 {
+        let a = g.addr(name);
+        g.emu.read_ram(a + i)
+    }
+
+    fn tap(g: &mut Game, b: u8) {
+        for _ in 0..3 {
+            g.frame(b);
+        }
+        for _ in 0..3 {
+            g.frame(0);
+        }
+    }
+
+    #[test]
+    fn plays_a_controller_move_and_the_engine_replies() {
+        let mut g = Game::load("chess");
+        // Menu: Black to NES level 1 (a fast reply), then start.
+        tap(&mut g, UP);
+        for _ in 0..4 {
+            tap(&mut g, LEFT);
+        }
+        tap(&mut g, START);
+        g.wait(30);
+        assert_eq!(g.byte("screen_state"), 1, "game started");
+        // The cursor starts on e2: select, two squares up, move.
+        tap(&mut g, A);
+        tap(&mut g, UP);
+        tap(&mut g, UP);
+        tap(&mut g, A);
+        g.wait(240);
+        assert_eq!(at(&mut g, "board", 0x34), 1, "white pawn on e4");
+        assert_eq!(g.byte("game_plies"), 2, "1.e4 and the engine's reply");
+        assert_eq!(g.byte("side"), 0, "white to move again");
+        g.shot("chess");
+    }
+
+    #[test]
+    fn ponders_and_stops_on_a_button() {
+        let mut g = Game::load("chess");
+        tap(&mut g, START);
+        g.wait(30);
+        let in_book = g.addr("in_book");
+        g.emu.write_ram(in_book, 0);
+        tap(&mut g, A);
+        tap(&mut g, UP);
+        tap(&mut g, UP);
+        tap(&mut g, A);
+        let mut frames = 0;
+        while g.byte("game_plies") < 2 {
+            g.frame(0);
+            frames += 1;
+            assert!(frames < 2000, "the engine replies");
+        }
+        let board = g.addr("board");
+        let before: Vec<u8> = (0..128).map(|i| g.emu.read_ram(board + i)).collect();
+        g.wait(400);
+        assert_eq!(g.byte("pondering"), 1, "pondering while the human thinks");
+        tap(&mut g, RIGHT);
+        g.wait(30);
+        assert_eq!(g.byte("pondering"), 0, "a button stops pondering");
+        let after: Vec<u8> = (0..128).map(|i| g.emu.read_ram(board + i)).collect();
+        let occupied = |i: usize| i & 8 == 0 || before[i & !8] != 0;
+        let diff: Vec<usize> = (0..128).filter(|&i| occupied(i) && before[i] != after[i]).collect();
+        assert!(diff.is_empty(), "pondering leaves the position as it was: {diff:?}");
+    }
+
+    #[test]
+    fn bots_play_each_other() {
+        let mut g = Game::load("chess");
+        // White: human -> NES 1. Black: NES 5 -> NES 2.
+        tap(&mut g, UP);
+        tap(&mut g, UP);
+        tap(&mut g, RIGHT);
+        tap(&mut g, DOWN);
+        for _ in 0..3 {
+            tap(&mut g, LEFT);
+        }
+        assert_eq!(at(&mut g, "players", 0), 1);
+        assert_eq!(at(&mut g, "players", 1), 2);
+        tap(&mut g, START);
+        let in_book = g.addr("in_book");
+        g.emu.write_ram(in_book, 0);
+        let mut frames = 0;
+        while g.byte("game_plies") < 6 {
+            g.frame(0);
+            frames += 1;
+            assert!(frames < 3000, "the bots keep moving without input");
+        }
+        assert_eq!(g.byte("screen_state"), 1, "still playing");
+    }
+}
+
+#[test]
+#[ignore]
+fn chess_speed() {
+    let mut g = Game::load("chess");
+    // White: NES 5 (the default black level), black: human.
+    for b in [UP, UP, RIGHT, RIGHT, RIGHT, RIGHT, DOWN] {
+        for _ in 0..3 {
+            g.frame(b);
+        }
+        for _ in 0..3 {
+            g.frame(0);
+        }
+    }
+    let p = g.addr("players");
+    println!("players {} {}", g.emu.read_ram(p), g.emu.read_ram(p + 1));
+    for _ in 0..3 {
+        g.frame(START);
+    }
+    let in_book = g.addr("in_book");
+    g.emu.write_ram(in_book, 0);
+    g.wait(5);
+    let mut best = 0u32;
+    let mut frames = 0u32;
+    while g.byte("game_plies") == 0 && frames < 1500 {
+        g.frame(0);
+        frames += 1;
+        let n = g.word("nodes") as u32 | (g.word("nodes_high") as u32) << 16;
+        best = best.max(n);
+    }
+    let (n0, n1) = (0u32, best * 10 / frames.max(1) * 6);
+    println!("nodes in 10 s: {} ({} per second), plies {}", n1 - n0, (n1 - n0) / 10, g.byte("game_plies"));
+}

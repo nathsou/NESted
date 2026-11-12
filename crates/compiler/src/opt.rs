@@ -123,6 +123,83 @@ pub fn liveness(inst: &Inst) -> (Vec<Live>, Vec<Live>) {
     (live_in, live_out)
 }
 
+/// Variables that are live at the same time as each variable; such pairs
+/// need distinct frame bytes. Variables named by assembly conflict with all.
+pub fn interference(inst: &Inst) -> Vec<BTreeSet<u32>> {
+    let n = inst.vars.len();
+    let mut edges = vec![BTreeSet::new(); n];
+    let add = |a: VarId, b: VarId, edges: &mut Vec<BTreeSet<u32>>| {
+        if a != b {
+            edges[a.0 as usize].insert(b.0);
+            edges[b.0 as usize].insert(a.0);
+        }
+    };
+    if inst.blocks.is_empty() {
+        return edges;
+    }
+    let (live_in, live_out) = liveness(inst);
+    for (b, block) in inst.blocks.iter().enumerate() {
+        let mut live = live_out[b].clone();
+        term_uses(&block.term, inst, &mut live);
+        for s in block.stmts.iter().rev() {
+            let (u, d) = stmt_effects(s);
+            for v in &d {
+                for w in &live {
+                    add(*v, *w, &mut edges);
+                }
+            }
+            // A call's results and arguments coexist briefly.
+            if let St::Call { .. } = s {
+                for v in &d {
+                    for w in &u {
+                        add(*v, *w, &mut edges);
+                    }
+                }
+            }
+            for v in d {
+                live.remove(&v);
+            }
+            live.extend(u);
+        }
+    }
+    // Parameters arrive together, with everything live on entry.
+    let mut entry: Vec<VarId> = live_in[inst.entry.0 as usize].iter().copied().collect();
+    entry.extend(inst.params.iter().copied());
+    entry.extend(inst.rets.iter().copied());
+    for a in &entry {
+        for b in &entry {
+            add(*a, *b, &mut edges);
+        }
+    }
+    // Results conflict with every variable (they are written at returns).
+    for r in &inst.rets {
+        for v in 0..n {
+            add(*r, VarId(v as u32), &mut edges);
+        }
+    }
+    for blk in &inst.blocks {
+        for s in &blk.stmts {
+            if let St::Asm { operands, .. } = s {
+                for o in operands {
+                    if let AsmOperand::Var(v) = o {
+                        for w in 0..n {
+                            add(*v, VarId(w as u32), &mut edges);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (i, v) in inst.vars.iter().enumerate() {
+        if v.pointer {
+            for w in 0..n {
+                add(VarId(i as u32), VarId(w as u32), &mut edges);
+            }
+        }
+    }
+    edges
+}
+
 /// Mandatory passes: recursion save sets, recursion checks.
 pub fn prepare(mir: &mut Mir, diags: &mut Diagnostics) {
     for i in 0..mir.insts.len() {
@@ -682,9 +759,31 @@ fn inline_cost(inst: &Inst) -> usize {
 }
 
 fn inline(mir: &mut Mir) {
+    // Callees before callers, so size decisions see final bodies.
+    let n = mir.insts.len();
+    let mut order = Vec::new();
+    let mut state = vec![0u8; n];
+    fn visit(i: usize, mir: &Mir, state: &mut [u8], order: &mut Vec<usize>) {
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        for b in &mir.insts[i].blocks {
+            for s in &b.stmts {
+                if let St::Call { target, .. } = s {
+                    visit(target.0 as usize, mir, state, order);
+                }
+            }
+        }
+        state[i] = 2;
+        order.push(i);
+    }
+    for i in 0..n {
+        visit(i, mir, &mut state, &mut order);
+    }
     for _round in 0..3 {
         let mut changed = false;
-        for caller in 0..mir.insts.len() {
+        for &caller in &order {
             let mut b = 0;
             while b < mir.insts[caller].blocks.len() {
                 let mut k = 0;

@@ -100,6 +100,7 @@ pub fn load_project(path: &Path) -> Result<(Project, PathBuf), String> {
 
 fn build(args: &mut impl Iterator<Item = String>, write: bool) -> Result<(), String> {
     let path = PathBuf::from(args.next().ok_or("Expected a project path")?);
+    let path = path.canonicalize().unwrap_or(path);
     let mut output = None;
     let mut emit = None;
     let mut optimize = true;
@@ -112,7 +113,19 @@ fn build(args: &mut impl Iterator<Item = String>, write: bool) -> Result<(), Str
         }
     }
     let (project, _) = load_project(&path)?;
-    let out = compile(&project, Options { optimize }).map_err(|f| f.render())?;
+    let out = match compile(&project, Options { optimize }) {
+        Ok(o) => o,
+        Err(f) => {
+            if let Some(dir) = &emit {
+                fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                for p in &f.passes {
+                    let name = p.name.to_lowercase().replace(' ', "-");
+                    fs::write(dir.join(format!("{name}.txt")), &p.text).map_err(|e| e.to_string())?;
+                }
+            }
+            return Err(f.render());
+        }
+    };
     for w in &out.warnings {
         eprintln!("{}", w.render(&out.analysis.sources));
     }

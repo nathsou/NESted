@@ -658,7 +658,7 @@ impl<'a> Parser<'a> {
             self.bump();
             let rhs = self.binary(prec + 1)?;
             let span = lhs.span.to(rhs.span);
-            if prec == 3 {
+            if prec == 3 && !self.parenthesized(lhs.span) {
                 if let ExprKind::Binary(o, ..) = &lhs.kind {
                     if BINARY.iter().any(|(b, p)| b == o && *p == 3) {
                         return Err(Diagnostic::error(
@@ -674,6 +674,14 @@ impl<'a> Parser<'a> {
             };
         }
         Ok(lhs)
+    }
+
+    /// The expression at `span` is wrapped in parentheses.
+    fn parenthesized(&self, span: Span) -> bool {
+        self.tokens
+            .binary_search_by_key(&span.start, |t| t.span.start)
+            .ok()
+            .is_some_and(|i| matches!(self.tokens[i].tok, Tok::Punct("(")))
     }
 
     fn unary(&mut self) -> PResult<Expr> {

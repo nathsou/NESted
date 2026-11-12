@@ -2,7 +2,7 @@
 """Tactical test suite: build it with Stockfish, or score the cartridge on it.
 
   scripts/chess/suite.py build --count 300 > suite.epd
-  scripts/chess/suite.py run suite.epd --frames 300 [--source games/chess.nst]
+  scripts/chess/suite.py run suite.epd --frames 300 [--source games/chess]
 
 A position qualifies when Stockfish's best move beats its second choice by at
 least --gap centipawns: one clear solution, usually tactical.
@@ -71,7 +71,7 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("file")
     r.add_argument("--frames", type=int, default=300)
-    r.add_argument("--source", default=str(ROOT / "games" / "chess.nst"))
+    r.add_argument("--source", default=str(ROOT / "games" / "chess"))
     args = p.parse_args()
     build(args) if args.cmd == "build" else run(args)
 

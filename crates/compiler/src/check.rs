@@ -224,7 +224,21 @@ impl<'p> Checker<'p> {
         let mut mapper = "nrom".to_owned();
         let mut mirroring = "vertical".to_owned();
         let mut chr_ram = false;
+        let mut queue: i64 = 160;
+        let mut sprites = true;
         if let Some(root) = self.modules.get(self.root as usize) {
+            for item in &root.ast.items {
+                if let ItemKind::Cartridge(fields) = &item.kind {
+                    for (name, value) in fields {
+                        if let (ast::ExprKind::Int(n), "queue") = (&value.kind, name.name.as_str()) {
+                            queue = (*n).clamp(16, 250);
+                        }
+                        if let (ast::ExprKind::Bool(b), "sprites") = (&value.kind, name.name.as_str()) {
+                            sprites = *b;
+                        }
+                    }
+                }
+            }
             for item in &root.ast.items {
                 if let ItemKind::Cartridge(fields) = &item.kind {
                     for (name, value) in fields {
@@ -252,6 +266,8 @@ impl<'p> Checker<'p> {
         out.push_str(&format!("/// Pattern tables are RAM (uploaded by the program).\npub const CHR_RAM: bool = {chr_ram};\n"));
         out.push_str(&format!("pub const HORIZONTAL: bool = {};\n", mirroring == "horizontal"));
         out.push_str(&format!("pub const PRG_BANKING: bool = {};\n", board.banking() != crate::codegen::Banking::None));
+        out.push_str(&format!("/// Bytes of background updates per frame (`queue` in the cartridge block).\npub const QUEUE: u8 = {queue};\n"));
+        out.push_str(&format!("/// Sprites are drawn (`sprites = false` frees the shadow sprite page).\npub const SPRITES: bool = {sprites};\n"));
         out
     }
 
@@ -1064,6 +1080,9 @@ impl<'p> Checker<'p> {
 
     fn check_cartridge(&mut self) {
         let root = self.root as usize;
+        if root >= self.modules.len() {
+            return;
+        }
         let items: Vec<Item> = self.modules[root]
             .ast
             .items
@@ -1154,6 +1173,7 @@ impl<'p> Checker<'p> {
                         cart.prg_kib = Some(n as u32);
                     }
                 }
+                "sprites" => {}
                 "battery" => match &value.kind {
                     ast::ExprKind::Bool(b) => cart.battery = *b,
                     _ => self.diags.error(value.span, "Expected true or false"),

@@ -44,38 +44,54 @@ pub struct Thought {
 
 impl Cartridge {
     pub fn load(source_path: &Path) -> Result<Self, String> {
-        let source = std::fs::read_to_string(source_path).map_err(|e| e.to_string())?;
-        let base = source_path.parent().unwrap_or(Path::new("."));
-        let mut assets = BTreeMap::new();
-        for asset in nested_compiler::asset_paths(&source) {
-            let data = std::fs::read(base.join(&asset)).map_err(|e| format!("{asset}: {e}"))?;
-            assets.insert(asset, data);
+        // A project directory (games/chess) or its main.nst.
+        let dir = if source_path.is_dir() { source_path.to_path_buf() } else { source_path.parent().unwrap_or(Path::new(".")).to_path_buf() };
+        let mut project = nested_compiler::Project { entry: "main.nst".into(), ..Default::default() };
+        fn walk(d: &Path, base: &Path, p: &mut nested_compiler::Project) {
+            for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path, base, p);
+                    continue;
+                }
+                let rel = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+                if rel.ends_with(".nst") {
+                    p.sources.insert(rel, std::fs::read_to_string(&path).unwrap_or_default());
+                } else if rel.starts_with("assets/") {
+                    p.assets.insert(rel, std::fs::read(&path).unwrap_or_default());
+                }
+            }
         }
-        let compiled = nested_compiler::compile(&source, &assets, Default::default())
-            .map_err(|d| format!("{:?}", d.iter().map(|d| &d.message).collect::<Vec<_>>()))?;
+        walk(&dir, &dir, &mut project);
+        let source = project.sources.get("main.nst").cloned().unwrap_or_default();
+        let compiled = nested_compiler::compile(&project, Default::default()).map_err(|f| f.render())?;
         let mut m = Machine::new(&compiled.rom)?;
         LAST_ROM.with(|r| *r.borrow_mut() = compiled.rom.clone());
         // Boot: run init and settle into the frame loop.
         for _ in 0..8 {
             m.run_frame();
         }
+        let main_file = compiled.analysis.sources.find("main.nst").map(|f| f.0);
         Ok(Self {
             m,
-            symbols: compiled.assembly.symbols.clone(),
-            listing: compiled
-                .assembly
-                .instructions
+            symbols: compiled
+                .linked
+                .symbols
                 .iter()
-                .map(|i| (i.address, (i.text.clone(), i.source)))
+                .map(|s| (if s.kind.starts_with("fn") { format!("fn:{}", s.name) } else { s.name.clone() }, s.address))
+                .collect(),
+            listing: compiled
+                .linked
+                .listing
+                .iter()
+                .filter(|(bank, _)| bank.is_none())
+                .map(|(_, i)| (i.address, (i.text.clone(), i.src.filter(|(f, _)| Some(*f) == main_file).map(|(_, s)| (s as usize, s as usize + 40)))))
                 .collect(),
             source,
         })
     }
     pub fn symbol(&self, name: &str) -> u16 {
-        *self
-            .symbols
-            .get(&format!("__v_{name}"))
-            .unwrap_or_else(|| panic!("missing symbol {name}"))
+        *self.symbols.get(name).unwrap_or_else(|| panic!("missing symbol {name}"))
     }
     fn command(&mut self, cmd: u8, args: &[u8], max_frames: u64) -> Result<(), String> {
         let arg = self.symbol("io_arg");
@@ -275,7 +291,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_default();
-    let source = PathBuf::from(args.next().unwrap_or_else(|| "games/chess.nst".into()));
+    let source = PathBuf::from(args.next().unwrap_or_else(|| "games/chess".into()));
     let mut c = Cartridge::load(&source)?;
     match mode.as_str() {
         "perft" => {
@@ -341,7 +357,7 @@ fn run() -> Result<(), String> {
             let mut functions: Vec<(String, u16)> = c
                 .symbols
                 .iter()
-                .filter(|(n, _)| n.starts_with("__fn_") || n.starts_with("__rt_"))
+                .filter(|(n, _)| n.starts_with("fn:"))
                 .map(|(n, a)| (n.clone(), *a))
                 .collect();
             functions.sort_by_key(|f| f.1);
@@ -355,7 +371,7 @@ fn run() -> Result<(), String> {
             rows.sort_by_key(|r| std::cmp::Reverse(r.0));
             if let Some(function) = args.next() {
                 // Instruction-level view of one function.
-                let start = c.symbols[&format!("__fn_{function}")];
+                let start = c.symbols[&format!("fn:{function}")];
                 let end = functions
                     .iter()
                     .map(|f| f.1)

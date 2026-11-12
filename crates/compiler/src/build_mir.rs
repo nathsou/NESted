@@ -40,6 +40,13 @@ fn flat_len(t: &Type) -> Option<u32> {
     }
 }
 
+fn raw_index(e: &hir::Expr) -> &bool {
+    match &e.kind {
+        ExprKind::Index(_, _, raw) => raw,
+        _ => &false,
+    }
+}
+
 fn innermost(t: &Type) -> &Type {
     match t {
         Type::Array(e, _) => innermost(e),
@@ -389,6 +396,21 @@ impl Builder<'_, '_> {
                 };
                 let wide = root_len > 256;
                 let isc = if wide { Sc::U16 } else { Sc::U8 };
+                // `a[raw i + k]` addresses element i + k without wrapping, so
+                // the constant folds into the address.
+                if let (ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), x, k), true, false, 1) = (&i.kind, *raw_index(e), wide, inner) {
+                    if let (Some(k), Sc::U8) = (k.constant(), self.sc(&x.ty)) {
+                        if pr.index.is_none() && k >= 0 && k < 256 {
+                            let base = self.scalar(x);
+                            let wide_x = self.convert(base, Sc::U16);
+                            let off = if *op == BinOp::Add { k } else { -k };
+                            let idx = Ex::Bin(BinOp::Add, Box::new(wide_x), Box::new(Ex::Const(off & 0xffff, Sc::U16)), Sc::U16);
+                            pr.index = Some(idx);
+                            pr.ty = *elem;
+                            return Some(pr);
+                        }
+                    }
+                }
                 let mut idx = self.scalar(i);
                 idx = self.convert(idx, isc);
                 if inner > 1 {

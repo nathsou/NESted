@@ -95,6 +95,17 @@ pub fn generate(mir: &Mir, id: InstId, banking: Banking) -> Output {
     }
 }
 
+/// `u16(x) + k` index form from `a[raw x + k]`: (x, k).
+fn offset_index(i: &Ex) -> Option<(&Ex, i64)> {
+    match i {
+        Ex::Bin(BinOp::Add, a, k, Sc::U16) => match (&**a, k.konst()) {
+            (Ex::Cast(x, Sc::U8, Sc::U16), Some(k)) => Some((x, k as i16 as i64)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn byte_of(o: &Opnd, b: usize) -> Opnd {
     o.plus(b as i64)
 }
@@ -268,6 +279,19 @@ impl Gen<'_> {
                 }
                 let base = self.obj_byte(*o, b);
                 let big = self.obj(*o).len.unwrap_or(0) > 256;
+                if let Some((x, k)) = idx.as_deref().and_then(offset_index) {
+                    if !big {
+                        if let Some(c) = x.konst() {
+                            return Some(Arg::Mem(base.plus(c + k)));
+                        }
+                        let reg = self.index_operand(x)?;
+                        let base = base.plus(k);
+                        return Some(match reg {
+                            'x' => Arg::MemX(base),
+                            _ => Arg::MemY(base),
+                        });
+                    }
+                }
                 match idx.as_deref() {
                     None => Some(Arg::Mem(base)),
                     Some(Ex::Const(k, _)) => Some(Arg::Mem(base.plus(*k))),
@@ -379,6 +403,11 @@ impl Gen<'_> {
                     let p = self.big_address(*o, 0, i);
                     self.imm(Op::Ldy, 0);
                     self.ins(Op::Lda, Arg::IndY(p));
+                } else if let Some((x, k)) = offset_index(i) {
+                    self.load_a(x);
+                    self.imp(Op::Tax);
+                    let base = self.obj_byte(*o, 0).plus(k);
+                    self.ins(Op::Lda, Arg::MemX(base));
                 } else {
                     // Complex index: compute it, then index through X.
                     self.load_a(i);
@@ -515,6 +544,9 @@ impl Gen<'_> {
             Ex::Const(..) | Ex::Var(..) | Ex::Addr(..) => true,
             Ex::Load(o, idx, _) => {
                 let big = self.obj(*o).len.unwrap_or(0) > 256;
+                if let Some((x, _)) = idx.as_deref().and_then(offset_index) {
+                    return !big && (x.konst().is_some() || self.is_index_simple(x) || matches!(x, Ex::Load(_, Some(k), s) if !s.wide() && k.konst().is_some()));
+                }
                 match idx.as_deref() {
                     None => true,
                     Some(Ex::Const(..)) => true,
@@ -796,10 +828,11 @@ impl Gen<'_> {
                     self.ins(Op::Lda, Arg::Mem(t));
                     self.store_byte(dst, 0);
                 } else {
-                    self.load_a(i);
+                    let (ix, k) = offset_index(i).map(|(x, k)| (x.clone(), k)).unwrap_or(((**i).clone(), 0));
+                    self.load_a(&ix);
                     self.imp(Op::Tax);
                     for b in 0..2 {
-                        let base = self.obj_byte(*o, b);
+                        let base = self.obj_byte(*o, b).plus(k);
                         self.ins(Op::Lda, Arg::MemX(base));
                         self.store_byte(dst, b);
                     }
@@ -1234,12 +1267,13 @@ impl Gen<'_> {
                     }
                     Some(i) if !matches!(i, Ex::Const(..)) && !self.is_index_simple(i) => {
                         // Complex index: compute it first into a temporary.
-                        self.load_a(i);
+                        let (ix, k) = offset_index(i).unwrap_or((i, 0));
+                        self.load_a(ix);
                         let t = self.tmp8();
                         self.ins(Op::Sta, Arg::Mem(t.clone()));
                         self.load_a(e);
                         self.ins(Op::Ldx, Arg::Mem(t));
-                        let base = self.obj_byte(*o, 0);
+                        let base = self.obj_byte(*o, 0).plus(k);
                         self.ins(Op::Sta, Arg::MemX(base));
                     }
                     _ => {
@@ -1283,6 +1317,9 @@ impl Gen<'_> {
     }
 
     fn is_index_simple(&self, i: &Ex) -> bool {
+        if let Some((x, _)) = offset_index(i) {
+            return self.is_index_simple(x) || x.konst().is_some();
+        }
         matches!(i, Ex::Var(_, s) if !s.wide())
             || matches!(i, Ex::Load(_, None, s) if !s.wide())
             || matches!(i, Ex::Cast(x, f, _) if f.wide() && matches!(**x, Ex::Var(..)))
@@ -1392,11 +1429,12 @@ impl Gen<'_> {
                             self.ins(Op::Sta, Arg::IndY(ptr));
                         }
                     } else {
-                        self.load_a(&i);
+                        let (ix, k) = offset_index(&i).map(|(x, k)| (x.clone(), k)).unwrap_or((i.clone(), 0));
+                        self.load_a(&ix);
                         self.imp(Op::Tax);
                         for b in 0..2 {
                             self.ins(Op::Lda, Arg::Mem(byte_of(&t, b)));
-                            let base = self.obj_byte(*o, b);
+                            let base = self.obj_byte(*o, b).plus(k);
                             self.ins(Op::Sta, Arg::MemX(base));
                         }
                     }
@@ -1605,9 +1643,6 @@ impl Gen<'_> {
                     }
                 }
             }
-        }
-        if ret_scs.is_empty() && recursive && !saved.is_empty() {
-            self.restore(saved);
         }
     }
 
