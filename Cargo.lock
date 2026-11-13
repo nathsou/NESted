@@ -70,8 +70,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "nessy"
-version = "0.1.0"
-source = "git+https://github.com/nathsou/nessy?rev=05cf17ca37fcded5856e80fbb9ebf10ede0bfad8#05cf17ca37fcded5856e80fbb9ebf10ede0bfad8"
+version = "0.2.0"
 dependencies = [
  "bitflags",
  "sha2",
@@ -89,6 +88,7 @@ dependencies = [
 name = "nested-cli"
 version = "0.1.0"
 dependencies = [
+ "nessy",
  "nested-compiler",
  "nested-runtime",
 ]
@@ -96,6 +96,9 @@ dependencies = [
 [[package]]
 name = "nested-compiler"
 version = "0.1.0"
+dependencies = [
+ "nested-runtime",
+]
 
 [[package]]
 name = "nested-runtime"

@@ -11,7 +11,7 @@ cartridge's material values compensate for (see OFFSETS).
 import pathlib
 import struct
 
-OUT = pathlib.Path(__file__).resolve().parents[2] / "games" / "assets"
+OUT = pathlib.Path(__file__).resolve().parents[2] / "games" / "chess" / "assets"
 
 # PeSTO tables, rank 8 first (index 0 = a8), from White's point of view.
 MG = {
@@ -180,9 +180,9 @@ def lines():
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "chess.pst.bin").write_bytes(packed(MG, "mg") + packed(EG, "eg"))
-    (OUT / "chess.zobrist.bin").write_bytes(zobrist())
-    (OUT / "chess.lines.bin").write_bytes(lines())
+    (OUT / "pst.bin").write_bytes(packed(MG, "mg") + packed(EG, "eg"))
+    (OUT / "zobrist.bin").write_bytes(zobrist())
+    (OUT / "lines.bin").write_bytes(lines())
     print("PST material offsets:", OFFSETS)
 
 

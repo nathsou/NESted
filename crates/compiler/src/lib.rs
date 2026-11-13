@@ -1,531 +1,222 @@
-#![doc = include_str!("../README.md")]
-pub mod assembler;
+//! NESted: a statically allocated language for the NES, with an embeddable
+//! compiler, assembler, linker and language service. No third-party
+//! dependencies and no I/O: hosts supply sources and asset bytes.
+// Passes walk parallel per-block tables by index and thread a lot of
+// context through helpers; these lints fight that style.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::collapsible_match
+)]
+pub mod asm;
+pub mod ast;
+pub mod build_mir;
+pub mod check;
+pub mod check_expr;
 pub mod codegen;
-pub mod formatter;
-pub mod frontend;
+pub mod consteval;
+pub mod diag;
+pub mod fmt;
+pub mod hir;
 pub mod json;
-pub mod liveness;
+pub mod lexer;
+pub mod link;
 pub mod lsp;
-pub mod optimizer;
-pub mod peephole;
-mod runtime6502;
-use codegen::*;
-use frontend::*;
-use json::Json;
-use std::collections::{BTreeMap, BTreeSet};
+pub mod mir;
+pub mod parser;
+pub mod source;
+pub mod stdlib;
+pub mod types;
 
-pub type Assets = BTreeMap<String, Vec<u8>>;
+pub use check::{analyze, Analysis, Project};
+pub use diag::{Diagnostic, Diagnostics, Severity};
+pub use source::SourceMap;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub optimize: bool,
 }
+
 impl Default for Options {
     fn default() -> Self {
         Self { optimize: true }
     }
 }
+
+/// A named intermediate representation, for inspection.
 #[derive(Clone, Debug)]
 pub struct Pass {
     pub name: String,
     pub text: String,
 }
-#[derive(Clone, Debug)]
-pub struct Compilation {
+
+pub struct Output {
     pub rom: Vec<u8>,
-    pub assembly: assembler::Assembly,
+    pub analysis: Analysis,
+    pub mir: mir::Mir,
+    pub linked: link::Linked,
+    pub board: link::Board,
     pub passes: Vec<Pass>,
-    pub generated: Generated,
+    pub warnings: Vec<Diagnostic>,
+}
+
+pub struct Failure {
     pub diagnostics: Vec<Diagnostic>,
-    pub optimizations: optimizer::Optimizations,
-    pub machine_changes: usize,
-    pub prg_bytes: usize,
-    pub chr_bytes: usize,
-    pub verified_budgets: BTreeMap<String, usize>,
+    pub sources: SourceMap,
+    /// Intermediate passes produced before the failure.
+    pub passes: Vec<Pass>,
 }
-fn compile_error(message: impl Into<String>) -> Vec<Diagnostic> {
-    vec![Diagnostic::error(Span::default(), message)]
-}
-pub fn compile(
-    source: &str,
-    assets: &Assets,
-    options: Options,
-) -> Result<Compilation, Vec<Diagnostic>> {
-    let analysis = analyze(source);
-    if analysis.diagnostics.iter().any(|d| !d.warning) {
-        return Err(analysis.diagnostics);
-    }
-    let mut program = analysis.program.unwrap();
-    let mut passes = vec![
-        Pass {
-            name: "01 · tokens".into(),
-            text: program
-                .tokens
-                .iter()
-                .map(|t| {
-                    format!(
-                        "{:>6}..{:<6} {} {:?}",
-                        t.span.start,
-                        t.span.end,
-                        if t.string { "string" } else { "token " },
-                        t.text
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        },
-        Pass {
-            name: "02 · typed IR".into(),
-            text: optimizer::dump(&program),
-        },
-    ];
-    let mut constants = BTreeMap::new();
-    for global in &mut program.globals {
-        let t = if let Ty::Array(t, _) = &global.ty {
-            t.as_ref()
-        } else {
-            &global.ty
-        };
-        let encode = |e: &Expr| -> Result<Vec<u8>, Vec<Diagnostic>> {
-            let n = eval_const(e, &constants)
-                .ok_or_else(|| vec![Diagnostic::error(e.span, "Initializer is not constant")])?;
-            let mut bytes = vec![n as u8];
-            if t.size() == 2 {
-                bytes.push((n >> 8) as u8);
-            }
-            Ok(bytes)
-        };
-        global.data = match &global.initial {
-            Initial::Scalar(e) => encode(e)?,
-            Initial::List(v) => {
-                let mut out = Vec::new();
-                for e in v {
-                    out.extend(encode(e)?);
-                }
-                out
-            }
-            Initial::Repeat(e, n) => encode(e)?.repeat(*n),
-            Initial::Asset(path, offset) => {
-                let data = assets.get(path).ok_or_else(|| {
-                    vec![Diagnostic::error(
-                        global.span,
-                        format!("Missing asset '{path}'"),
-                    )]
-                })?;
-                let end = (*offset + global.ty.size()).min(data.len());
-                data.get(*offset..end).unwrap_or_default().to_vec()
-            }
-        };
-        if global.data.len() != global.ty.size() {
-            return Err(vec![Diagnostic::error(
-                global.span,
-                format!(
-                    "Asset/initializer has {} bytes; {} requires {}",
-                    global.data.len(),
-                    global.ty,
-                    global.ty.size()
-                ),
-            )]);
-        }
-        if global.constant {
-            if let Initial::Scalar(e) = &global.initial {
-                constants.insert(
-                    global.name.clone(),
-                    global.ty.wrap(eval_const(e, &constants).unwrap()),
-                );
-            }
-        }
-    }
-    let optimizations = if options.optimize {
-        optimizer::optimize(&mut program)
-    } else {
-        optimizer::Optimizations::default()
-    };
-    passes.push(Pass {
-        name: "03 · optimized IR".into(),
-        text: optimizer::dump(&program),
-    });
-    let mut generated = generate(&program, assets).map_err(|d| vec![d])?;
-    passes.push(Pass {
-        name: "04 · machine lowering".into(),
-        text: generated.assembly.clone(),
-    });
-    let machine_changes = if options.optimize {
-        let (s, n) = assembler::optimize_machine(&generated.assembly);
-        let (s, m) = peephole::optimize(&s);
-        generated.assembly = s;
-        n + m
-    } else {
-        0
-    };
-    passes.push(Pass {
-        name: "05 · machine optimization".into(),
-        text: generated.assembly.clone(),
-    });
-    let assembly =
-        assembler::assemble(&generated.assembly, generated.mapper.base()).map_err(compile_error)?;
-    let capacity = if generated.mapper == Mapper::Nrom {
-        32768
-    } else {
-        16384
-    };
-    if assembly.bytes.len() > capacity - 6 {
-        return Err(compile_error(format!("Fixed code/data uses {} bytes, exceeding {} bytes for {:?}; place large const arrays in @bank(N)",assembly.bytes.len(),capacity-6,generated.mapper)));
-    }
-    let chr = if generated.mapper == Mapper::Uxrom {
-        Vec::new()
-    } else if let Some(path) = program.config.get("chr") {
-        let data = assets
-            .get(path)
-            .ok_or_else(|| compile_error(format!("Missing CHR asset '{path}'")))?;
-        if data.len() != 8192 {
-            return Err(compile_error("CHR asset must contain exactly 8192 bytes"));
-        }
-        data.clone()
-    } else {
-        vec![0; 8192]
-    };
-    let max_bank = generated.bank_data.keys().max().copied().unwrap_or(0) as usize;
-    let mut prg = if generated.mapper == Mapper::Nrom {
-        vec![0xff; 32768]
-    } else {
-        let fixed = if generated.mapper == Mapper::Mmc3 {
-            2
-        } else {
-            1
-        };
-        let banks = (max_bank + 1 + fixed)
-            .max(if fixed == 2 { 4 } else { 2 })
-            .next_power_of_two();
-        if (generated.mapper == Mapper::Mmc3 && banks > 64)
-            || (generated.mapper != Mapper::Mmc3 && banks > 16)
-        {
-            return Err(compile_error(
-                "Bank allocation exceeds the declared board's PRG capacity",
-            ));
-        }
-        vec![0xff; banks * generated.mapper.bank_size()]
-    };
-    for (bank, data) in &generated.bank_data {
-        let offset = *bank as usize * generated.mapper.bank_size();
-        prg[offset..offset + data.len()].copy_from_slice(data);
-    }
-    let code_offset = prg.len() - capacity;
-    prg[code_offset..code_offset + assembly.bytes.len()].copy_from_slice(&assembly.bytes);
-    for (i, name) in ["__nmi", "__reset", "__irq"].iter().enumerate() {
-        let address = assembly.symbols[*name];
-        let offset = prg.len() - 6 + i * 2;
-        prg[offset] = address as u8;
-        prg[offset + 1] = (address >> 8) as u8;
-    }
-    let mut header = vec![0; 16];
-    header[..4].copy_from_slice(b"NES\x1a");
-    header[4] = (prg.len() / 16384) as u8;
-    header[5] = (chr.len() / 8192) as u8;
-    let vertical = program
-        .config
-        .get("mirroring")
-        .is_none_or(|s| s == "vertical");
-    header[6] = (generated.mapper.id() << 4) | u8::from(vertical);
-    header[8] = u8::from(matches!(generated.mapper, Mapper::Mmc1 | Mapper::Mmc3));
-    let prg_bytes = prg.len();
-    let chr_bytes = chr.len();
-    let mut rom = header;
-    rom.extend(prg);
-    rom.extend(chr);
-    let mut verified_budgets = BTreeMap::new();
-    for f in &program.functions {
-        if let Some(budget) = f.attrs.get("budget") {
-            let limit = budget.parse::<usize>().map_err(|_| {
-                vec![Diagnostic::error(
-                    f.name_span,
-                    "@budget requires an integer instruction-cycle limit",
-                )]
-            })?;
-            let max =
-                instruction_bound(&format!("__fn_{}", f.name), &assembly, &mut BTreeSet::new())
-                    .map_err(|message| vec![Diagnostic::error(f.name_span, message)])?;
-            if max > limit {
-                return Err(vec![Diagnostic::error(f.name_span,format!("Verified unstalled instruction bound is {max} cycles, exceeding budget {limit}"))]);
-            }
-            verified_budgets.insert(f.name.clone(), max);
-        }
-    }
-    let mut layout = format!(
-        concat!(
-            "mapper {:?} ({}), fixed CPU base ${:04X}\n",
-            "PRG {} bytes · CHR {} bytes · ROM {} bytes\n",
-            "fixed code/data {} / {} bytes\n",
-            "compiler RAM {} bytes · zero page {} bytes · overlaid frame peak {} bytes\n",
-            "call depth {} · generated-code hardware stack allowance {} bytes (raw assembly excluded)\n\n"
-        ),
-        generated.mapper, generated.mapper.id(), generated.mapper.base(),
-        prg_bytes, chr_bytes, rom.len(), assembly.bytes.len(), capacity - 6,
-        generated.ram_bytes, generated.zero_page_bytes, generated.frame_bytes,
-        generated.call_depth, generated.stack_bytes,
-    );
-    for m in &generated.memory {
-        layout.push_str(&format!(
-            "${:04X} {:>4} bytes · {:<28} {}\n",
-            m.address, m.size, m.name, m.kind
-        ));
-    }
-    for (bank, data) in &generated.bank_data {
-        layout.push_str(&format!(
-            "PRG bank {bank}: {} bytes at CPU $8000\n",
-            data.len()
-        ));
-    }
-    passes.push(Pass {
-        name: "06 · placement & link".into(),
-        text: layout,
-    });
-    passes.push(Pass {
-        name: "07 · assembled ROM".into(),
-        text: assembly.listing.clone(),
-    });
-    Ok(Compilation {
-        rom,
-        assembly,
-        passes,
-        generated,
-        diagnostics: analysis.diagnostics,
-        optimizations,
-        machine_changes,
-        prg_bytes,
-        chr_bytes,
-        verified_budgets,
-    })
-}
-/// Conservative longest-path instruction bound for acyclic, directly called code.
-/// DMA, interrupt latency and PPU phase are deliberately outside this contract.
-fn instruction_bound(
-    name: &str,
-    a: &assembler::Assembly,
-    active: &mut BTreeSet<u16>,
-) -> Result<usize, String> {
-    let address = *a
-        .symbols
-        .get(name)
-        .ok_or_else(|| format!("Unknown timing entry {name}"))?;
-    fn walk(
-        pc: u16,
-        a: &assembler::Assembly,
-        active: &mut BTreeSet<u16>,
-        memo: &mut BTreeMap<u16, usize>,
-    ) -> Result<usize, String> {
-        if active.len() > 1024 {
-            return Err("Budget verification exceeds 1024 control-flow steps; split the timing contract into helpers".into());
-        }
-        if let Some(n) = memo.get(&pc) {
-            return Ok(*n);
-        }
-        if !active.insert(pc) {
-            return Err("Cannot verify budget: cyclic control flow requires a statically bounded/unrolled loop".into());
-        }
-        let instruction = a
-            .instructions
+
+impl Failure {
+    pub fn render(&self) -> String {
+        self.diagnostics
             .iter()
-            .find(|i| i.address == pc)
-            .ok_or("Cannot verify budget: execution enters data or an indirect target")?;
-        let mut split = instruction.text.split_whitespace();
-        let op = split.next().unwrap();
-        let arg = split.next().unwrap_or("");
-        let next = pc.wrapping_add(instruction.bytes.len() as u16);
-        let rest = match op {
-            "rts" | "rti" => 0,
-            "jmp" => {
-                if arg.starts_with('(') {
-                    return Err("Cannot verify indirect jump".into());
-                }
-                walk(
-                    assembler::value(arg, &a.symbols).map_err(|s| s.to_string())? as u16,
-                    a,
-                    active,
-                    memo,
-                )?
-            }
-            "jsr" => {
-                let callee = walk(assembler::value(arg, &a.symbols)? as u16, a, active, memo)?;
-                callee + walk(next, a, active, memo)?
-            }
-            "bcc" | "bcs" | "beq" | "bne" | "bmi" | "bpl" | "bvc" | "bvs" => {
-                let target = assembler::value(arg, &a.symbols)? as u16;
-                walk(target, a, active, memo)?.max(walk(next, a, active, memo)?)
-            }
-            "brk" => return Err("Cannot verify BRK control flow".into()),
-            _ => walk(next, a, active, memo)?,
-        };
-        active.remove(&pc);
-        let n = rest + instruction.cycles_max as usize;
-        memo.insert(pc, n);
-        Ok(n)
+            .map(|d| d.render(&self.sources))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
-    walk(address, a, active, &mut BTreeMap::new())
 }
-pub fn asset_paths(source: &str) -> Vec<String> {
-    let Ok(p) = parse(source) else {
-        return Vec::new();
+
+impl std::fmt::Debug for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.render())
+    }
+}
+
+pub fn compile(project: &Project, options: Options) -> Result<Output, Failure> {
+    let analysis = analyze(project);
+    let fail = |analysis: Analysis, mut extra: Vec<Diagnostic>| {
+        let mut d: Vec<Diagnostic> = analysis.diagnostics.items.clone();
+        d.append(&mut extra);
+        Failure {
+            diagnostics: d,
+            sources: analysis.sources,
+            passes: Vec::new(),
+        }
     };
-    let mut paths = BTreeSet::new();
-    for key in ["chr", "screen", "palette"] {
-        if let Some(path) = p.config.get(key) {
-            paths.insert(path.clone());
-        }
+    if analysis.diagnostics.has_errors() {
+        return Err(fail(analysis, Vec::new()));
     }
-    for g in &p.globals {
-        if let Initial::Asset(path, _) = &g.initial {
-            paths.insert(path.clone());
-        }
+    let mut diags = Diagnostics::default();
+    let mut mir = build_mir::build(&analysis.program, &mut diags);
+    if diags.has_errors() {
+        return Err(fail(analysis, diags.items));
     }
-    fn expr(e: &Expr, out: &mut BTreeSet<String>) {
-        match &e.kind {
-            ExprKind::Call(n, v) => {
-                if n == "screen" {
-                    if let Some(Expr {
-                        kind: ExprKind::String(s),
-                        ..
-                    }) = v.first()
-                    {
-                        out.insert(s.clone());
-                    }
-                }
-                for e in v {
-                    expr(e, out);
-                }
-            }
-            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b, _) => {
-                expr(a, out);
-                expr(b, out);
-            }
-            ExprKind::Unary(_, e) => expr(e, out),
-            ExprKind::Match(value, arms) => {
-                expr(value, out);
-                for arm in arms {
-                    match &arm.body {
-                        MatchBody::Value(result) => expr(result, out),
-                        MatchBody::Block(body) => block(body, out),
-                    }
-                }
-            }
-            _ => {}
-        }
+    let mut passes = vec![Pass {
+        name: "MIR".into(),
+        text: mir.dump(),
+    }];
+    if options.optimize {
+        opt::optimize(&mut mir);
+        passes.push(Pass {
+            name: "MIR optimized".into(),
+            text: mir.dump(),
+        });
     }
-    fn block(body: &[Stmt], out: &mut BTreeSet<String>) {
-        for s in body {
-            match s {
-                Stmt::Local { value, .. } | Stmt::Expr(value) => expr(value, out),
-                Stmt::Assign { value, .. } => expr(value, out),
-                Stmt::If { condition, yes, no } => {
-                    expr(condition, out);
-                    block(yes, out);
-                    block(no, out);
-                }
-                Stmt::While { condition, body } => {
-                    expr(condition, out);
-                    block(body, out);
-                }
-                Stmt::For {
-                    start, end, body, ..
-                } => {
-                    expr(start, out);
-                    expr(end, out);
-                    block(body, out);
-                }
-                Stmt::Loop(b) => block(b, out),
-                Stmt::Return(Some(e), _) => expr(e, out),
+    opt::prepare(&mut mir, &mut diags);
+    if diags.has_errors() {
+        return Err(fail(analysis, diags.items));
+    }
+    let board =
+        link::Board::from_name(&analysis.program.cartridge.mapper).unwrap_or(link::Board::Nrom);
+    let mut units = Vec::new();
+    let mut asm_text = String::new();
+    for i in 0..mir.insts.len() {
+        let id = mir::InstId(i as u32);
+        if mir.insts[i].blocks.is_empty() {
+            continue;
+        }
+        let mut out = codegen::generate(&mir, id, board.banking());
+        for (span, msg) in out.errors.drain(..) {
+            diags.error(span, msg);
+        }
+        if options.optimize {
+            peephole::optimize(&mut out.lines, &mir, id);
+        }
+        asm_text.push_str(&format!("; {}\n", mir.insts[i].name));
+        for l in &out.lines {
+            match l {
+                asm::Line::Ins(ins) => asm_text.push_str(&format!("    {ins}\n")),
+                asm::Line::Label(n) => asm_text.push_str(&format!("{n}:\n")),
                 _ => {}
             }
         }
+        units.push(link::Unit {
+            inst: id,
+            lines: out.lines,
+            extra_vars: out.extra_vars,
+            helpers: out.helpers,
+            far: out.far_calls,
+        });
     }
-    for f in &p.functions {
-        block(&f.body, &mut paths);
+    if diags.has_errors() {
+        return Err(fail(analysis, diags.items));
     }
-    paths.into_iter().collect()
+    passes.push(Pass {
+        name: "6502".into(),
+        text: asm_text,
+    });
+    let interference = mir.insts.iter().map(opt::interference).collect();
+    let linked = match link::link(link::LinkInput {
+        mir: &mir,
+        interference,
+        units,
+        cart: &analysis.program.cartridge,
+        board,
+    }) {
+        Ok(l) => l,
+        Err(errors) => {
+            let span = analysis.program.cartridge.span;
+            let extra = errors
+                .into_iter()
+                .map(|e| Diagnostic::error(span, e))
+                .collect();
+            let mut f = fail(analysis, extra);
+            f.passes = passes;
+            return Err(f);
+        }
+    };
+    passes.push(Pass {
+        name: "Layout".into(),
+        text: linked.layout.clone(),
+    });
+    let mut listing = String::new();
+    for (bank, item) in &linked.listing {
+        listing.push_str(&format!(
+            "{}{:04X}  {:<9} {:<22} {}\n",
+            bank.map(|b| format!("{b:02}:"))
+                .unwrap_or_else(|| "   ".into()),
+            item.address,
+            item.bytes
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            item.text,
+            if item.cycles.0 == item.cycles.1 {
+                format!("{}", item.cycles.0)
+            } else {
+                format!("{}-{}", item.cycles.0, item.cycles.1)
+            }
+        ));
+    }
+    passes.push(Pass {
+        name: "Listing".into(),
+        text: listing,
+    });
+    let mut warnings: Vec<Diagnostic> = analysis.diagnostics.items.clone();
+    warnings.extend(diags.items);
+    Ok(Output {
+        rom: linked.rom.clone(),
+        analysis,
+        mir,
+        linked,
+        board,
+        passes,
+        warnings,
+    })
 }
-impl Compilation {
-    pub fn json(&self) -> Json {
-        let o = &self.optimizations;
-        Json::object([
-            ("ok", true.into()),
-            ("romBytes", self.rom.len().into()),
-            ("prgBytes", self.prg_bytes.into()),
-            ("chrBytes", self.chr_bytes.into()),
-            ("codeBytes", self.assembly.bytes.len().into()),
-            ("mapper", self.generated.mapper.id().into()),
-            ("ramBytes", self.generated.ram_bytes.into()),
-            ("zeroPageBytes", self.generated.zero_page_bytes.into()),
-            ("frameBytes", self.generated.frame_bytes.into()),
-            ("stackAllowance", (self.generated.stack_bytes).into()),
-            (
-                "passes",
-                Json::Array(
-                    self.passes
-                        .iter()
-                        .map(|p| {
-                            Json::object([
-                                ("name", p.name.clone().into()),
-                                ("text", p.text.clone().into()),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-            (
-                "symbols",
-                Json::Object(
-                    self.assembly
-                        .symbols
-                        .iter()
-                        .filter(|(n, _)| {
-                            ["__v_", "__fn_", "__l_", "__t_"]
-                                .iter()
-                                .any(|prefix| n.starts_with(prefix))
-                        })
-                        .map(|(n, v)| (n.clone(), (*v).into()))
-                        .collect(),
-                ),
-            ),
-            (
-                "memory",
-                Json::Array(
-                    self.generated
-                        .memory
-                        .iter()
-                        .map(|m| {
-                            Json::object([
-                                ("name", m.name.clone().into()),
-                                ("address", m.address.into()),
-                                ("size", m.size.into()),
-                                ("kind", m.kind.clone().into()),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-            (
-                "optimizations",
-                Json::object([
-                    ("constantFolds", o.folded.into()),
-                    ("algebraic", o.simplified.into()),
-                    ("inlined", o.inlined.into()),
-                    ("branches", o.branches.into()),
-                    ("unreachable", o.unreachable.into()),
-                    ("unrolled", o.unrolled.into()),
-                    ("deadFunctions", o.dead_functions.into()),
-                    ("machine", self.machine_changes.into()),
-                    ("relaxedBranches", self.assembly.relaxed.into()),
-                    ("bankReads", self.generated.bank_reads.into()),
-                ]),
-            ),
-            (
-                "budgets",
-                Json::Object(
-                    self.verified_budgets
-                        .iter()
-                        .map(|(n, v)| (n.clone(), (*v).into()))
-                        .collect(),
-                ),
-            ),
-        ])
-    }
-}
+
+pub mod opt;
+pub mod peephole;

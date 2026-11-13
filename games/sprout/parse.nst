@@ -1,0 +1,87 @@
+// Metatile codes.
+pub const EMPTY: u8 = 0;
+pub const GRASS: u8 = 1;
+pub const DIRT: u8 = 2;
+pub const BRICK: u8 = 3;
+pub const STONE: u8 = 4;
+pub const PLANK: u8 = 5;
+pub const SPIKES: u8 = 6;
+pub const SPRING: u8 = 7;
+pub const GEM: u8 = 8;
+pub const FLAG: u8 = 9;
+pub const CHECK: u8 = 10;
+pub const CLOUD_L: u8 = 11;
+pub const CLOUD_R: u8 = 12;
+pub const BUSH: u8 = 13;
+pub const FLOWER: u8 = 14;
+pub const START: u8 = 15;
+
+// Enemy kinds in spawn lists.
+pub const BEETLE: u8 = 1;
+pub const FROG: u8 = 2;
+pub const BAT: u8 = 3;
+
+fn code(c: u8) -> u8 {
+    return match c {
+        '=' => GRASS,
+        '#' => DIRT,
+        'B' => BRICK,
+        'S' => STONE,
+        '-' => PLANK,
+        '^' => SPIKES,
+        'J' => SPRING,
+        '*' => GEM,
+        'F' => FLAG,
+        'C' => CHECK,
+        '(' => CLOUD_L,
+        ')' => CLOUD_R,
+        'b' => BUSH,
+        'f' => FLOWER,
+        '@' => START,
+        _ => EMPTY,
+    };
+}
+
+/// The character at (column, row) of a level drawing.
+fn at(text: &[u8], width: u16, col: u16, row: u16) -> u8 {
+    // Each row is `width` characters plus a newline; the text starts with one.
+    return text[raw 1 + row * (width + 1) + col];
+}
+
+/// Column-major metatile codes: 13 bytes per column.
+fn parse(text: &[u8], width: u16) -> [u8; 4096] {
+    var out: [u8; 4096] = [0; 4096];
+    for col in 0..width {
+        for row in 0..13 {
+            let i = col * 13 + u16(row);
+            if i < 4096 {
+                out[i] = code(at(text, width, col, u16(row)));
+            }
+        }
+    }
+    return out;
+}
+
+/// Enemy spawns: (column, row, kind) triples ordered by column, ended by 255.
+fn spawns(text: &[u8], width: u16) -> [u8; 64] {
+    var out: [u8; 64] = [255; 64];
+    var n: u8 = 0;
+    for col in 0..width {
+        for row in 0..13 {
+            let c = at(text, width, col, u16(row));
+            let kind: u8 = match c {
+                'e' => BEETLE,
+                'h' => FROG,
+                'v' => BAT,
+                _ => 0,
+            };
+            if kind != 0 && n < 61 {
+                out[n] = u8(col);
+                out[n + 1] = u8(row);
+                out[n + 2] = kind;
+                n += 3;
+            }
+        }
+    }
+    return out;
+}

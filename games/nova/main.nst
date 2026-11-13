@@ -1,0 +1,1212 @@
+// NOVA: hold the line against an armada, wave after wave, boss after boss.
+//
+// A vertical shooter. A fires (hold for rapid fire), B sets off a bomb that
+// clears every bullet on screen, Start pauses. Capsules dropped by saucers
+// widen your shot, then add bombs. Three stages end in a mothership; after
+// the third the armada returns faster.
+//
+// UxROM board with CHR RAM: there is no tile ROM. Every sprite is drawn as
+// text in art.nst and encoded at compile time, the tiles and font sit in a
+// switchable PRG bank, and init copies them to CHR RAM. The starfield
+// scrolls through two stacked nametables while the score is drawn with
+// sprites.
+cartridge {
+    title = "Nova";
+    mapper = uxrom;
+    mirroring = horizontal;
+    chr = ram;
+    queue = 64;
+}
+
+use std::video;
+use std::input;
+use std::audio;
+use std::math;
+use std::runtime;
+use art;
+use sound;
+use waves;
+
+enum Mode {
+    Title,
+    Play,
+    Over,
+}
+
+/// Where the current stage is.
+enum Phase {
+    Intro,
+    Waves,
+    Warning,
+    Boss,
+    Clear,
+}
+
+enum Kind {
+    Drone,
+    Dart,
+    Saucer,
+    Rock,
+}
+
+struct Enemy {
+    x: u8,
+    y: u8,
+    kind: Kind,
+    hp: u8,
+    t: u8,
+    base: u8,
+    vx: i8,
+    phase: u8,
+    flash: u8,
+    alive: bool,
+}
+
+/// The player's shots move straight up, or drift sideways at level 3.
+struct Shot {
+    x: u8,
+    y: u8,
+    dx: i8,
+    alive: bool,
+}
+
+/// Enemy bullets move in 1/16 pixel steps.
+struct Bullet {
+    x: u16,
+    y: u16,
+    vx: i8,
+    vy: i8,
+    alive: bool,
+}
+
+struct Boom {
+    x: u8,
+    y: u8,
+    t: u8,
+}
+
+type EnemySlot = u8 in 0..6;
+type ShotSlot = u8 in 0..6;
+type BulletSlot = u8 in 0..12;
+type BoomSlot = u8 in 0..4;
+type Weapon = u8 in 1..=3;
+
+// Sprite palettes.
+const PLAYER_PAL: u8 = 0;
+const RED: u8 = 1;
+const PURPLE: u8 = 2;
+const FIRE: u8 = 3;
+
+const PALETTES: [u8; 32] = [
+    0x0f, 0x00, 0x10, 0x30, 0x0f, 0x12, 0x21, 0x31, 0x0f, 0x14, 0x24, 0x34, 0x0f, 0x00, 0x10, 0x38,
+    0x0f, 0x30, 0x21, 0x12, 0x0f, 0x37, 0x26, 0x16, 0x0f, 0x34, 0x24, 0x14, 0x0f, 0x27, 0x38, 0x30,
+];
+/// Twinkling stars cycle through these.
+const TWINKLE: [u8; 8] = [0x30, 0x3c, 0x2c, 0x1c, 0x0c, 0x1c, 0x2c, 0x3c];
+
+/// Bullet velocities for 32 directions (0 = right, 8 = down), in 1/16 px.
+fn velocities(speed: i16, vertical: bool) -> [i8; 32] {
+    var out: [i8; 32] = [0; 32];
+    for d in 0..32 {
+        let angle = d * 8;
+        let v = if vertical { math::sin(angle) } else { math::cos(angle) };
+        out[d] = i8(i16(v) * speed / 127);
+    }
+    return out;
+}
+const SLOW_X: [i8; 32] = velocities(20, false);
+const SLOW_Y: [i8; 32] = velocities(20, true);
+const FAST_X: [i8; 32] = velocities(30, false);
+const FAST_Y: [i8; 32] = velocities(30, true);
+
+var mode: Mode = Mode::Title;
+var phase: Phase = Phase::Intro;
+var timer: u16 = 0;
+var paused: bool = false;
+
+var px: u8 = 120;
+var py: u8 = 192;
+var alive: bool = true;
+var respawn: u8 = 0;
+var shield: u8 = 0;
+var weapon: Weapon = 1;
+var cooldown: u8 = 0;
+var lives: u8 = 3;
+var bombs: u8 = 2;
+var flash: u8 = 0;
+
+var score: u16 = 0;
+var best: u16 = 500;
+var next_life: u16 = 300;
+
+var stage: u8 = 0;
+var lap: u8 = 0;
+var cursor: u16 = 0;
+var wait: u8 = 0;
+var group_kind: u8 = 0;
+var group_x: u8 = 0;
+var group_left: u8 = 0;
+var group_gap: u8 = 0;
+
+var enemies: [Enemy; 6];
+var shots: [Shot; 6];
+var bullets: [Bullet; 12];
+var booms: [Boom; 4];
+var next_boom: BoomSlot = 0;
+
+var capsule_x: u8 = 0;
+var capsule_y: u8 = 0;
+var capsule: bool = false;
+
+var boss_x: u8 = 112;
+var boss_y: u8 = 0;
+var boss_hp: u8 = 0;
+var boss_max: u8 = 1;
+var boss_t: u16 = 0;
+var boss_angle: u8 = 0;
+var boss_flash: u8 = 0;
+var boss_dying: u8 = 0;
+
+var scroll: u16 = 0;
+var speed: u8 = 1;
+
+/// Scratch buffers handed to the video functions as slices.
+var row: [u8; 32];
+var digits: [u8; 6];
+var text: [u8; 7];
+const NO_ATTRIBUTES: [u8; 64] = [0; 64];
+
+// ------------------------------------------------------------ start-up
+
+fn init() {
+    video::upload_chr(0x0010, art::STAR_TILES);
+    video::upload_chr(0x0200, art::FONT);
+    video::upload_chr(0x0800, art::SPRITE_TILES);
+    video::pattern_tables(0, 0);
+    video::palettes(PALETTES);
+    video::flicker(true);
+    title();
+}
+
+/// Fill both nametables with a random starfield.
+fn stars() {
+    for y in 0..60 {
+        for x in 0..32 {
+            let r = math::rand();
+            row[x] = if r < 6 {
+                art::DIM
+            } else if r < 9 {
+                art::SMALL
+            } else if r < 11 {
+                art::TWINKLE
+            } else if r < 12 {
+                art::BRIGHT
+            } else {
+                0
+            };
+        }
+        video::put(video::address(0, y), row, false);
+    }
+    // Attribute bytes: palette 0 everywhere.
+    video::put(0x23c0, NO_ATTRIBUTES, false);
+    video::put(0x2bc0, NO_ATTRIBUTES, false);
+}
+
+// ----------------------------------------------------------------- title
+
+fn title() {
+    video::off();
+    stars();
+    // The logo: blocks with a shadow below and to the right.
+    for row in 0..5 {
+        for col in 0..art::LOGO_WIDTH {
+            let i = u16(row) * u16(art::LOGO_WIDTH + 1) + u16(col) + 1;
+            if art::LOGO[raw i] == '#' {
+                video::tile(4 + col, 6 + row, art::BLOCK);
+                let below = i + u16(art::LOGO_WIDTH + 1) + 1;
+                if row == 4 || art::LOGO[raw below] != '#' {
+                    video::tile(5 + col, 7 + row, art::SHADE);
+                }
+            }
+        }
+    }
+    // The logo in blue, the text in gold.
+    for x in 0..16 {
+        for y in 0..3 {
+            video::attribute(x * 2, 6 + y * 2, 1);
+        }
+        for y in 0..8 {
+            video::attribute(x * 2, 12 + y * 2, 3);
+        }
+    }
+    video::text(4, 13, "HOLD THE LINE, PILOT.");
+    video::text(4, 15, "THE ARMADA COMES IN WAVES");
+    video::text(4, 16, "AND THEIR MOTHERSHIPS");
+    video::text(4, 17, "HIT BACK HARD.");
+    video::text(7, 24, "A FIRE   B BOMB");
+    video::text(10, 26, "HI");
+    draw_number(13, 26, best);
+    scroll = 0;
+    video::scroll(0, 0);
+    video::on();
+    mode = Mode::Title;
+    timer = 0;
+    audio::play(sound::TITLE_LEAD, sound::TITLE_ARP, sound::TITLE_BASS, audio::NONE);
+}
+
+/// A score on the background: five digits and a trailing zero.
+fn draw_number(x: u8, y: u8, value: u16) {
+    to_digits(value);
+    video::text(x, y, digits);
+}
+
+/// Fill `digits` with a score's five digits and a trailing zero.
+fn to_digits(value: u16) {
+    var v = value;
+    var d: u8 = 0;
+    while v >= 10000 {
+        v -= 10000;
+        d += 1;
+    }
+    digits[0] = 0x30 + d;
+    d = 0;
+    while v >= 1000 {
+        v -= 1000;
+        d += 1;
+    }
+    digits[1] = 0x30 + d;
+    d = 0;
+    while v >= 100 {
+        v -= 100;
+        d += 1;
+    }
+    digits[2] = 0x30 + d;
+    d = 0;
+    while v >= 10 {
+        v -= 10;
+        d += 1;
+    }
+    digits[3] = 0x30 + d;
+    digits[4] = 0x30 + u8(v);
+    digits[5] = 0x30;
+}
+
+fn title_update() {
+    timer += 1;
+    twinkle();
+    // "PRESS START" blinks.
+    if (timer & 31) == 0 {
+        if (timer & 32) != 0 {
+            video::text(10, 20, "PRESS START");
+        } else {
+            video::text(10, 20, "           ");
+        }
+    }
+    if (input::pressed() & input::START) != 0 {
+        math::stir(u8(timer));
+        start_game();
+    }
+}
+
+fn twinkle() {
+    if (runtime::frames & 7) == 0 {
+        video::palette(3, TWINKLE[(runtime::frames >> 3) & 7]);
+    }
+}
+
+// ------------------------------------------------------------------ game
+
+fn start_game() {
+    video::off();
+    stars();
+    video::on();
+    score = 0;
+    next_life = 300;
+    lives = 3;
+    bombs = 2;
+    weapon = 1;
+    stage = 0;
+    lap = 0;
+    mode = Mode::Play;
+    paused = false;
+    spawn_player();
+    shield = 0;
+    begin_stage();
+    audio::sfx(0, sound::START);
+}
+
+fn spawn_player() {
+    px = 120;
+    py = 192;
+    alive = true;
+    shield = 120;
+    cooldown = 0;
+}
+
+fn clear_actors() {
+    for i in 0..6 {
+        enemies[i].alive = false;
+        shots[i].alive = false;
+    }
+    for i in 0..12 {
+        bullets[i].alive = false;
+    }
+    for i in 0..4 {
+        booms[i].t = 0;
+    }
+    capsule = false;
+}
+
+fn begin_stage() {
+    clear_actors();
+    phase = Phase::Intro;
+    timer = 0;
+    cursor = 0;
+    wait = 0;
+    group_left = 0;
+    boss_hp = 0;
+    boss_dying = 0;
+    speed = 4;
+    audio::play(sound::THEME_LEAD, sound::THEME_HARMONY, sound::THEME_BASS, sound::DRUMS);
+}
+
+/// Later laps are harder: more hit points, faster bullets.
+fn hard() -> bool {
+    return lap > 0;
+}
+
+fn add_score(points: u16) {
+    score += points;
+    if score >= next_life {
+        next_life += 500;
+        if lives < 9 {
+            lives += 1;
+            audio::sfx(0, sound::ONE_UP);
+        }
+    }
+    if score > best {
+        best = score;
+    }
+}
+
+fn update() {
+    match mode {
+        Mode::Title => title_update(),
+        Mode::Play => play(),
+        Mode::Over => over(),
+    }
+}
+
+fn play() {
+    if (input::pressed() & input::START) != 0 && phase != Phase::Clear {
+        paused = !paused;
+        if paused {
+            audio::stop();
+        } else {
+            resume_music();
+        }
+    }
+    if paused {
+        message("PAUSE");
+        draw_hud();
+        return;
+    }
+    timer += 1;
+    twinkle();
+    starfield();
+    player();
+    move_shots();
+    move_bullets();
+    match phase {
+        Phase::Intro => intro(),
+        Phase::Waves => spawner(),
+        Phase::Warning => warning(),
+        Phase::Boss => boss(),
+        Phase::Clear => clear(),
+    }
+    move_enemies();
+    move_capsule();
+    collide();
+    if flash > 0 {
+        flash -= 1;
+        video::palette(0, if (flash & 2) != 0 { 0x00 } else { 0x0f });
+    }
+    draw();
+}
+
+fn resume_music() {
+    if phase == Phase::Boss {
+        audio::play(sound::BOSS_LEAD, sound::THEME_HARMONY, sound::BOSS_BASS, sound::BOSS_DRUMS);
+    } else {
+        audio::play(sound::THEME_LEAD, sound::THEME_HARMONY, sound::THEME_BASS, sound::DRUMS);
+    }
+}
+
+fn starfield() {
+    if scroll < u16(speed) {
+        scroll += 480;
+    }
+    scroll -= u16(speed);
+    video::scroll(0, scroll);
+}
+
+fn intro() {
+    if timer < 100 {
+        message_stage();
+    }
+    if timer == 60 {
+        speed = 1;
+    }
+    if timer >= 120 {
+        phase = Phase::Waves;
+        timer = 0;
+    }
+}
+
+fn message_stage() {
+    let words = "STAGE ";
+    for i in 0..6 {
+        text[i] = words[i];
+    }
+    text[6] = 0x31 + stage;
+    message(text);
+}
+
+/// Draw text with sprites, centred on the screen.
+fn message(s: &[u8]) {
+    let x = 128 - u8(len(s)) * 4;
+    for i in 0..len(s) {
+        if s[i] != 0x20 {
+            video::sprite(x + u8(i) * 8, 108, s[i], FIRE);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- player
+
+fn player() {
+    if !alive {
+        if respawn > 0 {
+            respawn -= 1;
+            if respawn == 0 {
+                if lives == 0 {
+                    game_over();
+                } else {
+                    spawn_player();
+                }
+            }
+        }
+        return;
+    }
+    if shield > 0 {
+        shield -= 1;
+    }
+    let held = input::held();
+    let step: u8 = 2;
+    if (held & input::LEFT) != 0 && px > 8 {
+        px -= step;
+    }
+    if (held & input::RIGHT) != 0 && px < 232 {
+        px += step;
+    }
+    if (held & input::UP) != 0 && py > 24 {
+        py -= step;
+    }
+    if (held & input::DOWN) != 0 && py < 200 {
+        py += step;
+    }
+    if cooldown > 0 {
+        cooldown -= 1;
+    }
+    if (held & input::A) != 0 && cooldown == 0 && phase != Phase::Clear {
+        fire();
+    }
+    if (input::pressed() & input::B) != 0 && bombs > 0 && phase != Phase::Clear {
+        bomb();
+    }
+}
+
+fn fire() {
+    cooldown = 7;
+    match weapon {
+        1 => {
+            launch(px + 4, 0);
+        }
+        2 => {
+            launch(px, 0);
+            launch(px + 8, 0);
+        }
+        _ => {
+            launch(px + 4, 0);
+            launch(px, -1);
+            launch(px + 8, 1);
+        }
+    }
+    audio::sfx(1, sound::SHOT);
+}
+
+fn launch(x: u8, dx: i8) {
+    for i in 0..6 {
+        if !shots[i].alive {
+            shots[i] = Shot { x: x, y: py - 6, dx: dx, alive: true };
+            return;
+        }
+    }
+}
+
+fn bomb() {
+    bombs -= 1;
+    flash = 16;
+    shield = if shield > 40 { shield } else { 40 };
+    for i in 0..12 {
+        if bullets[i].alive {
+            bullets[i].alive = false;
+            add_score(1);
+        }
+    }
+    for i in 0..6 {
+        if enemies[i].alive {
+            hurt(i, 10);
+        }
+    }
+    if phase == Phase::Boss && boss_hp > 0 && boss_dying == 0 {
+        hurt_boss(12);
+    }
+    audio::sfx(3, sound::BIG_BLAST);
+}
+
+fn kill_player() {
+    alive = false;
+    explode(px, py);
+    lives -= 1;
+    respawn = 100;
+    weapon = if weapon > 1 { weapon - 1 } else { 1 };
+    if bombs < 2 {
+        bombs = 2;
+    }
+    for i in 0..12 {
+        bullets[i].alive = false;
+    }
+    audio::sfx(0, sound::DOWN);
+    audio::sfx(3, sound::BIG_BLAST);
+}
+
+fn game_over() {
+    mode = Mode::Over;
+    timer = 0;
+    audio::stop();
+}
+
+fn over() {
+    timer += 1;
+    starfield();
+    message("GAME OVER");
+    draw_hud();
+    if timer > 60 && (input::pressed() & input::START) != 0 {
+        title();
+    }
+}
+
+// ----------------------------------------------------------------- shots
+
+fn move_shots() {
+    for i in 0..6 {
+        if shots[i].alive {
+            if shots[i].y < 10 {
+                shots[i].alive = false;
+            } else {
+                shots[i].y -= 6;
+                shots[i].x += u8(shots[i].dx);
+                if shots[i].x > 248 {
+                    shots[i].alive = false;
+                }
+            }
+        }
+    }
+}
+
+fn move_bullets() {
+    for i in 0..12 {
+        if bullets[i].alive {
+            bullets[i].x += u16(i16(bullets[i].vx));
+            bullets[i].y += u16(i16(bullets[i].vy));
+            if bullets[i].x >= 4064 || bullets[i].y >= 3776 {
+                bullets[i].alive = false;
+            }
+        }
+    }
+}
+
+/// Fire a bullet from (x, y) in direction `d` (0-31).
+fn shoot(x: u8, y: u8, d: u8) {
+    let dir = d & 31;
+    for i in 0..12 {
+        if !bullets[i].alive {
+            let vx = if hard() { FAST_X[dir] } else { SLOW_X[dir] };
+            let vy = if hard() { FAST_Y[dir] } else { SLOW_Y[dir] };
+            bullets[i] = Bullet { x: u16(x) << 4, y: u16(y) << 4, vx: vx, vy: vy, alive: true };
+            return;
+        }
+    }
+}
+
+/// Direction (0-31) from (x, y) towards the player.
+fn aim(x: u8, y: u8) -> u8 {
+    let tx = px + 4;
+    let ty = py + 4;
+    let right = tx >= x;
+    let down = ty >= y;
+    let ax: u8 = if right { tx - x } else { x - tx };
+    let ay: u8 = if down { ty - y } else { y - ty };
+    // Angle within the quadrant, 0 (along x) to 8 (along y).
+    var a: u8 = 0;
+    if ay <= ax {
+        a = sector(ay, ax);
+    } else {
+        a = 8 - sector(ax, ay);
+    }
+    if right && down {
+        return a;
+    }
+    if !right && down {
+        return 16 - a;
+    }
+    if !right && !down {
+        return 16 + a;
+    }
+    return (32 - a) & 31;
+}
+
+/// Which 1/32 turn `small / big` falls in, for small <= big.
+fn sector(small: u8, big: u8) -> u8 {
+    let s = u16(small) * 100;
+    let b = u16(big);
+    if s < b * 10 {
+        return 0;
+    }
+    if s < b * 30 {
+        return 1;
+    }
+    if s < b * 53 {
+        return 2;
+    }
+    if s < b * 82 {
+        return 3;
+    }
+    return 4;
+}
+
+// --------------------------------------------------------------- enemies
+
+fn spawner() {
+    if group_left > 0 {
+        if group_gap > 0 {
+            group_gap -= 1;
+        } else {
+            spawn(group_kind, group_x);
+            group_left -= 1;
+            group_gap = 16;
+        }
+    }
+    if wait > 0 {
+        wait -= 1;
+        return;
+    }
+    let script = waves::script(stage);
+    if cursor + 3 >= len(script) {
+        return;
+    }
+    let delay = script[raw cursor];
+    let kind = script[raw cursor + 1];
+    if timer < u16(delay) {
+        return;
+    }
+    if kind == waves::BOSS {
+        // Wait for the screen to clear, then warn.
+        if any_enemies() || group_left > 0 {
+            return;
+        }
+        phase = Phase::Warning;
+        timer = 0;
+        audio::stop();
+        audio::sfx(0, sound::SIREN);
+        return;
+    }
+    group_kind = kind;
+    group_x = script[raw cursor + 2];
+    group_left = script[raw cursor + 3];
+    group_gap = 0;
+    cursor += 4;
+    timer = 0;
+}
+
+fn any_enemies() -> bool {
+    for i in 0..6 {
+        if enemies[i].alive {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn spawn(kind: u8, at: u8) {
+    var x = at;
+    if x == waves::ANY {
+        x = 16 + math::below(208);
+    }
+    for i in 0..6 {
+        if !enemies[i].alive {
+            let k = match kind {
+                0 => Kind::Drone,
+                1 => Kind::Dart,
+                2 => Kind::Saucer,
+                _ => Kind::Rock,
+            };
+            let hp: u8 = match k {
+                Kind::Drone => 1,
+                Kind::Dart => 1,
+                Kind::Saucer => 10,
+                Kind::Rock => 4,
+            };
+            enemies[i] = Enemy { x: x, y: 0, kind: k, hp: hp + lap * 2, t: math::below(64), base: x, vx: 0, phase: 40 + math::below(80), flash: 0, alive: true, };
+            if k == Kind::Rock {
+                enemies[i].vx = i8(math::below(3)) - 1;
+            }
+            return;
+        }
+    }
+}
+
+fn move_enemies() {
+    for i in 0..6 {
+        if enemies[i].alive {
+            move_enemy(i);
+        }
+    }
+}
+
+fn move_enemy(i: EnemySlot) {
+    var e = enemies[i];
+    e.t += 1;
+    if e.flash > 0 {
+        e.flash -= 1;
+    }
+    match e.kind {
+        Kind::Drone => {
+            e.y += 1;
+            e.x = e.base + u8(math::sin(e.t * 3) >> 2);
+            if e.t == e.phase && e.y < 150 {
+                shoot(e.x + 4, e.y + 8, aim(e.x + 4, e.y + 8));
+            }
+        }
+        Kind::Dart => {
+            if e.phase != 0 {
+                // Drift in, then dive at where the player is.
+                e.y += 1;
+                if e.y >= 32 {
+                    e.phase = 0;
+                    e.vx = if px > e.x + 8 { 1 } else if px + 8 < e.x { -1 } else { 0 };
+                }
+            } else {
+                e.y += 3 + lap;
+                e.x += u8(e.vx);
+            }
+        }
+        Kind::Saucer => {
+            if e.y < 40 {
+                e.y += 1;
+            } else if e.t < 250 || e.phase == 0 {
+                e.x = e.base + u8(math::sin(e.t * 2) >> 1);
+                if (e.t & 63) == 32 {
+                    let d = aim(e.x + 4, e.y + 12);
+                    shoot(e.x + 4, e.y + 12, d);
+                    shoot(e.x + 4, e.y + 12, d + 2);
+                    shoot(e.x + 4, e.y + 12, d - 2);
+                }
+                if e.t == 250 {
+                    e.phase = 1;
+                }
+            } else {
+                e.y += 2;
+            }
+        }
+        Kind::Rock => {
+            if (e.t & 1) == 0 {
+                e.y += 1;
+                e.x += u8(e.vx);
+            }
+            e.y += 1;
+        }
+    }
+    if e.y >= 224 || e.x >= 240 {
+        e.alive = false;
+    }
+    enemies[i] = e;
+}
+
+/// Damage an enemy; destroyed enemies score, explode and may drop a capsule.
+fn hurt(i: EnemySlot, damage: u8) {
+    if enemies[i].hp > damage {
+        enemies[i].hp -= damage;
+        enemies[i].flash = 4;
+        audio::sfx(1, sound::TINK);
+        return;
+    }
+    enemies[i].alive = false;
+    let x = enemies[i].x;
+    let y = enemies[i].y;
+    explode(x, y);
+    let points: u16 = match enemies[i].kind {
+        Kind::Drone => 1,
+        Kind::Dart => 2,
+        Kind::Rock => 3,
+        Kind::Saucer => 10,
+    };
+    add_score(points * u16(lap + 1));
+    if enemies[i].kind == Kind::Saucer && !capsule {
+        capsule = true;
+        capsule_x = x + 4;
+        capsule_y = y + 4;
+    }
+    audio::sfx(3, sound::BLAST);
+}
+
+fn explode(x: u8, y: u8) {
+    booms[next_boom] = Boom { x: x, y: y, t: 1 };
+    next_boom = if next_boom == 3 { 0 } else { next_boom + 1 };
+}
+
+fn move_capsule() {
+    if !capsule {
+        return;
+    }
+    if (timer & 1) == 0 {
+        capsule_y += 1;
+    }
+    if capsule_y >= 224 {
+        capsule = false;
+    }
+}
+
+fn collect() {
+    capsule = false;
+    if weapon < 3 {
+        weapon += 1;
+    } else if bombs < 3 {
+        bombs += 1;
+    } else {
+        add_score(50);
+    }
+    audio::sfx(0, sound::POWER);
+}
+
+// ------------------------------------------------------------------ boss
+
+fn warning() {
+    if (timer & 16) != 0 && timer < 150 {
+        message("WARNING");
+    }
+    if timer >= 160 {
+        phase = Phase::Boss;
+        timer = 0;
+        boss_x = 112;
+        boss_y = 0;
+        boss_max = 120 + lap * 40;
+        boss_hp = boss_max;
+        boss_t = 0;
+        boss_angle = 0;
+        boss_dying = 0;
+        audio::play(sound::BOSS_LEAD, sound::THEME_HARMONY, sound::BOSS_BASS, sound::BOSS_DRUMS);
+    }
+}
+
+fn boss() {
+    if boss_flash > 0 {
+        boss_flash -= 1;
+    }
+    if boss_dying > 0 {
+        boss_dying -= 1;
+        if (boss_dying & 7) == 0 {
+            explode(boss_x + math::below(24), boss_y + math::below(24));
+            audio::sfx(3, sound::BLAST);
+        }
+        if boss_dying == 0 {
+            boss_hp = 0;
+            phase = Phase::Clear;
+            timer = 0;
+            audio::stop();
+            audio::sfx(0, sound::CLEAR);
+        }
+        return;
+    }
+    boss_t += 1;
+    if boss_y < 24 {
+        boss_y += 1;
+        return;
+    }
+    let t = u8(boss_t);
+    boss_x = 112 + u8(math::sin(t) >> 1);
+    let cx = boss_x + 12;
+    let cy = boss_y + 26;
+    // Four attacks, each for 256 frames.
+    match u8(boss_t >> 8) & 3 {
+        0 => {
+            // Aimed bursts of three.
+            if (t & 31) == 0 || (t & 31) == 6 || (t & 31) == 12 {
+                shoot(cx, cy, aim(cx, cy));
+            }
+        }
+        1 => {
+            // A spiral.
+            if (t & 3) == 0 {
+                shoot(cx, cy, boss_angle);
+                boss_angle += 3;
+            }
+        }
+        2 => {
+            // Rings of eight.
+            if (t & 47) == 0 {
+                for k in 0..8 {
+                    shoot(cx, cy, k * 4 + (t >> 4));
+                }
+            }
+        }
+        _ => {
+            // Darts, and a wide fan.
+            if (t & 63) == 0 {
+                spawn(waves::DART, boss_x);
+                spawn(waves::DART, boss_x + 16);
+            }
+            if (t & 63) == 32 {
+                let d = aim(cx, cy);
+                for k in 0..5 {
+                    shoot(cx, cy, d + k * 2 - 4);
+                }
+            }
+        }
+    }
+}
+
+fn hurt_boss(damage: u8) {
+    boss_flash = 3;
+    if boss_hp > damage {
+        boss_hp -= damage;
+        return;
+    }
+    boss_hp = 1;
+    boss_dying = 96;
+    for i in 0..12 {
+        bullets[i].alive = false;
+    }
+    add_score(200 * u16(lap + 1));
+    audio::sfx(3, sound::BIG_BLAST);
+}
+
+fn clear() {
+    if timer < 150 {
+        message("STAGE CLEAR");
+    }
+    if timer == 60 {
+        speed = 3;
+    }
+    if timer >= 180 {
+        stage += 1;
+        if stage == 3 {
+            stage = 0;
+            lap += 1;
+        }
+        begin_stage();
+    }
+}
+
+// ------------------------------------------------------------- collisions
+
+fn collide() {
+    for s in 0..6 {
+        if shots[s].alive {
+            shot_hits(s);
+        }
+    }
+    if !alive {
+        return;
+    }
+    // Capsule: generous reach.
+    if capsule && u8(capsule_x + 8 - px) < 24 && u8(capsule_y + 8 - py) < 24 {
+        collect();
+    }
+    if shield > 0 {
+        return;
+    }
+    let cx = px + 6;
+    let cy = py + 6;
+    for i in 0..12 {
+        if bullets[i].alive {
+            let bx = u8(bullets[i].x >> 4) + 2;
+            let by = u8(bullets[i].y >> 4) + 2;
+            if u8(bx - cx) < 4 && u8(by - cy) < 5 {
+                kill_player();
+                return;
+            }
+        }
+    }
+    for i in 0..6 {
+        if enemies[i].alive && u8(enemies[i].x + 12 - px) < 24 && u8(enemies[i].y + 12 - py) < 22 {
+            hurt(i, 20);
+            kill_player();
+            return;
+        }
+    }
+    if phase == Phase::Boss && boss_dying == 0 && u8(boss_x + 24 - px) < 40 && u8(boss_y + 20 - py) < 30 {
+        kill_player();
+    }
+}
+
+fn shot_hits(s: ShotSlot) {
+    let sx = shots[s].x + 4;
+    let sy = shots[s].y;
+    for i in 0..6 {
+        if enemies[i].alive && u8(sx - enemies[i].x) < 16 && u8(sy + 4 - enemies[i].y) < 20 {
+            shots[s].alive = false;
+            hurt(i, 1);
+            return;
+        }
+    }
+    if phase == Phase::Boss && boss_dying == 0 && boss_y >= 8 && u8(sx - boss_x - 2) < 28 && u8(sy - boss_y) < 28 {
+        shots[s].alive = false;
+        hurt_boss(1);
+    }
+}
+
+// ----------------------------------------------------------------- drawing
+
+fn draw() {
+    draw_hud();
+    if mode == Mode::Play && phase == Phase::Boss && boss_hp > 0 {
+        draw_boss();
+    }
+    if alive && (shield == 0 || (timer & 2) != 0) {
+        draw_ship(px, py);
+    }
+    for i in 0..6 {
+        if shots[i].alive {
+            video::sprite(shots[i].x, shots[i].y, art::SHOT, FIRE);
+        }
+    }
+    let bullet_tile = if (timer & 4) != 0 { art::BULLET } else { art::BULLET2 };
+    for i in 0..12 {
+        if bullets[i].alive {
+            video::sprite(u8(bullets[i].x >> 4), u8(bullets[i].y >> 4), bullet_tile, RED);
+        }
+    }
+    for i in 0..6 {
+        if enemies[i].alive {
+            draw_enemy(i);
+        }
+    }
+    if capsule {
+        video::sprite(capsule_x, capsule_y, art::CAPSULE, if (timer & 8) != 0 { FIRE } else { PLAYER_PAL });
+    }
+    for i in 0..4 {
+        if booms[i].t > 0 {
+            let frame = (booms[i].t - 1) >> 2;
+            quad(booms[i].x, booms[i].y, art::BOOM + frame, FIRE);
+            booms[i].t += 1;
+            if booms[i].t > 16 {
+                booms[i].t = 0;
+            }
+        }
+    }
+}
+
+fn draw_ship(x: u8, y: u8) {
+    video::sprite(x, y, art::PLAYER, PLAYER_PAL);
+    video::sprite(x + 8, y, art::PLAYER + 1, PLAYER_PAL);
+    video::sprite(x, y + 8, art::PLAYER + 2, PLAYER_PAL);
+    video::sprite(x + 8, y + 8, art::PLAYER + 3, PLAYER_PAL);
+    video::sprite(x + 4, y + 15, if (timer & 2) != 0 { art::FLAME } else { art::FLAME2 }, FIRE);
+}
+
+/// A 16x16 picture from four consecutive tiles.
+fn picture(x: u8, y: u8, tile: u8, attr: u8) {
+    video::sprite(x, y, tile, attr);
+    video::sprite(x + 8, y, tile + 1, attr);
+    video::sprite(x, y + 8, tile + 2, attr);
+    video::sprite(x + 8, y + 8, tile + 3, attr);
+}
+
+/// A 16x16 picture from one tile mirrored four ways.
+fn quad(x: u8, y: u8, tile: u8, attr: u8) {
+    video::sprite(x, y, tile, attr);
+    video::sprite(x + 8, y, tile, attr | 0x40);
+    video::sprite(x, y + 8, tile, attr | 0x80);
+    video::sprite(x + 8, y + 8, tile, attr | 0xc0);
+}
+
+fn draw_enemy(i: EnemySlot) {
+    let e = enemies[i];
+    let hit = e.flash > 0;
+    match e.kind {
+        Kind::Drone => {
+            picture(e.x, e.y, if (e.t & 8) != 0 { art::DRONE } else { art::DRONE2 }, if hit { FIRE } else { PURPLE });
+        }
+        Kind::Dart => {
+            picture(e.x, e.y, art::DART, if hit { FIRE } else { RED });
+        }
+        Kind::Saucer => {
+            picture(e.x, e.y, art::SAUCER, if hit { FIRE } else { RED });
+        }
+        Kind::Rock => {
+            picture(e.x, e.y, art::ROCK, if hit { PURPLE } else { FIRE });
+        }
+    }
+}
+
+/// The mothership: the left half drawn, the right half mirrored.
+fn draw_boss() {
+    if boss_dying > 0 && (boss_dying & 4) != 0 {
+        return;
+    }
+    let attr = if boss_flash > 0 { FIRE } else { PURPLE };
+    let x = boss_x;
+    let y = boss_y;
+    for half in 0..2 {
+        let top = if half == 0 { art::BOSS_TOP } else { art::BOSS_BOTTOM };
+        let dy = y + half * 16;
+        video::sprite(x, dy, top, attr);
+        video::sprite(x + 8, dy, top + 1, attr);
+        video::sprite(x + 16, dy, top + 1, attr | 0x40);
+        video::sprite(x + 24, dy, top, attr | 0x40);
+        video::sprite(x, dy + 8, top + 2, attr);
+        video::sprite(x + 8, dy + 8, top + 3, attr);
+        video::sprite(x + 16, dy + 8, top + 3, attr | 0x40);
+        video::sprite(x + 24, dy + 8, top + 2, attr | 0x40);
+    }
+}
+
+fn draw_hud() {
+    // Score: five digits and a trailing zero, top left.
+    to_digits(score);
+    for i in 0..6 {
+        video::sprite(12 + i * 8, 10, digits[i], FIRE);
+    }
+    // Ships and bombs left, bottom corners.
+    video::sprite(12, 214, art::LIFE, PLAYER_PAL);
+    video::sprite(22, 214, 0x30 + lives, FIRE);
+    video::sprite(226, 214, art::BOMB, FIRE);
+    video::sprite(236, 214, 0x30 + bombs, FIRE);
+    // The boss's health, bottom centre.
+    if mode == Mode::Play && phase == Phase::Boss && boss_hp > 0 && boss_y >= 24 {
+        let fill = u8(u16(boss_hp) * 32 / u16(boss_max));
+        for k in 0..4 {
+            let left = k * 8;
+            let tile = if fill >= left + 8 {
+                art::BAR_FULL
+            } else if fill >= left + 4 {
+                art::BAR_HALF
+            } else {
+                art::BAR_EMPTY
+            };
+            video::sprite(112 + left, 214, tile, RED);
+        }
+    }
+}

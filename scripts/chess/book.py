@@ -7,7 +7,7 @@ alternatives the rest, and positions below a threshold are not expanded.
 Each position is stored as its 16-bit key (the cartridge's h0, h1 Zobrist
 bytes), a move count, then that many moves as (from, to) squares 0..63.
 Keys are computed exactly as the cartridge does, from
-games/assets/chess.zobrist.bin.
+games/chess/assets/zobrist.bin.
 
   scripts/chess/book.py --entries 700
 """
@@ -18,8 +18,8 @@ import chess
 import chess.engine
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-ASSETS = ROOT / "games" / "assets"
-Z = (ASSETS / "chess.zobrist.bin").read_bytes()
+ASSETS = ROOT / "games" / "chess" / "assets"
+Z = (ASSETS / "zobrist.bin").read_bytes()
 GROUP_OFFSET = [0, 8, 128, 136]
 
 
@@ -122,7 +122,7 @@ def main():
             frontier.append((weight * share / total, child, child_ep))
     engine.quit()
     data = encode([((h0, h1), move.from_square, move.to_square) for (h0, h1, _), move in entries])
-    (ASSETS / "chess.book.bin").write_bytes(bytes(data))
+    (ASSETS / "book.bin").write_bytes(bytes(data))
     print(f"{len(entries)} entries, {len(seen)} positions, {len(data)} bytes")
 
 

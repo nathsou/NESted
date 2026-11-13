@@ -2,20 +2,182 @@
   "name": "NESted",
   "scopeName": "source.nested",
   "patterns": [
-    { "include": "#comments" }, { "include": "#strings" },
-    { "name": "meta.function.nested", "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z_0-9]*)", "captures": { "1": { "name": "keyword.declaration.function.nested" }, "2": { "name": "entity.name.function.nested" } } },
-    { "name": "storage.type.nested", "match": "\\b(u8|i8|u16|i16|bool|void)\\b" },
-    { "name": "keyword.control.nested", "match": "\\b(if|else|while|for|in|loop|return|break|continue|raw|match)\\b" },
-    { "name": "storage.modifier.nested", "match": "\\b(let|var|const|cartridge|asm)\\b" },
-    { "name": "constant.language.nested", "match": "\\b(true|false)\\b" },
-    { "name": "entity.other.attribute-name.nested", "match": "@[A-Za-z_][A-Za-z_0-9]*" },
-    { "name": "support.function.nested", "match": "\\b(buttons|pressed|tile|text|sprite|hide_sprites|palette|render|screen|screen_bank|tone|noise|silence|rand|peek|poke|bank|bank_peek|asset)\\b" },
-    { "name": "keyword.other.assembly.nested", "match": "\\b(?i:adc|and|asl|bcc|bcs|beq|bit|bmi|bne|bpl|brk|bvc|bvs|clc|cld|cli|clv|cmp|cpx|cpy|dec|dex|dey|eor|inc|inx|iny|jmp|jsr|lda|ldx|ldy|lsr|nop|ora|pha|php|pla|plp|rol|ror|rti|rts|sbc|sec|sed|sei|sta|stx|sty|tax|tay|tsx|txa|txs|tya)\\b" },
-    { "name": "constant.numeric.nested", "match": "\\b(0x[0-9A-Fa-f_]+|0b[01_]+|[0-9][0-9_]*)\\b|\\$[0-9A-Fa-f]+" },
-    { "name": "keyword.operator.nested", "match": "=>|->|\\.\\.|<<=?|>>=?|[+*/%&|^~!=<>-]=?|#" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "name": "meta.embedded.block.assembly.nested",
+      "begin": "\\b(asm)\\s*(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.modifier.nested"
+        },
+        "2": {
+          "name": "punctuation.section.block.begin.nested"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.nested"
+        }
+      },
+      "patterns": [
+        {
+          "name": "comment.line.semicolon.assembly.nested",
+          "match": ";.*$"
+        },
+        {
+          "name": "variable.parameter.placeholder.nested",
+          "match": "\\{[^}]*\\}"
+        },
+        {
+          "name": "entity.name.label.assembly.nested",
+          "match": "^\\s*[A-Za-z_][A-Za-z_0-9]*:"
+        },
+        {
+          "name": "keyword.other.assembly.nested",
+          "match": "\\b(?i:adc|and|asl|bcc|bcs|beq|bit|bmi|bne|bpl|brk|bvc|bvs|clc|cld|cli|clv|cmp|cpx|cpy|dec|dex|dey|eor|inc|inx|iny|jmp|jsr|lda|ldx|ldy|lsr|nop|ora|pha|php|pla|plp|rol|ror|rti|rts|sbc|sec|sed|sei|sta|stx|sty|tax|tay|tsx|txa|txs|tya)\\b"
+        },
+        {
+          "name": "constant.numeric.nested",
+          "match": "#?\\$[0-9A-Fa-f]+|#?%[01]+|#?\\b[0-9]+\\b"
+        }
+      ]
+    },
+    {
+      "name": "meta.function.nested",
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z_0-9]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.declaration.function.nested"
+        },
+        "2": {
+          "name": "entity.name.function.nested"
+        }
+      }
+    },
+    {
+      "name": "meta.type.nested",
+      "match": "\\b(struct|enum|type)\\s+([A-Za-z_][A-Za-z_0-9]*)",
+      "captures": {
+        "1": {
+          "name": "storage.modifier.nested"
+        },
+        "2": {
+          "name": "entity.name.type.nested"
+        }
+      }
+    },
+    {
+      "name": "meta.use.nested",
+      "match": "\\b(use)\\s+([A-Za-z_][A-Za-z_0-9:]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.use.nested"
+        },
+        "2": {
+          "name": "entity.name.namespace.nested"
+        }
+      }
+    },
+    {
+      "name": "storage.type.nested",
+      "match": "\\b(u8|i8|u16|i16|bool)\\b"
+    },
+    {
+      "name": "keyword.control.nested",
+      "match": "\\b(if|else|while|for|in|loop|return|break|continue|raw|match|as)\\b"
+    },
+    {
+      "name": "storage.modifier.nested",
+      "match": "\\b(let|var|const|cartridge|asm|pub|use|struct|enum|type)\\b"
+    },
+    {
+      "name": "constant.language.nested",
+      "match": "\\b(true|false)\\b"
+    },
+    {
+      "name": "entity.other.attribute-name.nested",
+      "match": "@[A-Za-z_][A-Za-z_0-9]*"
+    },
+    {
+      "name": "support.function.nested",
+      "match": "\\b(lo|hi|len|peek|poke|asset|defined|addr)\\b(?=\\s*\\()"
+    },
+    {
+      "name": "entity.name.namespace.nested",
+      "match": "\\b[a-z_][a-z_0-9]*(?=::)"
+    },
+    {
+      "name": "entity.name.type.nested",
+      "match": "\\b[A-Z][a-z][A-Za-z0-9]*\\b"
+    },
+    {
+      "name": "variable.other.constant.nested",
+      "match": "\\b[A-Z][A-Z0-9_]+\\b"
+    },
+    {
+      "name": "entity.name.function.call.nested",
+      "match": "\\b[a-z_][a-z_0-9]*(?=\\s*\\()"
+    },
+    {
+      "name": "constant.numeric.nested",
+      "match": "\\b(0x[0-9A-Fa-f_]+|0b[01_]+|[0-9][0-9_]*)\\b|\\$[0-9A-Fa-f]+"
+    },
+    {
+      "name": "keyword.operator.nested",
+      "match": "=>|->|\\.\\.|<<=?|>>=?|[+*/%&|^~!=<>-]=?|#"
+    }
   ],
   "repository": {
-    "comments": { "patterns": [{ "name": "comment.line.double-slash.nested", "begin": "//", "end": "$" }, { "name": "comment.block.nested", "begin": "/\\*", "end": "\\*/", "patterns": [{ "include": "#comments" }] }] },
-    "strings": { "patterns": [{ "name": "string.quoted.double.nested", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.nested", "match": "\\\\." }] }, { "name": "string.quoted.single.nested", "begin": "'", "end": "'", "patterns": [{ "name": "constant.character.escape.nested", "match": "\\\\." }] }] }
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.nested",
+          "begin": "//",
+          "end": "$"
+        },
+        {
+          "name": "comment.block.nested",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [
+            {
+              "include": "#comments"
+            }
+          ]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.nested",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.nested",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.nested",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.nested",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    }
   }
 }

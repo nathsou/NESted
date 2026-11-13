@@ -1,0 +1,616 @@
+//! Video: sprites, background updates, palettes, scrolling and rendering.
+//!
+//! Drawing calls made during `update` are buffered and published together
+//! in the next vertical blank, so a frame never shows half an update. While
+//! rendering is off (in `init`, or between `off()` and `on()`), background
+//! writes go straight to the PPU and have no size limit.
+
+use std::nes;
+use std::board;
+
+/// Shadow sprite memory, copied to the PPU by DMA in each published frame.
+@at(0x0200) pub var oam: [u8; 256];
+@zp var oam_next: u8 = 0;
+@zp var oam_full: bool = false;
+@zp var flicker_offset: u8 = 0;
+@zp var flicker_on: bool = false;
+
+/// Background updates: [address high, address low, count (bit 7: vertical), bytes...], then 0.
+pub var queue: [u8; board::QUEUE];
+@zp pub var queue_end: u8 = 0;
+/// Writes dropped because the queue was full (should stay 0).
+pub var dropped: u8 = 0;
+
+/// Set by the main thread when a frame is ready to publish; cleared by NMI.
+@shared pub var ready: u8 = 0;
+/// True during an NMI that published a frame (for `main::vblank`).
+@shared pub var published: bool = false;
+/// PPUCTRL, PPUMASK and scroll shadows applied in each published frame.
+@zp pub var ctrl: u8 = 0x88;
+@zp pub var mask: u8 = 0x1e;
+@zp pub var scroll_x: u8 = 0;
+@zp pub var scroll_y: u8 = 0;
+/// Rendering is off and the PPU may be written directly.
+@zp pub var direct: bool = true;
+pub var colors: [u8; 32] = [
+    0x0f, 0x00, 0x10, 0x30, 0x0f, 0x06, 0x16, 0x26, 0x0f, 0x09, 0x19, 0x29, 0x0f, 0x01, 0x11, 0x21,
+    0x0f, 0x00, 0x10, 0x30, 0x0f, 0x06, 0x16, 0x26, 0x0f, 0x09, 0x19, 0x29, 0x0f, 0x01, 0x11, 0x21,
+];
+@zp pub var colors_dirty: bool = true;
+
+// ------------------------------------------------------------------ sprites
+
+/// Draw an 8x8 (or 8x16) sprite with its top-left corner at (x, y).
+/// Up to 64 sprites per frame; extra sprites are ignored.
+pub fn sprite(x: u8, y: u8, tile: u8, attr: u8) {
+    asm {
+        lda {oam_full}
+        bne done
+        ldx {oam_next}
+        lda {y}
+        sec
+        sbc #1
+        sta {oam},x
+        lda {tile}
+        sta {oam}+1,x
+        lda {attr}
+        sta {oam}+2,x
+        lda {x}
+        sta {oam}+3,x
+        txa
+        clc
+        adc #4
+        sta {oam_next}
+        bne done
+        lda #1
+        sta {oam_full}
+    done:
+    }
+}
+
+/// Draw a metasprite: `parts` holds (dx, dy, tile, attr) groups. Bit 6 of
+/// `flip` mirrors it horizontally around `width`.
+pub fn metasprite(x: u8, y: u8, parts: &[u8], width: u8, flip: u8) {
+    var i: u16 = 0;
+    let n = len(parts);
+    while i + 3 < n {
+        var dx = parts[raw i];
+        if (flip & 0x40) != 0 {
+            dx = width - 8 - dx;
+        }
+        sprite(x + dx, y + parts[raw i + 1], parts[raw i + 2], parts[raw i + 3] ^ flip);
+        i += 4;
+    }
+}
+
+/// Sprites drawn so far this frame.
+pub fn sprite_count() -> u8 {
+    if oam_full {
+        return 64;
+    }
+    return oam_next >> 2;
+}
+
+/// Rotate sprite priority each frame, so overlapping rows flicker instead
+/// of losing sprites past the eighth on a scanline.
+pub fn flicker(on: bool) {
+    flicker_on = on;
+}
+
+// --------------------------------------------------------------- background
+
+/// Queue `count` bytes at a PPU address; returns the data offset in `queue`,
+/// or 255 if full. Write the bytes into `queue` right after.
+pub fn reserve(address: u16, count: u8, vertical: bool) -> u8 {
+    let start = queue_end;
+    if count > board::QUEUE - 6 || start > board::QUEUE - 4 - count {
+        dropped += 1;
+        return 255;
+    }
+    queue[raw start] = hi(address);
+    queue[raw start + 1] = lo(address);
+    var c = count;
+    if vertical {
+        c |= 0x80;
+    }
+    queue[raw start + 2] = c;
+    queue_end = start + 3 + count;
+    queue[raw start + 3 + count] = 0;
+    return start + 3;
+}
+
+/// PPU address of a tile in the 64x60 grid formed by the four nametables.
+pub fn address(x: u8, y: u8) -> u16 {
+    var base: u16 = 0x2000;
+    var col = x;
+    var row = y;
+    if col >= 32 {
+        base += 0x400;
+        col -= 32;
+    }
+    if row >= 30 {
+        base += 0x800;
+        row -= 30;
+    }
+    return base + (u16(row & 31) << 5) + u16(col & 31);
+}
+
+/// Write one byte to any PPU address (nametables, attributes, palettes).
+pub fn write(address: u16, value: u8) {
+    if direct {
+        asm {
+            bit $2002
+        }
+        nes::PPUADDR = hi(address);
+        nes::PPUADDR = lo(address);
+        nes::PPUDATA = value;
+        return;
+    }
+    let at = reserve(address, 1, false);
+    if at != 255 {
+        queue[raw at] = value;
+    }
+}
+
+/// Set one background tile.
+pub fn tile(x: u8, y: u8, t: u8) {
+    write(address(x, y), t);
+}
+
+/// Copy bytes to consecutive PPU addresses, left to right or top to bottom.
+pub fn put(address: u16, data: &[u8], vertical: bool) {
+    let n = len(data);
+    if direct {
+        if vertical {
+            nes::PPUCTRL = ctrl | 4;
+        }
+        asm {
+            bit $2002
+        }
+        nes::PPUADDR = hi(address);
+        nes::PPUADDR = lo(address);
+        for i in 0..n {
+            nes::PPUDATA = data[i];
+        }
+        nes::PPUCTRL = ctrl;
+        return;
+    }
+    if n > u16(board::QUEUE - 6) {
+        dropped += 1;
+        return;
+    }
+    let at = reserve(address, u8(n), vertical);
+    if at == 255 {
+        return;
+    }
+    for i in 0..u8(n) {
+        queue[raw at + i] = data[raw i];
+    }
+}
+
+/// Draw a 16x16 metatile at tile (x, y): tiles t, t+1 on top and t+2, t+3 below.
+pub fn metatile(x: u8, y: u8, t: u8) {
+    let top = address(x, y);
+    let bottom = top + 32;
+    if direct {
+        asm {
+            bit $2002
+        }
+        nes::PPUADDR = hi(top);
+        nes::PPUADDR = lo(top);
+        nes::PPUDATA = t;
+        nes::PPUDATA = t + 1;
+        nes::PPUADDR = hi(bottom);
+        nes::PPUADDR = lo(bottom);
+        nes::PPUDATA = t + 2;
+        nes::PPUDATA = t + 3;
+        return;
+    }
+    let a = reserve(top, 2, false);
+    if a == 255 {
+        return;
+    }
+    queue[raw a] = t;
+    queue[raw a + 1] = t + 1;
+    let b = reserve(bottom, 2, false);
+    if b == 255 {
+        return;
+    }
+    queue[raw b] = t + 2;
+    queue[raw b + 1] = t + 3;
+}
+
+/// Bytes still free in this frame's background queue.
+pub fn room() -> u8 {
+    if direct {
+        return 255;
+    }
+    if queue_end > board::QUEUE - 6 {
+        return 0;
+    }
+    return board::QUEUE - 6 - queue_end;
+}
+
+/// Draw text: each byte is a tile number (ASCII when the font is placed so).
+pub fn text(x: u8, y: u8, s: &[u8]) {
+    put(address(x, y), s, false);
+}
+
+/// Draw a number with `digits` digits; tile `zero` is the glyph for 0.
+pub fn number(x: u8, y: u8, value: u16, digits: u8, zero: u8) {
+    var v = value;
+    var col = x + digits;
+    for i in 0..digits {
+        col -= 1;
+        tile(col, y, zero + u8(v % 10));
+        v = v / 10;
+    }
+}
+
+/// Fill `count` tiles from (x, y) with one tile, horizontally.
+pub fn fill(x: u8, y: u8, count: u8, t: u8) {
+    let a = address(x, y);
+    if direct {
+        asm {
+            bit $2002
+        }
+        nes::PPUADDR = hi(a);
+        nes::PPUADDR = lo(a);
+        for i in 0..count {
+            nes::PPUDATA = t;
+        }
+        return;
+    }
+    if count > board::QUEUE - 6 {
+        return;
+    }
+    let at = reserve(a, count, false);
+    if at == 255 {
+        return;
+    }
+    for i in 0..count {
+        queue[raw at + i] = t;
+    }
+}
+
+/// Set the palette (0-3) of the 16x16 area containing tile (x, y) in the
+/// 64x60 grid of nametables.
+pub fn attribute(x: u8, y: u8, palette: u8) {
+    let col = x & 31;
+    let row = y % 30;
+    let index = (row >> 2) * 8 + (col >> 2);
+    let shift = ((row & 2) << 1) | (col & 2);
+    var base: u16 = 0x23c0;
+    if x >= 32 {
+        base += 0x400;
+    }
+    if y >= 30 {
+        base += 0x800;
+    }
+    // Two physical nametables: the mirroring decides which half is which.
+    var second = x >= 32;
+    if board::HORIZONTAL {
+        second = y >= 30;
+    }
+    let k = if second { 64 + index } else { index };
+    let old = attribute_shadow[raw k];
+    let new = (old & ~(3 << shift)) | ((palette & 3) << shift);
+    attribute_shadow[raw k] = new;
+    write(base + u16(index), new);
+}
+
+/// The two physical attribute tables as last written through `attribute`.
+pub var attribute_shadow: [u8; 128];
+
+/// Copy a full nametable (960 tiles and 64 attribute bytes) while
+/// rendering is off.
+pub fn load_nametable(table: u8, data: &[u8]) {
+    let base = 0x2000 + (u16(table & 3) << 10);
+    asm {
+        bit $2002
+    }
+    nes::PPUADDR = hi(base);
+    nes::PPUADDR = lo(base);
+    let n = len(data);
+    for i in 0..n {
+        nes::PPUDATA = data[i];
+    }
+}
+
+/// Decode run-length data to a PPU address while rendering is off:
+/// pairs of (count, tile), ended by a count of 0.
+pub fn load_rle(address: u16, data: &[u8]) {
+    asm {
+        bit $2002
+    }
+    nes::PPUADDR = hi(address);
+    nes::PPUADDR = lo(address);
+    var i: u16 = 0;
+    let n = len(data);
+    while i + 1 < n {
+        let count = data[raw i];
+        if count == 0 {
+            break;
+        }
+        let t = data[raw i + 1];
+        for k in 0..count {
+            nes::PPUDATA = t;
+        }
+        i += 2;
+    }
+}
+
+/// Clear a nametable and its attributes to one tile.
+pub fn clear(table: u8, t: u8) {
+    let base = 0x2000 + (u16(table & 3) << 10);
+    asm {
+        bit $2002
+    }
+    nes::PPUADDR = hi(base);
+    nes::PPUADDR = lo(base);
+    for i in 0..960 {
+        nes::PPUDATA = t;
+    }
+    for i in 0..64 {
+        nes::PPUDATA = 0;
+    }
+    var second = (table & 1) != 0;
+    if board::HORIZONTAL {
+        second = (table & 2) != 0;
+    }
+    let s: u8 = if second { 64 } else { 0 };
+    for i in 0..64 {
+        attribute_shadow[raw s + i] = 0;
+    }
+}
+
+/// Copy pattern data to CHR RAM (boards without CHR ROM) while rendering is off.
+pub fn upload_chr(address: u16, data: &[u8]) {
+    asm {
+        bit $2002
+    }
+    nes::PPUADDR = hi(address);
+    nes::PPUADDR = lo(address);
+    let n = len(data);
+    for i in 0..n {
+        nes::PPUDATA = data[i];
+    }
+}
+
+// ------------------------------------------------------------------ palette
+
+/// Set palette entry 0-31 (0-15 background, 16-31 sprites) to an NES color.
+pub fn palette(index: u8, color: u8) {
+    colors[index & 31] = color;
+    colors_dirty = true;
+}
+
+/// Set up to 32 palette entries starting at entry 0.
+pub fn palettes(values: &[u8]) {
+    let n = len(values);
+    for i in 0..n {
+        if i < 32 {
+            colors[u8(i) & 31] = values[i];
+        }
+    }
+    colors_dirty = true;
+}
+
+// ---------------------------------------------------------------- rendering
+
+/// Scroll the 512x480 nametable plane so (x, y) is at the top-left corner.
+pub fn scroll(x: u16, y: u16) {
+    scroll_x = lo(x);
+    var yy = y;
+    var nt: u8 = u8(x >> 8) & 1;
+    if yy >= 480 {
+        yy -= 480;
+    }
+    if yy >= 240 {
+        yy -= 240;
+        nt |= 2;
+    }
+    scroll_y = lo(yy);
+    ctrl = (ctrl & 0xfc) | nt;
+}
+
+/// Use 8x16 sprites.
+pub fn tall_sprites(on: bool) {
+    if on {
+        ctrl |= 0x20;
+    } else {
+        ctrl &= 0xdf;
+    }
+}
+
+/// Choose the pattern tables: background and sprites (0 = $0000, 1 = $1000).
+pub fn pattern_tables(background: u8, sprites: u8) {
+    ctrl = (ctrl & 0xe7) | ((background & 1) << 4) | ((sprites & 1) << 3);
+}
+
+/// Show or hide the background and sprites, and the leftmost 8 pixels.
+pub fn show(background: bool, sprites: bool) {
+    var m: u8 = mask & 0xe1;
+    if background {
+        m |= 0x0a;
+    }
+    if sprites {
+        m |= 0x14;
+    }
+    mask = m;
+}
+
+/// Set PPUMASK directly (emphasis and greyscale bits included).
+pub fn set_mask(value: u8) {
+    mask = value;
+}
+
+/// Turn rendering off at the next vertical blank; background writes then
+/// go directly to the PPU.
+pub fn off() {
+    if direct {
+        return;
+    }
+    end_frame();
+    let saved = mask;
+    mask = 0;
+    wait();
+    mask = saved;
+    direct = true;
+    nes::PPUMASK = 0;
+}
+
+/// Turn rendering back on at the next vertical blank.
+pub fn on() {
+    direct = false;
+    colors_dirty = true;
+    end_frame();
+    wait();
+}
+
+/// Publish this frame's sprites and background updates.
+pub fn end_frame() {
+    if board::SPRITES {
+        hide_unused();
+    }
+    if flicker_on {
+        flicker_offset += 68;
+    }
+    ready = 1;
+}
+
+fn hide_unused() {
+    asm {
+        ldx {oam_next}
+        lda {oam_full}
+        bne done
+        lda #$ff
+    hide:
+        sta {oam},x
+        inx
+        inx
+        inx
+        inx
+        bne hide
+    done:
+    }
+}
+
+/// Wait until the frame prepared with `end_frame` has been published.
+pub fn wait() {
+    while ready != 0 {}
+    oam_next = 0;
+    oam_full = false;
+    queue_end = 0;
+    queue[0] = 0;
+}
+
+/// Publish the frame and wait for the next one (for loops inside `init`).
+pub fn next_frame() {
+    end_frame();
+    wait();
+}
+
+/// Called by the runtime's NMI handler: publish a prepared frame.
+pub fn publish() {
+    published = false;
+    if ready == 0 {
+        return;
+    }
+    published = true;
+    if !direct {
+        if board::SPRITES {
+            asm {
+                lda #0
+                sta $2003
+                lda #2
+                sta $4014
+            }
+        }
+        flush();
+    }
+    asm {
+        lda {ctrl}
+        sta $2000
+        bit $2002
+        lda {scroll_x}
+        sta $2005
+        lda {scroll_y}
+        sta $2005
+        lda {mask}
+        sta $2001
+    }
+    ready = 0;
+}
+
+/// Copy the background queue and palette to the PPU (in vblank).
+fn flush() {
+    asm {
+        ldx #0
+    next:
+        lda {queue},x
+        beq palette
+        sta $2006
+        lda {queue}+1,x
+        sta $2006
+        lda {queue}+2,x
+        bpl across
+        ; Vertical run.
+        and #$7f
+        tay
+        lda {ctrl}
+        ora #4
+        sta $2000
+        jmp copy
+    across:
+        tay
+        lda {ctrl}
+        and #$fb
+        sta $2000
+    copy:
+        inx
+        inx
+        inx
+    byte:
+        lda {queue},x
+        sta $2007
+        inx
+        dey
+        bne byte
+        jmp next
+    palette:
+        lda {colors_dirty}
+        beq done
+        lda #$3f
+        sta $2006
+        ldx #0
+        stx $2006
+    colors:
+        lda {colors},x
+        sta $2007
+        inx
+        cpx #32
+        bne colors
+        lda #0
+        sta {colors_dirty}
+        ; Leave the PPU address off the palette.
+        lda #$3f
+        sta $2006
+        lda #0
+        sta $2006
+        sta $2006
+        sta $2006
+    done:
+    }
+}
+
+/// Called once by the runtime before `init`: hide sprites, clear the queue.
+pub fn reset() {
+    if board::SPRITES {
+        for i in 0..64 {
+            oam[i * 4] = 0xff;
+        }
+    }
+    queue[0] = 0;
+    direct = true;
+}

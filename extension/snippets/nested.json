@@ -1,12 +1,34 @@
 {
+  "Cartridge": {
+    "prefix": "cartridge",
+    "body": [
+      "cartridge {",
+      "    title = \"${1:My Game}\";",
+      "    mapper = ${2|nrom,cnrom,uxrom,axrom,bnrom,gxrom,colordreams,mmc1,mmc3|};",
+      "    mirroring = ${3|vertical,horizontal|};",
+      "    chr = \"${4:assets/tiles.chr}\";",
+      "}",
+      "",
+      "use std::video;",
+      "use std::input;",
+      "",
+      "fn init() {",
+      "    $0",
+      "}",
+      "",
+      "fn update() {",
+      "}"
+    ],
+    "description": "A new cartridge with the standard runtime hooks"
+  },
   "Game update": {
     "prefix": "update",
     "body": [
       "fn update() {",
-      "    ${1:// Prepare the next published frame.}",
+      "    ${1:// Runs once per frame; drawing is published at the next vertical blank.}",
       "}"
     ],
-    "description": "Standard frame-update entry point"
+    "description": "Per-frame hook called by std::runtime"
   },
   "Initialization": {
     "prefix": "init",
@@ -15,55 +37,101 @@
       "    $0",
       "}"
     ],
-    "description": "Runs once while rendering is disabled"
+    "description": "Runs once at power-on with rendering off"
+  },
+  "Vertical blank": {
+    "prefix": "vblank",
+    "body": [
+      "fn vblank() {",
+      "    $0",
+      "}"
+    ],
+    "description": "Runs in every NMI, after the frame is published"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "    ${2:x}: ${3:u8},",
+      "}"
+    ],
+    "description": "A struct (stored field by field)"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "    ${2:A},",
+      "    ${3:B},",
+      "}"
+    ],
+    "description": "An enum"
+  },
+  "Range type": {
+    "prefix": "range",
+    "body": [
+      "type ${1:Slot} = u8 in 0..${2:8};"
+    ],
+    "description": "A u8 the compiler proves stays in range"
+  },
+  "Module import": {
+    "prefix": "use",
+    "body": [
+      "use ${1|std::video,std::input,std::audio,std::math,std::mapper,std::nes,std::runtime|};"
+    ],
+    "description": "Import a module"
+  },
+  "For loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} in ${2:0}..${3:8} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Loop over a half-open range"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "    ${2:0} => ${3:{}},",
+      "    _ => ${4:{}},",
+      "}"
+    ],
+    "description": "Exhaustive match"
   },
   "Inline assembly": {
     "prefix": "asm",
     "body": [
-      "asm(a = ${1:value}) {",
-      "    ${2:asl a}",
-      "    ${3:adc #\\$00}",
-      "}"
-    ],
-    "description": "Opaque assembly with typed A-register input/result"
-  },
-  "ROM array": {
-    "prefix": "romarray",
-    "body": [
-      "const ${1:TABLE}: [u8; ${2:16}] = [${3:0; 16}];"
-    ],
-    "description": "Explicit fixed-size read-only storage"
-  },
-  "Instruction budget": {
-    "prefix": "budget",
-    "body": [
-      "@budget(${1:100})",
-      "fn ${2:update}() {",
+      "asm {",
+      "    lda {${1:name}}",
       "    $0",
       "}"
     ],
-    "description": "Verify an acyclic unstalled instruction-cycle bound"
+    "description": "Inline 6502 assembly; {name} is a variable's address"
   },
-  "Match value": {
-    "prefix": "match",
+  "Asset": {
+    "prefix": "asset",
     "body": [
-      "match ${1:state} {",
-      "    ${2:0} => ${3:value},",
-      "    _ => ${4:default},",
+      "const ${1:DATA}: [u8; _] = asset(\"${2:assets/data.bin}\");"
+    ],
+    "description": "Bytes of a project file, in ROM"
+  },
+  "Banked constant": {
+    "prefix": "bank",
+    "body": [
+      "@bank(${1:0}) const ${2:DATA}: [u8; _] = asset(\"${3:assets/data.bin}\");"
+    ],
+    "description": "Data in a switchable PRG bank; reads switch banks automatically"
+  },
+  "Cycle budget": {
+    "prefix": "budget",
+    "body": [
+      "@budget(${1:200})",
+      "fn ${2:name}() {",
+      "    $0",
       "}"
     ],
-    "description": "Exhaustive scalar match expression"
-  },
-  "Match statement": {
-    "prefix": "matchstmt",
-    "body": [
-      "match ${1:state} {",
-      "    ${2:0} => {",
-      "        $0",
-      "    }",
-      "    _ => {}",
-      "}"
-    ],
-    "description": "State dispatch with block arms"
+    "description": "Prove a worst-case cycle bound for loop-free code"
   }
 }

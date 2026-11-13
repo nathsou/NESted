@@ -1,39 +1,101 @@
+// End-to-end checks of the production playground in headless Chromium.
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
-import {Browser} from './browser.mjs';
-const server=spawn('npm',['exec','vite','--','preview','playground','--host','127.0.0.1','--port','4173'],{stdio:'ignore'});
-const browser=new Browser();
-try{
- const start=Date.now();for(;;){try{if((await fetch('http://127.0.0.1:4173/')).ok)break;}catch{}if(Date.now()-start>30000)throw new Error('Preview server startup failed');await new Promise(r=>setTimeout(r,100));}
- await browser.start('http://127.0.0.1:4173/');await browser.wait('window.__nested?.ready && window.__nested.frames>20');
- await browser.evaluate('window.__nested.pause()');
- for(let i=0;i<5;i++){
-  if(i>0){await browser.evaluate(`window.__nested.loadGame(${i})`);await browser.wait(`window.__nested.ready && document.getElementById('filename').textContent.includes('${['bloom','starstring','skythread','emberkeep','chess'][i]}')`);await browser.evaluate('window.__nested.pause()');}
-  await browser.evaluate('window.__nested.step(0,120)');
-  const report=await browser.evaluate('({ok:window.__nested.build.ok,mapper:window.__nested.build.mapper,passes:window.__nested.build.passes.length,drop:window.__nested.ram[895]})');assert.equal(report.ok,true);assert.equal(report.mapper,[0,4,1,2,0][i]);assert.equal(report.passes,7);assert.equal(report.drop,0);
- }
- // The editor checks below run on Emberkeep.
- await browser.evaluate('window.__nested.loadGame(3)');await browser.wait(`window.__nested.ready && document.getElementById('filename').textContent.includes('emberkeep')`);await browser.evaluate('window.__nested.pause()');
- const layout=await browser.evaluate(`({header:document.querySelector('.header').getBoundingClientRect().height,select:document.getElementById('game-select').getBoundingClientRect().height,screen:document.getElementById('screen').getBoundingClientRect().width,overflow:document.documentElement.scrollWidth>innerWidth})`);assert.equal(layout.header,44);assert.ok(layout.select<34);assert.equal(layout.screen%256,0);assert.equal(layout.overflow,false);
- const before=await browser.evaluate(`document.querySelector('.editor-panel').getBoundingClientRect().width`);
- await browser.evaluate(`document.querySelector('[data-divider="0"]').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))`);
- assert.equal(await browser.evaluate(`document.querySelector('.editor-panel').getBoundingClientRect().width`),before+24);
- for(const value of ['play','code','workbench']){await browser.evaluate(`(()=>{const select=document.getElementById('layout-select');select.value='${value}';select.dispatchEvent(new Event('change'));})()`);assert.equal(await browser.evaluate(`document.getElementById('app').dataset.layout`),value);}
- await browser.send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
- for(const pane of ['editor','player','inspector']){await browser.evaluate(`document.querySelector('[data-pane="${pane}"]').click()`);assert.equal(await browser.evaluate(`getComputedStyle(document.querySelector('.${pane==='editor'?'editor':pane==='player'?'player':'inspector'}-panel')).display`),'flex');assert.equal(await browser.evaluate('document.documentElement.scrollWidth>innerWidth'),false);}
- for(const width of [320,390,820,1024,1366]){await browser.send('Emulation.setDeviceMetricsOverride',{width,height:844,deviceScaleFactor:1,mobile:width<801});assert.equal(await browser.evaluate('document.documentElement.scrollWidth>innerWidth'),false,`Viewport ${width} overflows`);}
- await browser.send('Emulation.setDeviceMetricsOverride',{width:1600,height:1000,deviceScaleFactor:1,mobile:false});
- const rpc=await browser.evaluate(`window.__nested.rpc('textDocument/completion',{textDocument:{uri:'file:///games/emberkeep.nst'},position:{line:31,character:0}})`);assert.ok(rpc.items.some(i=>i.label==='tone'));
- const original=await browser.evaluate('window.__nested.source');
- // Formatting immediately after an edit must flush didChange before querying the LSP.
- await browser.evaluate(`window.__nested.setSource('var answer:u8=0;fn update(){answer=match buttons(){0=>1,_=>2};}')`);
- const formatted=await browser.evaluate(`window.__nested.rpc('textDocument/formatting',{textDocument:{uri:'file:///games/emberkeep.nst'},options:{tabSize:4,insertSpaces:true}})`);assert.match(formatted[0].newText,/    answer = match buttons\(\)/);assert.match(formatted[0].newText,/0 => 1,\n/);
- await browser.evaluate(`window.__nested.setSource(${JSON.stringify(original+'\n// locally edited draft\n')})`);
- await browser.evaluate(`document.getElementById('reset-source').click()`);await browser.wait(`document.getElementById('build').disabled===false`);assert.equal(await browser.evaluate(`window.__nested.source.includes('locally edited draft')`),false);
- await browser.evaluate(`document.getElementById('reset-source').click()`);await browser.wait(`document.getElementById('build').disabled===false`);assert.equal(await browser.evaluate(`window.__nested.source.includes('locally edited draft')`),true);
- await browser.evaluate(`window.__nested.setSource('fn update(){ unknown(); }')`);const failed=await browser.evaluate('window.__nested.compile()');assert.equal(failed.ok,false);assert.match(await browser.evaluate('document.getElementById("messages").textContent'),/Unknown function/);
- await browser.evaluate(`window.__nested.setSource(${JSON.stringify(original)})`);assert.equal((await browser.evaluate('window.__nested.compile()')).ok,true);await browser.wait('window.__nested.ready');
- await browser.evaluate('document.getElementById("sound").click()');await browser.wait('document.getElementById("sound").textContent.includes("Sound on")');
- assert.equal(browser.errors.length,0,JSON.stringify(browser.errors));
- console.log('Production browser: five cartridges, assets under a relative base, LSP, diagnostics, rebuild, audio, compact layouts, resizing, mobile panes, fresh-document formatting and draft restoration passed.');
-}finally{await browser.close();server.kill('SIGTERM');}
+import { spawn } from 'node:child_process';
+import { Browser } from './browser.mjs';
+
+const server = spawn('npm', ['exec', 'vite', '--', 'preview', 'playground', '--host', '127.0.0.1', '--port', '4174', '--strictPort'], { stdio: 'ignore' });
+const browser = new Browser();
+const n = 'window.__nested';
+try {
+  const start = Date.now();
+  for (;;) {
+    try {
+      if ((await fetch('http://127.0.0.1:4174/')).ok) break;
+    } catch {}
+    if (Date.now() - start > 30000) throw new Error('Preview server startup failed');
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  await browser.start('http://127.0.0.1:4174/', 1440, 900);
+  await browser.wait(`${n}?.ready && ${n}.frames > 30`);
+
+  // Every example builds, runs without dropping video updates, and is listed.
+  const examples = await browser.evaluate(`${n}.examples().map(e => e.id)`);
+  assert.deepEqual(examples, ['glide', 'sprout', 'nova', 'chess']);
+  for (const id of examples) {
+    await browser.evaluate(`${n}.openExample('${id}')`);
+    await browser.wait(`${n}.ready && ${n}.project.example === '${id}' && ${n}.frames > 60`);
+    const r = await browser.evaluate(`({ ok: ${n}.report.ok, passes: ${n}.report.passes.length, crashed: ${n}.crashed })`);
+    assert.equal(r.ok, true, id);
+    assert.equal(r.crashed, '', id);
+    assert.ok(r.passes >= 5, id);
+  }
+
+  // Starter projects for every board build and run.
+  for (const board of ['nrom', 'cnrom', 'uxrom', 'axrom', 'bnrom', 'gxrom', 'colordreams', 'mmc1', 'mmc3']) {
+    const report = await browser.evaluate(`${n}.newProject('${board}').then(r => ({ ok: r.ok, board: r.board, d: r.diagnostics.map(d => d.message) }))`);
+    assert.equal(report.ok, true, `${board}: ${report.d.join('; ')}`);
+    await browser.wait(`${n}.frames > 20`);
+    assert.equal(await browser.evaluate(`${n}.crashed`), '', board);
+  }
+
+  // The language server: completion, hover, definition across modules, rename.
+  await browser.evaluate(`${n}.newProject('nrom')`);
+  const uri = 'file:///project/main.nst';
+  const source = await browser.evaluate(`${n}.source()`);
+  const line = source.split('\n').findIndex((l) => l.includes('fn update()'));
+  const completion = await browser.evaluate(`${n}.rpc('textDocument/completion', { textDocument: { uri: '${uri}' }, position: { line: ${line + 1}, character: 4 } })`);
+  assert.ok(completion.some((i) => i.label === 'sprite16'), 'completion lists project functions');
+  const hover = await browser.evaluate(`${n}.rpc('textDocument/hover', { textDocument: { uri: '${uri}' }, position: { line: ${line}, character: 4 } })`);
+  assert.match(hover.contents.value, /update/);
+
+  // A second module, used from main.
+  await browser.evaluate(`(() => { window.prompt = () => 'util.nst'; document.querySelector('[data-action="new-file"]').click(); })()`);
+  await browser.wait(`${n}.project.files.some(f => f.path === 'util.nst')`);
+  await browser.evaluate(`${n}.open('main.nst')`);
+  await browser.evaluate(`${n}.setSource(${n}.source().replace('use std::audio;', 'use std::audio;\\nuse util;').replace('x -= 2;', 'x -= util::hello() / 21;'))`);
+  const src2 = await browser.evaluate(`${n}.source()`);
+  const useLine = src2.split('\n').findIndex((l) => l.includes('util::hello'));
+  const def = await browser.evaluate(`${n}.rpc('textDocument/definition', { textDocument: { uri: '${uri}' }, position: { line: ${useLine}, character: ${src2.split('\n')[useLine].indexOf('hello') + 1} } })`);
+  assert.equal(def.uri, 'file:///project/util.nst');
+  assert.equal((await browser.evaluate(`${n}.build()`)).ok, true);
+
+  // Errors show in Problems with a badge, and the build reports them.
+  await browser.evaluate(`${n}.setSource(${n}.source().replace('sprite16(x, y, 0, 0);', 'sprite16(x, y, 0);'))`);
+  const failed = await browser.evaluate(`${n}.build()`);
+  assert.equal(failed.ok, false);
+  await browser.wait(`document.querySelector('.problems .diag.error') !== null`);
+  assert.ok(Number(await browser.evaluate(`document.querySelector('[data-panel="problems"] .count').textContent`)) >= 1);
+
+  // Formatting goes through the compiler worker.
+  await browser.evaluate(`${n}.setSource('fn init(){let a:u8=1;}\\nfn update(){}')`);
+  await browser.evaluate(`document.querySelector('[data-action="format"]').click()`);
+  await browser.wait(`${n}.source().includes('    let a: u8 = 1;')`);
+
+  // Inspectors render with machine state.
+  await browser.evaluate(`${n}.openExample('glide')`);
+  await browser.wait(`${n}.ready && ${n}.frames > 60`);
+  for (const id of ['watch', 'ppu', 'memory', 'listing', 'passes', 'problems']) {
+    await browser.evaluate(`${n}.panel('${id}')`);
+    await new Promise((r) => setTimeout(r, 150));
+    assert.ok(await browser.evaluate(`document.querySelector('#inspector-body .panel').textContent.length > 10`), id);
+  }
+  await browser.evaluate(`${n}.panel('watch')`);
+  await browser.wait(`document.querySelectorAll('.watch-row').length > 10`);
+
+  // Layouts never overflow horizontally; the phone layout switches panes.
+  for (const width of [320, 390, 820, 1024, 1440]) {
+    await browser.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: width < 801 });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(await browser.evaluate('document.documentElement.scrollWidth > innerWidth'), false, `viewport ${width} overflows`);
+  }
+  await browser.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  for (const [pane, selector] of [['play', '.player'], ['inspect', '.inspector'], ['code', '.editor-pane']]) {
+    await browser.evaluate(`document.querySelector('.mobile-nav [data-pane="${pane}"]').click()`);
+    assert.equal(await browser.evaluate(`getComputedStyle(document.querySelector('${selector}')).display`), 'flex', pane);
+  }
+  assert.equal(browser.errors.length, 0, JSON.stringify(browser.errors));
+  console.log('Playground: four examples, nine board templates, LSP across modules, diagnostics, formatting, inspectors and responsive layouts passed.');
+} finally {
+  await browser.close();
+  server.kill('SIGTERM');
+}

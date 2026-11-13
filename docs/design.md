@@ -1,70 +1,54 @@
-# Language design: decisions and tradeoffs
+# Design notes
 
-NESted is designed for the Ricoh 2A03 CPU, the PPU, and an explicitly selected
-cartridge board. A language that merely makes C prettier would miss the NES's
-most useful opportunities: whole-program allocation, cartridge placement,
-byte arithmetic and predictable publication of video work.
+NESted targets exactly one machine: a 1.79 MHz 6502 with 2 KiB of RAM, a
+PPU that may only be touched during vertical blank, and a cartridge board
+that decides how much code and graphics exist and how they are switched.
+The language exists to make good NES programs easy to write, not to make C
+look nicer, so each decision below is judged by the code it produces on that
+machine and by how clearly it states the hardware's rules.
 
-## The direction
+## Principles
 
-Use modern, familiar expressions and control flow over a small statically
-allocated core. Make widths, unchecked indexing, volatile hardware operations
-and cartridge banking visible. Let the compiler own ordinary instruction
-selection and static frames; let assembly own the exceptional hardware trick.
-Keep the compiler independent of both the game framework and the editor host.
+1. **Everything has a fixed place.** No heap, no hidden stack frames. The
+   linker knows every byte of RAM and can show you who uses it.
+2. **Costs are visible.** Widths never change silently, a slow operation
+   looks different from a fast one, and unchecked access is spelled `raw`.
+3. **The compiler owns the tedium.** Bank switching, structure-of-arrays
+   layout, zero-page placement, frame overlays and interrupt-safe helper
+   copies are the compiler's job, not the programmer's.
+4. **The platform is a library.** Video, input, sound and mapper support are
+   written in NESted, can be read and replaced, and use no compiler magic.
+5. **Every tool runs the same compiler.** The CLI, the language server, the
+   VS Code extension and the browser all embed one dependency-free crate.
 
-| Decision | Benefit | Cost and rejected alternative |
+## Decisions
+
+| Decision | Why | Cost |
 |---|---|---|
-| One target: NTSC NES | Every lowering can exploit 6502 addressing and real cartridge layout. | No portable backend. PAL is a future timing profile, not a renamed region flag. |
-| `u8`, `i8`, `u16`, `i16`, `bool` | Byte values stay cheap; widening is deliberate. | Word arithmetic is slower. An implicit machine-sized integer would disguise that cost. |
-| Modular arithmetic, explicit casts | Position counters, phases and bit masks have defined behavior in all builds. | Overflow does not trap; bounds proofs must account for wrapping. C's signed overflow model is unsuitable here. |
-| Fixed arrays and compile-time assets | Memory use is known before a ROM runs. | No heap, growing collection, runtime allocation or garbage collector. |
-| `let` and `var`; no shadowing | Bindings and static frame reports stay easy to identify. | Names must be unique across a function, including disjoint blocks. Lexical visibility still applies. |
-| Named scalar functions | Calls are convenient and analyzable across the whole cartridge. | No indirect functions or closures in v0.1. Dynamic call graphs complicate overlays and bank lifetimes. |
-| No recursion | Locals can occupy static, overlaid frames instead of a software stack. | Recursive algorithms must use fixed work queues. The 256-byte hardware stack still carries return addresses. |
-| No structs or references yet | Small compiler, explicit layouts and straightforward alias analysis. | Parallel arrays are verbose. A future struct design must expose AoS versus SoA and byte layout before adding syntax. |
-| Half-open ranges, ordinary loops | Familiar game logic; short loops can unroll. | Dynamic loops have no automatic cycle bound. Range end expressions are evaluated at each iteration in v0.1. |
-| Exhaustive scalar `match`, literal alternatives and inclusive ranges | Game states and input dispatch are readable; overlap and missing cases are checked, and the selector executes once. | Linear typed comparison chains are predictable but can be larger than hand-built jump tables. Pattern bindings, guards and jump-table heuristics are deferred. |
-| Short-circuit `&&` and `||` | Guards and hardware conditions execute in source order. | Optimizations must preserve side effects and interrupt-visible reads. |
-| Compile-time nonzero division divisor | The compiler can diagnose division by zero and reduce powers of two. | Dynamic division is deferred. Non-power-of-two division uses a software routine and costs real cycles. |
-| Proven indexing, `[raw index]` escape | Constant mistakes and unsafe intervals produce useful editor errors. | Conservative proofs sometimes need an explicit raw access. Raw indexing has no runtime bounds check. |
-| Byte `@shared` storage | Individual accesses are atomic with respect to instruction-boundary interrupts. | A read/modify/write sequence is not a concurrency protocol. Multi-byte publication requires explicit assembly. |
-| Distinct main/NMI/IRQ frames | An NMI may preempt an IRQ without corrupting compiler temporaries. | Helpers called across contexts require distinct definitions. Implicit reentrant software stacks would consume scarce RAM. |
-| Inline official 6502 assembly | Exact bus sequences and specialized raster effects remain possible. | Opaque barriers reduce optimization; users own raw addresses, stack discipline, and timing assumptions. |
-| Typed A/X/Y assembly inputs; A-byte result | Most small custom instructions integrate directly into expressions. | Register outputs/clobber annotations are deferred; conservative barriers are the current contract. |
-| Cartridge configuration in source | A mapper is a compilation/linking decision, including fixed windows and CHR RAM. | Board variants are deliberately limited. An arbitrary mapper number does not imply support. |
-| Banked data; fixed code in v0.1 | Assets can exceed the fixed window while execution remains stable. | No banked functions/far calls yet. A useful future design needs explicit mapper-state capabilities. |
-| Managed frame runtime as an optional entry mode | Normal games prepare OAM and a bounded VRAM queue without hand-writing boot code. | It consumes reserved RAM and a standard NMI. `@reset` provides custom boot mode when those choices do not fit. |
-| Instruction budgets are explicit | Acyclic contracts can be checked against assembled branch costs and callees. | DMA, preemption, bus stalls and PPU phase need separate contracts. A source annotation cannot promise raster timing by itself. |
-| Shared Rust compiler/LSP in native and WASM | Diagnostics and semantics agree in VS Code and the playground. | Raw WASM ABI and host transports require careful buffer ownership and error handling. |
-| Caller-owned assets; no compiler I/O | Other game tools can embed compilation without adopting our CLI or emulator. | Hosts must resolve files and decide their own asset policy. |
+| `u8 i8 u16 i16 bool`, wrapping arithmetic, explicit conversions | The 6502 is an 8-bit machine; a byte should be the default and a word a choice. Wrapping is what positions, timers and hashes want. | Overflow never traps. Proofs must account for wrapping. |
+| Structs stored as structure of arrays | `enemies[i].x` becomes `lda enemies_x,x`, the fastest access the CPU has, without hand-maintained parallel arrays. | A struct has no single address, so there are no references to one. |
+| Enums with explicit representation | Game states and kinds read clearly, and `match` can check exhaustiveness. | No payloads. Data that varies by kind lives in fields or tables. |
+| Range types (`u8 in 0..8`) | An index proven once is free everywhere it flows, and the checker can explain why it couldn't prove one. | Some invariants need a guard or `raw`. |
+| Proven indexing with a `raw` escape | Out-of-bounds writes on a machine without memory protection corrupt unrelated state silently; the editor catches most of them as you type. | Conservative: function calls and wrapping forget facts. |
+| No pointers; read-only slices | Aliasing stays trivial, so values can live in registers and static frames can overlap. Slices cover the common need to pass a table or a string. | Writing through a reference isn't possible; pass an index. |
+| Static frames, overlaid by the call graph | Locals cost no stack manipulation, and functions that are never active together share RAM. | Recursion must be declared with `@recursive(n)`, which saves locals on a software stack. |
+| Interrupt contexts compiled separately | An NMI can call the same helper main code was running, because each context gets its own copy of the locals and arithmetic helpers. | Code reachable from both contexts is duplicated. |
+| Modules with `pub` | Projects split into files; the standard library is ordinary modules. | One namespace per file; no generics. |
+| Compile-time evaluation of ordinary functions | Lookup tables, level data parsed from ASCII maps and sine tables are generated by code instead of pasted numbers, with the same semantics as runtime code. | Compile time grows with the work done. |
+| `@bank(n)` on data and functions | The linker inserts bank switches for reads and trampolines for calls; moving a table to another bank is one attribute. | A banked call costs a trampoline; interrupt code must stay fixed. |
+| Nine boards from one `mapper` field | Starting small (NROM) and growing (MMC3) is a one-line change plus the features you choose to use. | Exotic boards and expansion audio are not covered. |
+| A frame runtime with a bounded video queue | Updates appear atomically in vertical blank and a slow frame repeats rather than tears. | The queue size (`queue`) is a budget; overflow drops writes, which the tests check. |
+| `@budget(n)` cycle proofs | Vertical-blank code has a hard deadline; the linker can prove simple code meets it. | Only loop-free code without runtime helpers can be bounded. |
+| Inline assembly as a barrier | Raster tricks and cycle-exact code stay possible. | The optimizer can't see inside. |
 
-## What “optimizing” means on this machine
+## What's left out, on purpose
 
-The current pipeline performs typed constant folding, algebraic simplification,
-power-of-two strength reduction, small pure-function inlining, constant branch
-removal, unreachable statement elimination, short-loop unrolling, and dead
-function removal. Lowering selects immediate arithmetic and comparisons,
-constant offsets, shifts/adds for sparse constant multipliers, and zero-page
-instructions. Locals and temporary arenas share space across call paths that
-cannot coexist. Main, NMI and IRQ have separate pools.
-
-Machine passes remove redundant branches, invert branches to use fall-through,
-remove dead instructions after terminating transfers, remove repeated immediate
-index loads, and remove selected redundant RAM loads only when flags are dead.
-The assembler relaxes branches beyond the 6502's signed 8-bit displacement.
-
-Banked reads can change mapper state and therefore cannot be discarded as pure.
-Shared byte reads and raw bus reads remain observable. Inline assembly is opaque.
-Optimizations are exposed as inspectable passes and counters; a transformation
-must survive reference/differential execution tests before being relied upon.
-This is a custom backend, not LLVM, and v0.1 is not a claim that every program
-matches a skilled assembly programmer's best possible result.
-
-## Deliberately deferred
-
-A future version can add explicit struct layouts/SoA containers, fixed-point
-numbers with declared scaling, module imports, bank-lifetime types, verified
-bounded loops, and user-defined compile-time transforms. Each should earn its
-complexity through a real game. Heap allocation, exceptions, inheritance,
-thread abstractions and portable integer defaults do not fit the current goal.
+- **A heap and growable collections.** 2 KiB of RAM is better spent on
+  fixed pools whose size the linker reports.
+- **Function pointers and closures.** They hide the call graph that frame
+  overlays, interrupt contexts and banking depend on. A `match` on an enum
+  does the same job visibly.
+- **Floating point.** Fixed-point `u16`/`i16` with lookup tables is what the
+  hardware can afford.
+- **PAL timing.** Everything assumes NTSC; PAL would be a timing profile,
+  not a flag.

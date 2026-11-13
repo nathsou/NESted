@@ -1,0 +1,998 @@
+// SPROUT: a springy seedling hops across three scrolling worlds.
+//
+// A jumps (hold for height), B in the air slams down: it breaks bricks,
+// defeats anything below, and bounces higher off springs. Collect gems,
+// touch checkpoints and reach the flag.
+//
+// MMC3 board: levels live in switchable PRG banks, the title screen runs
+// from a banked code window, the scanline IRQ splits a fixed status bar
+// from the scrolling playfield, and CHR banks animate gems and flags.
+cartridge {
+    title = "Sprout";
+    mapper = mmc3;
+    mirroring = vertical;
+    chr = "assets/sprout.chr";
+}
+
+use std::video;
+use std::input;
+use std::audio;
+use std::mapper;
+use std::nes;
+use std::runtime;
+use std::math;
+use levels;
+use sound;
+
+enum Mode {
+    Title,
+    Play,
+    Dead,
+    Clear,
+    Over,
+}
+
+enum Kind {
+    None,
+    Beetle,
+    Frog,
+    Bat,
+}
+
+// Metatile tiles and palettes by code (art.py).
+const TILES: [u8; 16] = [
+    0x00, 0x80, 0x84, 0x88, 0x8c, 0x90, 0x94, 0x98,
+    0x9c, 0xa0, 0xa4, 0xa8, 0xac, 0xb0, 0xb4, 0x00,
+];
+const PALETTE_OF: [u8; 16] = [0, 0, 0, 1, 1, 1, 3, 3, 3, 3, 3, 2, 2, 2, 2, 0];
+// Collision: 1 solid, 2 one-way, 4 hurts, 8 spring.
+const FLAGS: [u8; 16] = [0, 1, 1, 1, 1, 2, 4, 9, 0, 0, 0, 0, 0, 0, 0, 0];
+
+// Sprites.
+const S_IDLE: u8 = 0x00;
+const S_WALK: u8 = 0x04;
+const S_JUMP: u8 = 0x08;
+const S_POUND: u8 = 0x0c;
+const S_BEETLE: u8 = 0x10;
+const S_FROG: u8 = 0x18;
+const S_BAT: u8 = 0x20;
+const S_GEM: u8 = 0x28;
+const S_SPARK: u8 = 0x2c;
+const S_DUST: u8 = 0x2d;
+const S_HEART: u8 = 0x2e;
+
+// Physics in 1/16 pixel units.
+const GRAVITY: i16 = 6;
+const MAX_FALL: i16 = 72;
+const JUMP: i16 = -112;
+const JUMP_CUT: i16 = -40;
+const ACCEL: i16 = 5;
+const FRICTION: i16 = 4;
+const MAX_SPEED: i16 = 32;
+const POUND_SPEED: i16 = 96;
+const SPRING: i16 = -176;
+const STOMP: i16 = -80;
+
+const PLAYFIELD: u8 = 32;
+
+type World = u8 in 0..3;
+
+struct Enemy {
+    kind: Kind,
+    x: u16,
+    y: u8,
+    vx: i8,
+    vy: i8,
+    timer: u8,
+}
+
+struct Particle {
+    x: u16,
+    y: u8,
+    dx: i8,
+    dy: i8,
+    life: u8,
+    tile: u8,
+}
+
+// ------------------------------------------------------------------ state
+
+var mode: Mode = Mode::Title;
+var level: World = 0;
+var width: u16 = 0;
+var lives: u8 = 3;
+var gems: u8 = 0;
+var total_gems: u16 = 0;
+var timer: u8 = 0;
+
+// Player, in 1/16 pixels.
+var x: u16 = 0;
+var y: u16 = 0;
+var vx: i16 = 0;
+var vy: i16 = 0;
+var grounded: bool = false;
+var coyote: u8 = 0;
+var buffer: u8 = 0;
+var pounding: bool = false;
+var facing_left: bool = false;
+var walk: u8 = 0;
+var invincible: u8 = 0;
+var check_x: u16 = 0;
+var check_y: u16 = 0;
+
+// Camera and the nametable columns already drawn.
+var cam: u16 = 0;
+var drawn_left: u16 = 0;
+var drawn_right: u16 = 0;
+var shake: u8 = 0;
+
+// Split scroll for the IRQ, prepared each frame.
+@shared var split_hi: u8 = 0;
+@shared var split_x: u8 = 0;
+@shared var split_lo: u8 = 0;
+var next_hi: u8 = 0;
+var next_x: u8 = 0;
+var next_lo: u8 = 0;
+
+var enemies: [Enemy; 6];
+var next_spawn: u8 = 0;
+var particles: [Particle; 8];
+var next_particle: u8 = 0;
+
+/// Gems taken and bricks broken: one bit per level cell.
+var cleared: [u8; 256];
+
+// ------------------------------------------------------------ level cells
+
+fn raw_cell(i: u16) -> u8 {
+    return match level {
+        0 => levels::LEVEL0[raw i],
+        1 => levels::LEVEL1[raw i],
+        _ => levels::LEVEL2[raw i],
+    };
+}
+
+fn is_cleared(i: u16) -> bool {
+    return (cleared[raw u8(i >> 3)] & (1 << (u8(i) & 7))) != 0;
+}
+
+/// Metatile code at a level cell; outside the level is empty above and
+/// solid at the ends.
+fn cell(col: u16, row: u8) -> u8 {
+    if row >= 13 {
+        return levels::EMPTY;
+    }
+    if col >= width {
+        return levels::STONE;
+    }
+    let i = col * 13 + u16(row);
+    let c = raw_cell(i);
+    if (c == levels::GEM || c == levels::BRICK) && is_cleared(i) {
+        return levels::EMPTY;
+    }
+    if c == levels::START {
+        return levels::EMPTY;
+    }
+    return c;
+}
+
+fn flags_at(px: u16, py: u16) -> u8 {
+    if py >= 208 {
+        return 0;
+    }
+    return FLAGS[cell(px >> 4, u8(py >> 4)) & 15];
+}
+
+/// Remove a gem or brick, and redraw it if visible.
+fn clear_cell(col: u16, row: u8) {
+    let i = col * 13 + u16(row);
+    cleared[raw u8(i >> 3)] |= 1 << (u8(i) & 7);
+    if col + 32 > drawn_right && col <= drawn_right {
+        video::metatile(u8(col << 1) & 63, 4 + row * 2, 0);
+    }
+}
+
+// --------------------------------------------------------------- drawing
+
+/// Draw one level column into the nametables.
+fn draw_column(col: u16) {
+    let tx = u8(col << 1) & 63;
+    var codes: [u8; 13] = [0; 13];
+    for row in 0..13 {
+        codes[row] = cell(col, row);
+    }
+    if video::direct {
+        for half in 0..2 {
+            let a = video::address(tx + half, 4);
+            nes::PPUCTRL = video::ctrl | 4;
+            asm {
+                bit $2002
+            }
+            nes::PPUADDR = hi(a);
+            nes::PPUADDR = lo(a);
+            for row in 0..13 {
+                let t = TILES[codes[row] & 15] + half;
+                nes::PPUDATA = t;
+                nes::PPUDATA = t + 2;
+            }
+            nes::PPUCTRL = video::ctrl;
+        }
+    } else {
+        for half in 0..2 {
+            let at = video::reserve(video::address(tx + half, 4), 26, true);
+            if at != 255 {
+                for row in 0..13 {
+                    let t = TILES[codes[row] & 15] + half;
+                    video::queue[raw at + row * 2] = t;
+                    video::queue[raw at + row * 2 + 1] = t + 2;
+                }
+            }
+        }
+    }
+    for row in 0..13 {
+        video::attribute(tx, 4 + row * 2, PALETTE_OF[codes[row] & 15]);
+    }
+}
+
+/// Keep the columns around the camera drawn, one new column per frame.
+fn stream() {
+    let first = cam >> 4;
+    let last = (cam + 255) >> 4;
+    if last + 1 > drawn_right && drawn_right + 1 < width {
+        drawn_right += 1;
+        draw_column(drawn_right);
+        if drawn_right > drawn_left + 31 {
+            drawn_left = drawn_right - 31;
+        }
+    } else if first > 0 && first - 1 < drawn_left {
+        drawn_left -= 1;
+        draw_column(drawn_left);
+        if drawn_right > drawn_left + 31 {
+            drawn_right = drawn_left + 31;
+        }
+    }
+}
+
+fn hud() {
+    for i in 0..16 {
+        video::attribute(i * 2, 0, 3);
+        video::attribute(i * 2, 2, 3);
+    }
+    video::text(2, 1, "WORLD");
+    video::number(8, 1, u16(level) + 1, 1, '0');
+    let base = u16(level) * 8;
+    for i in 0..8 {
+        video::tile(10 + i, 1, levels::NAMES[base + u16(i)]);
+    }
+    video::text(20, 1, "*");
+    video::text(25, 1, "LIFE");
+    hud_numbers();
+}
+
+fn hud_numbers() {
+    video::number(22, 1, u16(gems), 2, '0');
+    video::number(30, 1, u16(lives), 1, '0');
+}
+
+fn sprite16(sx: u8, sy: u8, t: u8, attr: u8) {
+    if (attr & 0x40) != 0 {
+        video::sprite(sx, sy, t + 1, attr);
+        video::sprite(sx + 8, sy, t, attr);
+        video::sprite(sx, sy + 8, t + 3, attr);
+        video::sprite(sx + 8, sy + 8, t + 2, attr);
+    } else {
+        video::sprite(sx, sy, t, attr);
+        video::sprite(sx + 8, sy, t + 1, attr);
+        video::sprite(sx, sy + 8, t + 2, attr);
+        video::sprite(sx + 8, sy + 8, t + 3, attr);
+    }
+}
+
+fn particle(px: u16, py: u8, dx: i8, dy: i8, tile: u8) {
+    let i = next_particle & 7;
+    next_particle += 1;
+    particles[i] = Particle { x: px, y: py, dx, dy, life: 18, tile };
+}
+
+fn burst(px: u16, py: u8, tile: u8) {
+    particle(px, py, -2, -3, tile);
+    particle(px + 8, py, 2, -3, tile);
+    particle(px, py + 8, -1, -1, tile);
+    particle(px + 8, py + 8, 1, -1, tile);
+}
+
+fn draw_particles() {
+    for i in 0..8 {
+        let p = particles[i];
+        if p.life == 0 {
+            continue;
+        }
+        particles[i].life = p.life - 1;
+        particles[i].x = p.x + u16(i16(p.dx));
+        particles[i].y = p.y + u8(p.dy);
+        if (frame_count() & 1) == 0 {
+            particles[i].dy = p.dy + 1;
+        }
+        if p.x >= cam && p.x < cam + 248 {
+            video::sprite(u8(p.x - cam), PLAYFIELD + p.y, p.tile, 3);
+        }
+    }
+}
+
+fn frame_count() -> u8 {
+    return runtime::frames;
+}
+
+// ------------------------------------------------------------------ level
+
+fn start_level(n: World) {
+    level = n;
+    width = match n {
+        0 => levels::W0,
+        1 => levels::W1,
+        _ => levels::W2,
+    };
+    gems = 0;
+    for i in 0..256 {
+        cleared[i] = 0;
+    }
+    // Find the start.
+    check_x = 32;
+    check_y = 144;
+    for col in 0..16 {
+        for row in 0..13 {
+            if raw_cell(u16(col) * 13 + u16(row)) == levels::START {
+                check_x = u16(col) * 16;
+                check_y = u16(row) * 16;
+            }
+        }
+    }
+    respawn();
+    audio::play(sound::MELODY, sound::HARMONY, sound::BASS, if n == 1 { sound::CAVE_DRUMS } else { sound::DRUMS });
+}
+
+fn respawn() {
+    video::off();
+    var colors: [u8; 32] = [
+        0x21, 0x08, 0x18, 0x2a,
+        0x21, 0x07, 0x17, 0x27,
+        0x21, 0x1a, 0x2a, 0x30,
+        0x21, 0x0f, 0x28, 0x30,
+        0x21, 0x0f, 0x2a, 0x37,
+        0x21, 0x0f, 0x16, 0x30,
+        0x21, 0x0f, 0x1a, 0x38,
+        0x21, 0x28, 0x30, 0x38,
+    ];
+    let sky = levels::SKY[level];
+    for i in 0..32 {
+        let c = if (i & 3) == 0 { sky } else { colors[i] };
+        video::palette(i, c);
+    }
+    x = check_x << 4;
+    y = check_y << 4;
+    vx = 0;
+    vy = 0;
+    grounded = false;
+    pounding = false;
+    invincible = 60;
+    // Camera and columns around the player.
+    cam = 0;
+    if check_x > 112 {
+        cam = check_x - 112;
+    }
+    if cam + 256 > width * 16 {
+        cam = width * 16 - 256;
+    }
+    video::clear(0, ' ');
+    video::clear(1, ' ');
+    let first = cam >> 4;
+    drawn_left = first;
+    drawn_right = first + 16;
+    for c in first..first + 17 {
+        if c < width {
+            draw_column(c);
+        }
+    }
+    hud();
+    for i in 0..6 {
+        enemies[i].kind = Kind::None;
+    }
+    for i in 0..8 {
+        particles[i].life = 0;
+    }
+    next_spawn = 0;
+    // Skip spawns behind the checkpoint.
+    while spawn_byte(next_spawn) != 255 && u16(spawn_byte(next_spawn)) * 16 + 64 < cam {
+        next_spawn += 3;
+    }
+    prepare_split();
+    copy_split();
+    mode = Mode::Play;
+    video::on();
+}
+
+fn spawn_byte(i: u8) -> u8 {
+    if i >= 64 {
+        return 255;
+    }
+    return match level {
+        0 => levels::SPAWNS0[i],
+        1 => levels::SPAWNS1[i],
+        _ => levels::SPAWNS2[i],
+    };
+}
+
+fn spawn_enemies() {
+    loop {
+        let col = spawn_byte(next_spawn);
+        if col == 255 || u16(col) * 16 > cam + 272 {
+            return;
+        }
+        let row = spawn_byte(next_spawn + 1);
+        let kind = spawn_byte(next_spawn + 2);
+        next_spawn += 3;
+        for i in 0..6 {
+            if enemies[i].kind == Kind::None {
+                enemies[i] = Enemy { kind: kind as Kind, x: u16(col) * 16, y: row * 16, vx: -1, vy: 0, timer: u8(i) * 20, };
+                break;
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------- player
+
+fn solid_at(px: u16, py: u16) -> bool {
+    return (flags_at(px, py) & 1) != 0;
+}
+
+fn move_player() {
+    let held = input::held();
+    let pressed = input::pressed();
+    // Horizontal control.
+    if (held & input::LEFT) != 0 {
+        vx -= ACCEL;
+        facing_left = true;
+    } else if (held & input::RIGHT) != 0 {
+        vx += ACCEL;
+        facing_left = false;
+    } else if vx > 0 {
+        vx = if vx > FRICTION { vx - FRICTION } else { 0 };
+    } else if vx < 0 {
+        vx = if vx < -FRICTION { vx + FRICTION } else { 0 };
+    }
+    if vx > MAX_SPEED {
+        vx = MAX_SPEED;
+    }
+    if vx < -MAX_SPEED {
+        vx = -MAX_SPEED;
+    }
+    // Jumping with coyote time and a jump buffer.
+    if (pressed & input::A) != 0 {
+        buffer = 6;
+    } else if buffer > 0 {
+        buffer -= 1;
+    }
+    if grounded {
+        coyote = 6;
+    } else if coyote > 0 {
+        coyote -= 1;
+    }
+    if buffer > 0 && coyote > 0 {
+        vy = JUMP;
+        buffer = 0;
+        coyote = 0;
+        grounded = false;
+        audio::sfx(1, sound::JUMP);
+    }
+    if (held & input::A) == 0 && vy < JUMP_CUT && !pounding {
+        vy = JUMP_CUT;
+    }
+    // Slam.
+    if (pressed & input::B) != 0 && !grounded && !pounding {
+        pounding = true;
+        vx = 0;
+        vy = POUND_SPEED;
+        audio::sfx(3, sound::POUND);
+    }
+    if !pounding {
+        vy += GRAVITY;
+        if vy > MAX_FALL {
+            vy = MAX_FALL;
+        }
+    }
+    // Move horizontally, then vertically, resolving against cells.
+    x = u16(i16(x) + vx);
+    if x < 16 {
+        x = 16;
+    }
+    let px = x >> 4;
+    let py = y >> 4;
+    if vx > 0 && (solid_at(px + 12, py + 2) || solid_at(px + 12, py + 15)) {
+        x = (((px + 12) & 0xfff0) - 13) << 4;
+        vx = 0;
+    } else if vx < 0 && (solid_at(px + 3, py + 2) || solid_at(px + 3, py + 15)) {
+        x = (((px + 3) & 0xfff0) + 13) << 4;
+        vx = 0;
+    }
+    let old_bottom = (y >> 4) + 15;
+    let ny = i16(y) + vy;
+    if ny < 0 {
+        // The sky has no ceiling, but the coordinates do.
+        y = 0;
+        vy = 0;
+    } else {
+        y = u16(ny);
+    }
+    let px = x >> 4;
+    let py = y >> 4;
+    let was_grounded = grounded;
+    grounded = false;
+    if vy >= 0 {
+        let foot = py + 16;
+        let a = flags_at(px + 3, foot);
+        let b = flags_at(px + 12, foot);
+        let floor = foot & 0xfff0;
+        let land = ((a | b) & 1) != 0 || (((a | b) & 2) != 0 && old_bottom < floor);
+        if land && foot < 224 {
+            y = (floor - 16) << 4;
+            grounded = true;
+            if ((a | b) & 8) != 0 {
+                // Springs launch, higher after a slam.
+                vy = if pounding { SPRING - 32 } else { SPRING };
+                grounded = false;
+                audio::sfx(1, sound::SPRING);
+            } else {
+                if pounding {
+                    land_pound(px, foot);
+                } else if !was_grounded && vy > 40 {
+                    particle(px, u8(py) + 12, -1, -1, S_DUST);
+                    particle(px + 8, u8(py) + 12, 1, -1, S_DUST);
+                }
+                vy = 0;
+            }
+            pounding = false;
+        }
+    } else {
+        let head = py + 2;
+        if solid_at(px + 4, head) || solid_at(px + 11, head) {
+            y = ((head & 0xfff0) + 14) << 4;
+            vy = 0;
+            // Bonk bricks from below.
+            for side in 0..2 {
+                let hx = if side == 0 { px + 4 } else { px + 11 };
+                if cell(hx >> 4, u8(head >> 4)) == levels::BRICK {
+                    break_brick(hx >> 4, u8(head >> 4));
+                }
+            }
+        }
+    }
+    // Touching cells: gems, hazards, checkpoints, the flag.
+    let cx = (px + 8) >> 4;
+    for k in 0..2 {
+        let ty = if k == 0 { py + 4 } else { py + 13 };
+        if ty >= 208 {
+            continue;
+        }
+        let row = u8(ty >> 4);
+        let c = cell(cx, row);
+        match c {
+            levels::GEM => {
+                clear_cell(cx, row);
+                gems += 1;
+                total_gems += 1;
+                if gems == 50 {
+                    lives += 1;
+                }
+                hud_numbers();
+                burst(cx * 16, row * 16, S_SPARK);
+                audio::sfx(1, sound::GEM);
+            }
+            levels::SPIKES => {
+                if k == 1 {
+                    hurt();
+                }
+            }
+            levels::CHECK => {
+                if check_x != cx * 16 {
+                    check_x = cx * 16;
+                    check_y = u16(row) * 16;
+                    audio::sfx(1, sound::CHECK);
+                    burst(cx * 16, row * 16, S_SPARK);
+                }
+            }
+            levels::FLAG => {
+                if mode == Mode::Play {
+                    mode = Mode::Clear;
+                    timer = 0;
+                    audio::stop();
+                    audio::sfx(0, sound::CLEAR);
+                }
+            }
+            _ => {}
+        }
+    }
+    if py >= 216 {
+        hurt();
+    }
+    if grounded && vx != 0 {
+        walk += 1;
+    }
+}
+
+fn land_pound(px: u16, foot: u16) {
+    shake = 8;
+    audio::sfx(3, sound::BREAK);
+    let row = u8(foot >> 4);
+    for side in 0..2 {
+        let fx = if side == 0 { px + 3 } else { px + 12 };
+        if cell(fx >> 4, row) == levels::BRICK {
+            break_brick(fx >> 4, row);
+        }
+    }
+    particle(px, u8(foot) - 4, -2, -2, S_DUST);
+    particle(px + 8, u8(foot) - 4, 2, -2, S_DUST);
+}
+
+fn break_brick(col: u16, row: u8) {
+    clear_cell(col, row);
+    burst(col * 16, row * 16, S_DUST);
+    audio::sfx(3, sound::BREAK);
+}
+
+fn hurt() {
+    if invincible > 0 || mode != Mode::Play {
+        return;
+    }
+    mode = Mode::Dead;
+    timer = 0;
+    vy = -64;
+    audio::stop();
+    audio::sfx(0, sound::HURT);
+}
+
+// ---------------------------------------------------------------- enemies
+
+fn enemy_solid(ex: u16, ey: u8) -> bool {
+    return (flags_at(ex, u16(ey)) & 3) != 0;
+}
+
+fn update_enemies() {
+    let px = x >> 4;
+    let py = u8(y >> 4);
+    for i in 0..6 {
+        let e = enemies[i];
+        if e.kind == Kind::None {
+            continue;
+        }
+        if e.x + 64 < cam || e.x > cam + 320 {
+            enemies[i].kind = Kind::None;
+            continue;
+        }
+        var ex = e.x;
+        var ey = e.y;
+        var evx = e.vx;
+        var evy = e.vy;
+        var t = e.timer + 1;
+        match e.kind {
+            Kind::Beetle => {
+                if (t & 1) == 0 {
+                    let ahead = if evx < 0 { ex - 1 } else { ex + 16 };
+                    let wall = enemy_solid(ahead, ey + 8);
+                    let floor = enemy_solid(ahead, ey + 16);
+                    if wall || !floor {
+                        evx = -evx;
+                    } else {
+                        ex = u16(i16(ex) + i16(evx));
+                    }
+                }
+            }
+            Kind::Frog => {
+                if evy == 0 && t > 70 {
+                    t = 0;
+                    evy = -5;
+                    evx = if px < ex { -2 } else { 2 };
+                }
+                if evy != 0 || !enemy_solid(ex + 8, ey + 16) {
+                    let nx = u16(i16(ex) + i16(evx));
+                    if !enemy_solid(if evx < 0 { nx } else { nx + 15 }, ey + 8) {
+                        ex = nx;
+                    }
+                    let nyy = i16(ey) + i16(evy);
+                    ey = if nyy < 0 { 0 } else { u8(nyy) };
+                    if (t & 3) == 0 && evy < 4 {
+                        evy += 1;
+                    }
+                    if evy > 0 && enemy_solid(ex + 8, ey + 16) {
+                        ey = ((ey + 16) & 0xf0) - 16;
+                        evy = 0;
+                        evx = 0;
+                    }
+                    if ey > 220 {
+                        enemies[i].kind = Kind::None;
+                        continue;
+                    }
+                }
+            }
+            Kind::Bat => {
+                let wave = math::sin(t << 2);
+                ey = e.y;
+                if (t & 3) == 0 {
+                    ex = if px + 8 < ex { ex - 1 } else { ex + 1 };
+                }
+                let dy = if wave > 40 { 1 } else if wave < -40 { 255 } else { 0 };
+                ey += dy;
+            }
+            Kind::None => {}
+        }
+        enemies[i] = Enemy { kind: e.kind, x: ex, y: ey, vx: evx, vy: evy, timer: t };
+        // Touching the player.
+        if mode == Mode::Play && ex + 13 > px + 3 && ex + 3 < px + 13 && ey + 14 > py + 2 && ey + 2 < py + 15 {
+            if pounding || (vy > 0 && py + 10 < ey + 8) {
+                enemies[i].kind = Kind::None;
+                burst(ex, ey, S_SPARK);
+                vy = if (input::held() & input::A) != 0 { STOMP - 32 } else { STOMP };
+                audio::sfx(1, sound::STOMP);
+            } else {
+                hurt();
+            }
+        }
+    }
+}
+
+fn draw_enemies() {
+    for i in 0..6 {
+        let e = enemies[i];
+        if e.kind == Kind::None || e.x + 16 < cam || e.x >= cam + 240 {
+            continue;
+        }
+        let sx = u8(e.x - cam);
+        let flip: u8 = if e.vx > 0 { 0x40 } else { 0 };
+        match e.kind {
+            Kind::Beetle => sprite16(sx, PLAYFIELD + e.y, S_BEETLE + ((e.timer >> 1) & 4), 1 | flip),
+            Kind::Frog => sprite16(sx, PLAYFIELD + e.y, if e.vy != 0 { S_FROG + 4 } else { S_FROG }, 2 | flip),
+            Kind::Bat => sprite16(sx, PLAYFIELD + e.y, S_BAT + ((e.timer >> 2) & 4), 1),
+            Kind::None => {}
+        }
+    }
+}
+
+// ----------------------------------------------------------------- camera
+
+fn update_camera() {
+    let px = x >> 4;
+    var target: u16 = 0;
+    if px > 112 {
+        target = px - 112;
+    }
+    let limit = width * 16 - 256;
+    if target > limit {
+        target = limit;
+    }
+    cam = target;
+    stream();
+    prepare_split();
+}
+
+/// Scroll register values for the playfield below the status bar.
+fn prepare_split() {
+    var view = cam;
+    if shake > 0 {
+        shake -= 1;
+        view = view + u16(shake & 2);
+    }
+    let fine = lo(view);
+    let table = u8(view >> 8) & 1;
+    next_hi = table << 2;
+    next_x = fine;
+    next_lo = ((PLAYFIELD & 0x38) << 2) | (fine >> 3);
+}
+
+fn copy_split() {
+    split_hi = next_hi;
+    split_x = next_x;
+    split_lo = next_lo;
+}
+
+// ------------------------------------------------------------------ title
+
+@bank(3)
+fn title_screen() {
+    video::off();
+    mode = Mode::Title;
+    for i in 0..32 {
+        video::palette(i, if (i & 3) == 0 { 0x21 } else { TITLE_COLORS[i] });
+    }
+    video::clear(0, ' ');
+    video::clear(1, ' ');
+    // A small meadow scene.
+    for col in 0..16 {
+        video::metatile(col * 2, 24, 0x80);
+        video::metatile(col * 2, 26, 0x84);
+        video::metatile(col * 2, 28, 0x84);
+        video::attribute(col * 2, 24, 0);
+        video::attribute(col * 2, 26, 0);
+        video::attribute(col * 2, 28, 0);
+    }
+    video::metatile(4, 6, 0xa8);
+    video::metatile(6, 6, 0xac);
+    video::metatile(22, 10, 0xa8);
+    video::metatile(24, 10, 0xac);
+    video::metatile(8, 22, 0xb0);
+    video::metatile(20, 22, 0xb4);
+    for k in 0..4 {
+        video::attribute(4 + k * 2, 6, 2);
+        video::attribute(20 + k * 2, 10, 2);
+    }
+    video::attribute(8, 22, 2);
+    video::attribute(20, 22, 2);
+    for row in 0..5 {
+        for col in 0..16 {
+            video::attribute(col * 2, 10 + row * 2, 3);
+        }
+    }
+    video::text(10, 11, "S P R O U T");
+    video::text(7, 14, "A  JUMP   B  SLAM");
+    video::text(10, 18, "PRESS START");
+    video::scroll(0, 0);
+    split_hi = 0;
+    split_x = 0;
+    split_lo = 0;
+    next_hi = 0;
+    next_x = 0;
+    next_lo = 0;
+    x = 120 << 4;
+    y = 160 << 4;
+    vy = 0;
+    video::on();
+}
+
+const TITLE_COLORS: [u8; 32] = [
+    0x21, 0x08, 0x18, 0x2a,
+    0x21, 0x07, 0x17, 0x27,
+    0x21, 0x1a, 0x2a, 0x30,
+    0x21, 0x0f, 0x28, 0x30,
+    0x21, 0x0f, 0x2a, 0x37,
+    0x21, 0x0f, 0x16, 0x30,
+    0x21, 0x0f, 0x1a, 0x38,
+    0x21, 0x28, 0x30, 0x38,
+];
+
+fn title_update() {
+    // Sprout bounces on the grass.
+    vy += 3;
+    y = u16(i16(y) + vy);
+    if (y >> 4) >= 176 {
+        y = 176 << 4;
+        vy = -60;
+    }
+    sprite16(184, u8(y >> 4), if vy < 0 { S_JUMP } else { S_IDLE }, 0);
+    if (input::pressed() & (input::START | input::A)) != 0 {
+        lives = 3;
+        total_gems = 0;
+        start_level(0);
+    }
+}
+
+// ------------------------------------------------------------------- game
+
+fn init() {
+    video::flicker(true);
+    title_screen();
+}
+
+fn update() {
+    match mode {
+        Mode::Title => {
+            title_update();
+            return;
+        }
+        Mode::Play => {
+            if invincible > 0 {
+                invincible -= 1;
+            }
+            move_player();
+            spawn_enemies();
+            update_enemies();
+            update_camera();
+        }
+        Mode::Dead => {
+            timer += 1;
+            if timer > 20 {
+                vy += 4;
+                y = u16(i16(y) + vy);
+            }
+            if timer == 100 {
+                if lives > 0 {
+                    lives -= 1;
+                }
+                if lives == 0 {
+                    mode = Mode::Over;
+                    timer = 0;
+                    video::text(11, 2, "GAME OVER");
+                    audio::sfx(0, sound::OVER);
+                } else {
+                    respawn();
+                    audio::play(sound::MELODY, sound::HARMONY, sound::BASS, sound::DRUMS);
+                }
+                return;
+            }
+        }
+        Mode::Clear => {
+            timer += 1;
+            if timer == 2 {
+                video::text(2, 2, "WORLD CLEAR!");
+            }
+            if timer == 150 {
+                if level == 2 {
+                    mode = Mode::Over;
+                    timer = 0;
+                    video::text(2, 2, "YOU MADE IT HOME!   ");
+                } else {
+                    start_level(level + 1);
+                }
+                return;
+            }
+        }
+        Mode::Over => {
+            timer += 1;
+            if timer > 60 && (input::pressed() & input::START) != 0 {
+                title_screen();
+            }
+            return;
+        }
+    }
+    // Sprites.
+    let sx = u8((x >> 4) - cam);
+    let sy = u8(y >> 4);
+    let t = if pounding {
+        S_POUND
+    } else if !grounded {
+        S_JUMP
+    } else if vx != 0 && (walk & 8) != 0 {
+        S_WALK
+    } else {
+        S_IDLE
+    };
+    if (invincible & 2) == 0 && sy < 224 {
+        sprite16(sx, PLAYFIELD + sy, t, if facing_left { 0x40 } else { 0 });
+    }
+    draw_enemies();
+    draw_particles();
+    // Gems and flags animate through the CHR banks.
+    let phase = (frame_count() >> 3) & 3;
+    mapper::chr_bank(1, if phase == 0 { 2 } else { 6 + phase * 2 });
+}
+
+/// Every NMI: the status bar shows unscrolled, then the IRQ scrolls the playfield.
+fn vblank() {
+    // Rendering off: the main thread is writing the PPU directly.
+    if video::direct {
+        return;
+    }
+    if video::published {
+        copy_split();
+    }
+    nes::PPUCTRL = video::ctrl & 0xfc;
+    asm {
+        bit $2002
+    }
+    nes::PPUSCROLL = 0;
+    nes::PPUSCROLL = 0;
+    mapper::irq_after(PLAYFIELD - 1);
+}
+
+/// MMC3 IRQ at the bottom of the status bar.
+fn scanline() {
+    asm {
+        lda {split_hi}
+        sta $2006
+        lda #32
+        sta $2005
+        lda {split_x}
+        sta $2005
+        lda {split_lo}
+        sta $2006
+    }
+    mapper::irq_ack(false);
+}

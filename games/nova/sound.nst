@@ -1,0 +1,115 @@
+//! Nova's music and sound effects, as streams for std::audio.
+use std::audio::*;
+
+const S: u8 = 7;
+const E: u8 = 14;
+const Q: u8 = 28;
+
+// ------------------------------------------------------------------ title
+
+/// A slow, spacious arpeggio over a pad.
+pub const TITLE_LEAD: [u8; _] = [
+    INSTRUMENT, 2,
+    E5, Q * 2, D5, Q, B4, Q,
+    C5, Q * 2, B4, Q, G4, Q,
+    A4, Q * 3, B4, Q,
+    E4, Q * 4,
+    LOOP,
+];
+pub const TITLE_ARP: [u8; _] = [
+    INSTRUMENT, 7,
+    A3, E, E4, E, A4, E, C5, E, A3, E, E4, E, A4, E, C5, E,
+    F3, E, C4, E, F4, E, A4, E, F3, E, C4, E, F4, E, A4, E,
+    D3, E, A3, E, D4, E, F4, E, D3, E, A3, E, D4, E, F4, E,
+    E3, E, B3, E, E4, E, Gs4, E, E3, E, B3, E, E4, E, Gs4, E,
+    LOOP,
+];
+pub const TITLE_BASS: [u8; _] = [
+    INSTRUMENT, 3,
+    A2, Q * 4, F2, Q * 4, D2, Q * 4, E2, Q * 4,
+    LOOP,
+];
+
+// ------------------------------------------------------------------ stage
+
+/// The stage theme: a driving minor riff.
+pub const THEME_LEAD: [u8; _] = [
+    INSTRUMENT, 0,
+    A4, E, C5, E, E5, Q, D5, E, C5, E, B4, Q,
+    C5, E, D5, E, E5, E, G5, E, E5, Q, REST, Q,
+    F5, E, E5, E, D5, Q, C5, E, D5, E, E5, Q,
+    B4, E, C5, E, D5, E, B4, E, A4, Q, REST, Q,
+    A4, E, C5, E, E5, Q, D5, E, C5, E, B4, Q,
+    C5, E, D5, E, E5, E, A5, E, G5, Q, E5, Q,
+    F5, E, G5, E, A5, Q, G5, E, F5, E, E5, Q,
+    D5, E, E5, E, C5, E, B4, E, A4, Q * 2,
+    LOOP,
+];
+pub const THEME_HARMONY: [u8; _] = [
+    INSTRUMENT, 1,
+    A3, S, A3, S, E4, E, A3, S, A3, S, E4, E, A3, S, A3, S, E4, E, G3, E, D4, E,
+    C4, S, C4, S, G4, E, C4, S, C4, S, G4, E, C4, S, C4, S, G4, E, E4, E, G4, E,
+    F3, S, F3, S, C4, E, F3, S, F3, S, C4, E, F3, S, F3, S, C4, E, E3, E, C4, E,
+    G3, S, G3, S, D4, E, G3, S, G3, S, D4, E, E3, S, E3, S, B3, E, E3, E, Gs3, E,
+    LOOP,
+];
+pub const THEME_BASS: [u8; _] = [
+    INSTRUMENT, 3,
+    A2, E, A2, E, A3, E, A2, E, A2, E, A2, E, G2, E, G3, E,
+    C3, E, C3, E, C4, E, C3, E, C3, E, C3, E, B2, E, B3, E,
+    F2, E, F2, E, F3, E, F2, E, F2, E, F2, E, E2, E, E3, E,
+    G2, E, G2, E, G3, E, G2, E, E2, E, E2, E, E3, E, E2, E,
+    LOOP,
+];
+pub const DRUMS: [u8; _] = [
+    INSTRUMENT, 4, 12, E, INSTRUMENT, 5, 1, E, INSTRUMENT, 4, 6, E, INSTRUMENT, 5, 1, E,
+    INSTRUMENT, 4, 12, E, INSTRUMENT, 4, 12, E, INSTRUMENT, 4, 6, E, INSTRUMENT, 5, 1, S, 1, S,
+    LOOP,
+];
+
+// ------------------------------------------------------------------- boss
+
+/// The boss theme: chromatic and insistent.
+pub const BOSS_LEAD: [u8; _] = [
+    INSTRUMENT, 0,
+    E5, S, F5, S, E5, S, Ds5, S, E5, E, B4, E, C5, E, B4, E, As4, E, B4, E,
+    E5, S, F5, S, E5, S, Ds5, S, E5, E, G5, E, Fs5, E, F5, E, E5, Q,
+    D5, S, Ds5, S, D5, S, Cs5, S, D5, E, A4, E, As4, E, A4, E, Gs4, E, A4, E,
+    B4, E, C5, E, Cs5, E, D5, E, Ds5, E, E5, E, F5, E, Fs5, E,
+    LOOP,
+];
+pub const BOSS_BASS: [u8; _] = [
+    INSTRUMENT, 3,
+    E2, S, E2, S, E3, E, E2, S, E2, S, F3, E, E2, S, E2, S, E3, E, E2, S, E2, S, Ds3, E,
+    E2, S, E2, S, E3, E, E2, S, E2, S, F3, E, E2, S, E2, S, G3, E, Fs3, E, F3, E,
+    D2, S, D2, S, D3, E, D2, S, D2, S, Ds3, E, D2, S, D2, S, D3, E, D2, S, D2, S, Cs3, E,
+    B1, E, C2, E, Cs2, E, D2, E, Ds2, E, E2, E, F2, E, Fs2, E,
+    LOOP,
+];
+pub const BOSS_DRUMS: [u8; _] = [
+    INSTRUMENT, 4, 12, S, 12, S, INSTRUMENT, 5, 1, E, INSTRUMENT, 4, 5, E, INSTRUMENT, 5, 1, E,
+    LOOP,
+];
+
+// -------------------------------------------------------------- effects
+
+/// Channel 1: the player's shot.
+pub const SHOT: [u8; _] = [INSTRUMENT, 5, C7, 2, G6, 2, END];
+/// Channel 3 (noise): an enemy destroyed.
+pub const BLAST: [u8; _] = [INSTRUMENT, 4, 9, 4, 11, 6, 13, 8, END];
+/// Channel 3: a big explosion.
+pub const BIG_BLAST: [u8; _] = [INSTRUMENT, 4, 6, 6, 8, 8, 10, 10, 12, 12, 14, 16, END];
+/// Channel 1: a hit that didn't destroy.
+pub const TINK: [u8; _] = [INSTRUMENT, 5, E7, 2, END];
+/// Channel 0: a power-up collected.
+pub const POWER: [u8; _] = [INSTRUMENT, 1, C5, 3, E5, 3, G5, 3, C6, 3, E6, 3, G6, 3, C7, 8, END];
+/// Channel 0: an extra ship.
+pub const ONE_UP: [u8; _] = [INSTRUMENT, 0, G5, 5, C6, 5, E6, 5, G6, 5, C7, 14, END];
+/// Channel 0: the player's ship destroyed.
+pub const DOWN: [u8; _] = [INSTRUMENT, 0, C5, 4, B4, 4, As4, 4, A4, 4, Gs4, 4, G4, 4, Fs4, 4, F4, 12, END];
+/// Channel 0: a warning siren before the boss.
+pub const SIREN: [u8; _] = [INSTRUMENT, 2, A5, 10, E5, 10, A5, 10, E5, 10, A5, 10, E5, 10, END];
+/// Channel 0: stage clear.
+pub const CLEAR: [u8; _] = [INSTRUMENT, 0, C5, 6, E5, 6, G5, 6, C6, 6, G5, 6, C6, 24, END];
+/// Channel 0: start.
+pub const START: [u8; _] = [INSTRUMENT, 1, A4, 4, E5, 4, A5, 4, E6, 10, END];
