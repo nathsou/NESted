@@ -23,6 +23,8 @@ struct Doc {
 }
 
 struct Workspace {
+    /// The project root, or for a lone file the file itself.
+    key: String,
     root: String,
     analysis: Analysis,
     /// Relative path → URI for every source file in the project.
@@ -77,17 +79,18 @@ impl LanguageServer {
         self.docs.get(uri).map(|d| d.text.as_str())
     }
 
-    /// The project root for a document: the closest ancestor with main.nst.
-    fn root_of(&self, uri: &str) -> String {
+    /// The project root for a document: the closest ancestor with main.nst,
+    /// and whether one was found (otherwise the file stands alone).
+    fn root_of(&self, uri: &str) -> (String, bool) {
         let mut dir = dir_of(uri).to_owned();
         loop {
             let main = format!("{dir}main.nst");
             if self.docs.contains_key(&main) {
-                return dir;
+                return (dir, true);
             }
             if let Some(load) = &self.loader {
                 if load(&main).iter().any(|(u, _)| *u == main) {
-                    return dir;
+                    return (dir, true);
                 }
             }
             let trimmed = dir.trim_end_matches('/');
@@ -97,18 +100,21 @@ impl LanguageServer {
                 {
                     dir = trimmed[..i + 1].to_owned()
                 }
-                _ => return dir_of(uri).to_owned(),
+                _ => return (dir_of(uri).to_owned(), false),
             }
         }
     }
 
     fn workspace(&mut self, uri: &str) -> &Workspace {
-        let root = self.root_of(uri);
-        let valid = self.cache.as_ref().is_some_and(|w| w.root == root);
+        let (root, found) = self.root_of(uri);
+        let key = if found { root.clone() } else { uri.to_owned() };
+        let valid = self.cache.as_ref().is_some_and(|w| w.key == key);
         if !valid {
             let mut project = Project::default();
             let mut uris = BTreeMap::new();
-            if let Some(load) = &self.loader {
+            // A lone file (no main.nst above it) is its own project: don't
+            // read the rest of its directory, which may be /tmp or $HOME.
+            if let Some(load) = self.loader.as_ref().filter(|_| found) {
                 for (u, bytes) in load(&root) {
                     if let Some(rel) = u.strip_prefix(&root) {
                         if rel.ends_with(".nst") {
@@ -142,6 +148,7 @@ impl LanguageServer {
             project.entry = entry;
             let analysis = crate::check::analyze(&project);
             self.cache = Some(Workspace {
+                key,
                 root,
                 analysis,
                 uris,
@@ -1289,7 +1296,8 @@ pub fn serve_stdio() -> Result<(), String> {
             out: &mut Vec<(String, Vec<u8>)>,
             depth: usize,
         ) {
-            if depth > 6 {
+            // Bounded: a project is a few hundred files at most.
+            if depth > 6 || out.len() >= 2000 {
                 return;
             }
             let Ok(rd) = std::fs::read_dir(dir) else {
