@@ -115,7 +115,7 @@ def main():
     a.add_argument("--skill", type=int)
     a.add_argument("--sf-time", type=float, default=0.1)
     a.add_argument("--stockfish", default="/usr/games/stockfish")
-    a.add_argument("--source", default=str(ROOT / "games" / "chess.nst"))
+    a.add_argument("--source", default=str(ROOT / "games" / "chess"))
     a.add_argument("--jobs", type=int, default=os.cpu_count())
     a.add_argument("--pgn")
     a.add_argument("--seed", type=int, default=1)

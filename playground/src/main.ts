@@ -1,232 +1,1229 @@
+// The NESted playground: projects with several files, a code editor backed
+// by the language server, a build report, the emulator and inspectors.
 import './style.css';
-import type { Build, Diagnostic, Position, Range, Rpc } from './wasm';
-const icons = {
-  play: '<svg viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z"/></svg>',
-  pause: '<svg viewBox="0 0 16 16"><path d="M3 2h4v12H3zm6 0h4v12H9z"/></svg>',
-  reset: '<svg viewBox="0 0 16 16"><path d="M3 3v4h4M3 6a5 5 0 1 1 0 5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>',
-  arrow: '<svg viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>',
-  download: '<svg viewBox="0 0 16 16"><path d="M8 2v8m-3-3l3 3 3-3M3 11v3h10v-3" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
+import { Editor, type LspClient } from './editor';
+import { el, bytes, hex, Problems, Memory, Watch, Ppu, Listing, Passes, type Panel, type Machine, NES_COLORS } from './inspectors';
+import { BOARDS, blankModule, deleteProject, listProjects, loadExample, loadExamples, saveProject, templateProject, type ExampleInfo, type Project, type ProjectFile } from './project';
+import type { Report } from './wasm';
+
+const FRAME_MS = 1000 / 60.0988;
+const BUTTON = { A: 1, B: 2, SELECT: 4, START: 8, UP: 16, DOWN: 32, LEFT: 64, RIGHT: 128 } as const;
+const KEYS: Record<string, number> = {
+  ArrowUp: BUTTON.UP,
+  ArrowDown: BUTTON.DOWN,
+  ArrowLeft: BUTTON.LEFT,
+  ArrowRight: BUTTON.RIGHT,
+  KeyW: BUTTON.UP,
+  KeyS: BUTTON.DOWN,
+  KeyA: BUTTON.LEFT,
+  KeyD: BUTTON.RIGHT,
+  KeyX: BUTTON.A,
+  KeyK: BUTTON.A,
+  KeyZ: BUTTON.B,
+  KeyJ: BUTTON.B,
+  Enter: BUTTON.START,
+  ShiftRight: BUTTON.SELECT,
+  ShiftLeft: BUTTON.SELECT,
+  Backspace: BUTTON.SELECT,
 };
-const games = [
-  { id: 'bloom', name: 'Nonogram', genre: 'NONOGRAM', color: '#b8c5db', symbol: '▦', description: 'Sixteen logic puzzles. Fill the grid using the clues.', controls: 'Arrows move · Z fills · X marks · Shift undoes · Enter next puzzle', song: 'Quiet Patterns', mapper: 'NROM' },
-  { id: 'starstring', name: 'Starstring', genre: 'RHYTHM', color: '#b5a3f8', symbol: '♫', description: 'Chase the melody through a neon night.', controls: 'Arrows hit / hold · Shift difficulty · Enter starts / pauses / retries', song: 'Moonlight Circuit', mapper: 'MMC3' },
-  { id: 'skythread', name: 'Skythread', genre: 'PLATFORMER', color: '#8dcbef', symbol: '▲', description: 'A small climber. An impossible-looking ascent.', controls: 'Arrows move · Z jumps · X dashes · Enter restarts', song: 'Above the Clouds', mapper: 'MMC1' },
-  { id: 'emberkeep', name: 'Emberkeep', genre: 'ROGUELIKE', color: '#f2bb76', symbol: '◆', description: 'Keep your lantern alive. Find the stairs.', controls: 'Arrows move / attack · Z waits · X potion · Enter pauses / new run', song: 'The Last Lantern', mapper: 'UxROM' },
-  { id: 'chess', name: 'NESted Chess', genre: 'CHESS', color: '#e8c37a', symbol: '♞', description: 'A complete chess engine on a 32 KiB NROM cartridge.', controls: 'Arrows move · Z selects / moves · X cancels / moves now · Shift flips · Enter menu', song: 'Silence of the Clock', mapper: 'NROM' },
-];
-const app = document.querySelector<HTMLDivElement>('#app')!;
+
+function store(key: string, value?: string): string | null {
+  try {
+    if (value === undefined) return localStorage.getItem(key);
+    localStorage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable; preferences are a convenience.
+  }
+  return null;
+}
+
+// -------------------------------------------------------------------- page
+
+const app = document.getElementById('app')!;
 app.innerHTML = `
-<header class="header"><a class="brand" href="./" aria-label="NESted home"><span class="brand-mark">N</span><strong>NESted</strong></a><select id="game-select" aria-label="Cartridge">${games.map(g=>`<option value="${g.id}">${g.name} · ${g.mapper}</option>`).join('')}</select><button id="build" class="primary" title="Build & run (Ctrl/Cmd+Enter)">${icons.play} Build</button><label class="optimize" title="Optimize generated machine code"><input id="optimize" type="checkbox" checked/><span>Optimize</span></label><nav><select id="layout-select" aria-label="Workspace layout"><option value="workbench">Workbench</option><option value="play">Play</option><option value="code">Code & output</option></select><a href="https://github.com/nathsou/NESted/blob/main/docs/language.md" target="_blank" rel="noreferrer">Guide</a><a href="https://github.com/nathsou/NESted/tree/main/extension" target="_blank" rel="noreferrer">VS Code</a><a href="https://github.com/nathsou/NESted" target="_blank" rel="noreferrer">GitHub</a></nav></header>
-<nav class="mobile-tabs" aria-label="Workspace pane"><button data-pane="editor" class="active" aria-pressed="true">Source</button><button data-pane="player" aria-pressed="false">Game</button><button data-pane="inspector" aria-pressed="false">Output</button></nav>
-<main class="workspace">
-<section class="panel editor-panel"><div class="panel-toolbar"><div class="file-label"><span class="file-icon">N</span><span id="filename">bloom.nst</span><span id="dirty" title="Source changed since the last build"></span></div><div class="toolbar-actions"><button id="reset-source" title="Restore the bundled example; your previous draft can be restored">Reset example</button><label class="asset-upload">Open source<input id="source-file" type="file" accept=".nst,text/plain" hidden/></label></div></div><div class="editor-wrap"><div id="line-numbers" class="line-numbers" aria-hidden="true"></div><div class="code-area"><pre id="highlight" aria-hidden="true"></pre><textarea id="source" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="NESted source editor" wrap="off"></textarea></div><div id="completion" class="completion" hidden></div><div id="hover" class="hover-card" hidden></div></div><div class="editor-footer"><span id="cursor">Ln 1, Col 1</span><span>LSP <i id="lsp-led"></i></span><button id="format" title="Format (Shift+Alt+F)">Format</button><button id="save-source" title="Save .nst source">Save source</button></div><div class="console"><div class="console-title"><span>BUILD OUTPUT</span><span id="build-time"></span></div><div id="messages" role="status"><span class="muted">Loading the Rust/WASM compiler…</span></div></div></section>
-<div class="pane-divider" data-divider="0" role="separator" tabindex="0" aria-label="Resize source pane" aria-orientation="vertical"></div>
-<section class="panel player-panel"><div class="panel-toolbar"><div class="panel-heading"><span class="small-dot"></span> GAME</div><div class="toolbar-actions"><button id="pause" class="icon-button" title="Pause / play">${icons.pause}</button><button id="step" class="icon-button" title="Advance one emulated frame">${icons.arrow}</button><button id="reset" class="icon-button" title="Reset cartridge">${icons.reset}</button></div></div><div class="player-content"><div class="cartridge-meta"><span id="mapper-badge">NROM · NES</span><span><i class="running-dot"></i><span id="run-status">INITIALIZING</span></span></div><div class="screen-shell"><canvas id="screen" width="256" height="240" tabindex="0" aria-label="NES game screen. Click to play with the keyboard."></canvas><div id="screen-loading">Loading cartridge…</div></div><div class="play-hint">Click the screen for keyboard controls <span>${icons.arrow}</span></div><div class="game-caption"><span id="genre-label">NONOGRAM</span><h1 id="game-title">Nonogram</h1><p id="game-description">Sixteen logic puzzles.</p></div><div class="controller"><div class="dpad"><button data-button="16" class="up" aria-label="Up">▲</button><button data-button="64" class="left" aria-label="Left"><svg viewBox="0 0 12 12"><path d="M9 1L2 6l7 5z"/></svg></button><span class="middle"></span><button data-button="128" class="right" aria-label="Right"><svg viewBox="0 0 12 12"><path d="M3 1l7 5-7 5z"/></svg></button><button data-button="32" class="down" aria-label="Down">▼</button></div><div class="controller-middle"><button data-button="4">SELECT</button><button data-button="8">START</button></div><div class="ab-buttons"><button data-button="2"><span>X</span>B</button><button data-button="1"><span>Z</span>A</button></div></div><p id="controls" class="controls">Arrows move · Z fills · X marks · Shift undoes · Enter next puzzle</p><div class="audio-strip"><button id="sound" title="Enable original NES APU audio">♫ <span>Enable sound</span></button><span id="song-name">Quiet Patterns</span><span class="audio-bars"><i></i><i></i><i></i><i></i><i></i></span></div><div class="player-links"><button id="download-rom">${icons.download} Download .nes</button><label class="asset-upload">Add assets<input id="assets" type="file" multiple hidden/></label></div></div><div class="emulator-footer"><span id="fps">— fps</span><span id="pc">PC $0000</span><span>NESSY CORE</span></div></section>
-<div class="pane-divider" data-divider="1" role="separator" tabindex="0" aria-label="Resize game pane" aria-orientation="vertical"></div>
-<section class="panel inspector-panel"><div class="panel-toolbar inspector-tabs"><button class="active" data-inspector="assembly">Assembly</button><button data-inspector="passes">Passes</button><button data-inspector="memory">Memory</button></div><div class="inspector-subhead"><span id="inspector-title">6502 · FINAL MACHINE CODE</span><select id="pass-select" aria-label="Compiler pass" hidden></select><span id="instruction-cost">cycles</span></div><div id="inspector-code" class="inspector-code" tabindex="0"></div><div id="memory-view" class="memory-view" hidden></div><div class="inspector-footer"><span id="code-size">— bytes</span><span id="inspect-note">Cycle ranges exclude DMA & interrupts</span></div></section>
+<header class="topbar">
+  <a class="brand" href="https://github.com/nathsou/NESted" target="_blank" rel="noopener" title="NESted on GitHub">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="var(--accent)"/><path d="M7 24V8h4l10 10V8h4v16h-4L11 14v10z" fill="var(--bg)"/></svg>
+    <span>NESted</span>
+  </a>
+  <button id="project-button" class="project-button" aria-haspopup="dialog" title="Open a project (Ctrl+O)">
+    <span id="project-name">Loading…</span><span id="project-board" class="badge"></span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+  </button>
+  <div class="spacer"></div>
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+  <button id="build" class="primary" title="Build and run (Ctrl+Enter)" disabled>
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg><span>Run</span>
+  </button>
+  <div class="menu-wrap">
+    <button id="more" class="icon" aria-haspopup="menu" aria-expanded="false" title="More">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1.4" fill="currentColor"/><circle cx="8" cy="8" r="1.4" fill="currentColor"/><circle cx="13" cy="8" r="1.4" fill="currentColor"/></svg>
+    </button>
+    <div id="menu" class="menu" role="menu" hidden>
+      <button role="menuitem" data-action="download">Download ROM (.nes)</button>
+      <button role="menuitem" data-action="export">Download sources</button>
+      <button role="menuitem" data-action="format">Format file <kbd>Shift+Alt+F</kbd></button>
+      <label class="check" role="menuitemcheckbox"><input type="checkbox" id="optimize" checked> Optimize</label>
+      <hr>
+      <button role="menuitem" data-action="restore">Restore example</button>
+      <button role="menuitem" data-action="shortcuts">Keyboard shortcuts</button>
+      <a role="menuitem" href="https://github.com/nathsou/NESted/blob/main/docs/language.md" target="_blank" rel="noopener">Language guide ↗</a>
+    </div>
+  </div>
+</header>
+<main class="workspace" data-pane="code">
+  <aside class="files" aria-label="Project files">
+    <div class="files-head">
+      <span>Files</span>
+      <button class="icon small" data-action="new-file" title="New module" aria-label="New module"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6"/></svg></button>
+      <button class="icon small" data-action="upload" title="Add an asset (tiles, maps, data)" aria-label="Add an asset"><svg viewBox="0 0 16 16"><path d="M8 11V3M4.5 6.5 8 3l3.5 3.5M3 13h10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+      <input type="file" id="upload" multiple hidden>
+    </div>
+    <ul id="file-list" class="file-list"></ul>
+  </aside>
+  <section class="editor-pane" aria-label="Editor">
+    <div id="tabs" class="tabs" role="tablist"></div>
+    <div id="editor" class="editor-host"></div>
+    <div id="asset" class="asset-view" hidden></div>
+  </section>
+  <div class="divider" id="divider" role="separator" aria-orientation="vertical" tabindex="0" title="Drag to resize"></div>
+  <section class="side" aria-label="Console">
+    <div class="player">
+      <div class="screen-wrap" id="screen-wrap">
+        <canvas id="screen" width="256" height="240" tabindex="0" aria-label="NES screen. Click to play with the keyboard."></canvas>
+        <div id="overlay" class="overlay"></div>
+      </div>
+      <div class="controls">
+        <button id="pause" class="icon" title="Pause (Space when the screen has focus)" aria-label="Pause"></button>
+        <button id="step" class="icon" title="Advance one frame" aria-label="Advance one frame"><svg viewBox="0 0 16 16"><path d="M3 3v10l7-5zM11 3h2v10h-2z" fill="currentColor"/></svg></button>
+        <button id="reset" class="icon" title="Reset the console" aria-label="Reset"><svg viewBox="0 0 16 16"><path d="M3.5 8a4.5 4.5 0 1 0 1.4-3.3M3.5 2.5v3h3" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+        <span class="sep"></span>
+        <button id="save-state" class="text" title="Save the machine state (F5)">Save</button>
+        <button id="load-state" class="text" title="Restore the saved state (F8)" disabled>Load</button>
+        <span class="spacer"></span>
+        <button id="sound" class="icon" title="Sound" aria-label="Sound"></button>
+        <button id="fullscreen" class="icon" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 16 16"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+      </div>
+      <div class="pad" id="pad" aria-hidden="true">
+        <div class="dpad">
+          <button data-button="16" class="up"></button><button data-button="64" class="left"></button><button data-button="128" class="right"></button><button data-button="32" class="down"></button>
+        </div>
+        <div class="meta"><button data-button="4">SELECT</button><button data-button="8">START</button></div>
+        <div class="ab"><button data-button="2">B</button><button data-button="1">A</button></div>
+      </div>
+      <p class="hint" id="input-hint">Click the screen, then play with <kbd>←↑↓→</kbd> <kbd>X</kbd> A <kbd>Z</kbd> B <kbd>Enter</kbd> Start <kbd>Shift</kbd> Select. Gamepads work too.</p>
+    </div>
+    <div class="inspector">
+      <div class="inspector-tabs" role="tablist" id="inspector-tabs"></div>
+      <div class="inspector-body" id="inspector-body"></div>
+    </div>
+  </section>
 </main>
-<footer class="statusbar"><div><span class="status-dot"></span><span id="status">Starting the workbench</span></div><div><span id="ram-status">RAM —</span><span id="zp-status">ZERO PAGE —</span><span id="rom-status">ROM —</span><span class="target-label">RICOH 2A03 / NTSC</span></div></footer>
-<dialog id="rename-dialog"><form method="dialog"><h2>Rename symbol</h2><input id="rename-input" aria-label="New symbol name"/><div><button value="cancel">Cancel</button><button class="primary" id="rename-submit" value="rename">Rename</button></div></form></dialog>
-`;
+<nav class="mobile-nav" aria-label="Views">
+  <button data-pane="code">Code</button><button data-pane="play">Play</button><button data-pane="inspect">Inspect</button>
+</nav>
+<dialog id="projects" class="projects" aria-label="Projects">
+  <form method="dialog" class="dialog-head"><h2>Open a project</h2><button class="icon" value="close" aria-label="Close">✕</button></form>
+  <div class="dialog-body">
+    <section><h3>Example cartridges</h3><div id="examples" class="cards"></div></section>
+    <section><h3>New project</h3>
+      <div class="new-row"><label>Name <input id="new-name" value="My Game" maxlength="40"></label></div>
+      <div id="boards" class="boards"></div>
+    </section>
+    <section id="mine-section"><h3>Your projects</h3><ul id="mine" class="mine"></ul></section>
+  </div>
+</dialog>
+<dialog id="shortcuts" class="shortcuts">
+  <form method="dialog" class="dialog-head"><h2>Keyboard shortcuts</h2><button class="icon" value="close" aria-label="Close">✕</button></form>
+  <div class="dialog-body"><table>
+    <tr><td><kbd>Ctrl</kbd> <kbd>Enter</kbd> / <kbd>Ctrl</kbd> <kbd>S</kbd></td><td>Build and run</td></tr>
+    <tr><td><kbd>Ctrl</kbd> <kbd>O</kbd></td><td>Open a project</td></tr>
+    <tr><td><kbd>F12</kbd> or <kbd>Ctrl</kbd>+click</td><td>Go to definition</td></tr>
+    <tr><td><kbd>F2</kbd></td><td>Rename symbol</td></tr>
+    <tr><td><kbd>Shift</kbd> <kbd>Alt</kbd> <kbd>F</kbd></td><td>Format file</td></tr>
+    <tr><td><kbd>Ctrl</kbd> <kbd>Space</kbd></td><td>Complete</td></tr>
+    <tr><td><kbd>Ctrl</kbd> <kbd>F</kbd></td><td>Find</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Leave the screen and return to the editor</td></tr>
+    <tr><td><kbd>Space</kbd> (screen focused)</td><td>Pause or resume</td></tr>
+    <tr><td><kbd>F5</kbd> / <kbd>F8</kbd></td><td>Save / load state</td></tr>
+  </table></div>
+</dialog>`;
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const editor = $<HTMLTextAreaElement>('source');
-const highlight = $('highlight');
-const canvas = $<HTMLCanvasElement>('screen');
-const ctx = canvas.getContext('2d', { alpha: false })!;
+const screen = $<HTMLCanvasElement>('screen');
+const ctx = screen.getContext('2d', { alpha: false })!;
 const image = ctx.createImageData(256, 240);
+const overlay = $('overlay');
+const statusEl = $('status');
+const buildButton = $<HTMLButtonElement>('build');
+const workspace = document.querySelector<HTMLElement>('.workspace')!;
+
+const ICONS = {
+  pause: '<svg viewBox="0 0 16 16"><path d="M4 3h3v10H4zM9 3h3v10H9z" fill="currentColor"/></svg>',
+  play: '<svg viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>',
+  sound: '<svg viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.5 3.5a6 6 0 0 1 0 9" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>',
+  mute: '<svg viewBox="0 0 16 16"><path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor"/><path d="M11 6l4 4M15 6l-4 4" stroke="currentColor" stroke-width="1.4"/></svg>',
+};
+
+// ----------------------------------------------------------------- workers
+
 const compiler = new Worker(new URL('./compiler.worker.ts', import.meta.url), { type: 'module' });
 const emulator = new Worker(new URL('./emulator.worker.ts', import.meta.url), { type: 'module' });
-let gameIndex = 0;
-let sourceVersion = 0;
-let builtVersion = -1;
-let build: Build | null = null;
-let rom: ArrayBuffer | null = null;
-let ram = new Uint8Array(2048);
-let rpcId = 1;
-let assetId = 10000;
-let buildId = 20000;
-let busy = false;
-let framePending = false;
-let playing = true;
-let cartridgeLoaded = false;
-let buttons = 0;
+
+let sequence = 1;
+const pending = new Map<number, (value: unknown) => void>();
+const lspPending = new Map<number, (value: unknown) => void>();
+
+const lsp: LspClient = {
+  request(method, params) {
+    const id = sequence++;
+    return new Promise((resolve) => {
+      lspPending.set(id, resolve);
+      compiler.postMessage({ kind: 'lsp', message: { jsonrpc: '2.0', id, method, params } });
+    });
+  },
+  notify(method, params) {
+    compiler.postMessage({ kind: 'lsp', message: { jsonrpc: '2.0', method, params } });
+  },
+};
+
+function call<T>(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
+  const id = sequence++;
+  return new Promise((resolve) => {
+    pending.set(id, resolve as (v: unknown) => void);
+    compiler.postMessage({ ...message, id }, transfer);
+  });
+}
+
+compiler.onmessage = (event) => {
+  const m = event.data;
+  switch (m.kind) {
+    case 'lsp':
+      for (const msg of m.messages as { id?: number; method?: string; params?: { uri: string; diagnostics: never[] }; result?: unknown }[]) {
+        if (msg.id !== undefined && lspPending.has(msg.id)) {
+          lspPending.get(msg.id)!(msg.result ?? null);
+          lspPending.delete(msg.id);
+        } else if (msg.method === 'textDocument/publishDiagnostics' && msg.params) {
+          const path = pathOf(msg.params.uri);
+          if (path) {
+            editor.setDiagnostics(path, msg.params.diagnostics);
+            liveProblems.set(path, msg.params.diagnostics.length);
+            renderFiles();
+          }
+        }
+      }
+      break;
+    case 'compiled':
+    case 'formatted':
+    case 'error':
+      if (m.id !== undefined && pending.has(m.id)) {
+        pending.get(m.id)!(m);
+        pending.delete(m.id);
+      } else if (m.kind === 'error') console.error(m.message);
+      break;
+  }
+};
+
+const uri = (path: string) => `file:///project/${path}`;
+function pathOf(u: string): string | null {
+  return u.startsWith('file:///project/') ? decodeURIComponent(u.slice('file:///project/'.length)) : null;
+}
+
+// ------------------------------------------------------------------ editor
+
+let project: Project | null = null;
+let openTabs: string[] = [];
+let current = '';
+const liveProblems = new Map<string, number>();
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let dirtySinceBuild = false;
+
+const editor = new Editor($('editor'), {
+  lsp,
+  uri,
+  pathOf,
+  open: (loc) => openFile(loc.path, loc.line, loc.character),
+  changed(path, text) {
+    const f = project?.files.find((x) => x.path === path);
+    if (!f) return;
+    f.text = text;
+    dirtySinceBuild = true;
+    scheduleSave();
+    showStatus();
+  },
+  async format(text) {
+    const r = await call<{ text: string }>({ kind: 'format', text, tab: 4 });
+    return r.text ?? text;
+  },
+  applyEdits(changes) {
+    for (const [u, edits] of Object.entries(changes)) {
+      const path = pathOf(u);
+      if (path && project?.files.some((f) => f.path === path)) editor.edit(path, edits);
+    }
+  },
+});
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => project && saveProject(project), 400);
+}
+
+// ------------------------------------------------------------------- files
+
+function fileIcon(path: string) {
+  if (path.endsWith('.nst')) return 'nst';
+  if (path.endsWith('.chr')) return 'chr';
+  return 'bin';
+}
+
+function renderFiles() {
+  const list = $('file-list');
+  list.replaceChildren();
+  if (!project) return;
+  for (const f of project.files) {
+    const problems = liveProblems.get(f.path) ?? 0;
+    const item = el(
+      'li',
+      { class: `file ${f.path === current ? 'active' : ''}`, title: f.path },
+      el(
+        'button',
+        { class: 'file-open', onclick: () => openFile(f.path) },
+        el('span', { class: `ficon ${fileIcon(f.path)}`, text: fileIcon(f.path) === 'nst' ? '{}' : fileIcon(f.path) === 'chr' ? '▦' : '01' }),
+        el('span', { class: 'fname', text: f.path }),
+        problems ? el('span', { class: 'fproblems', text: String(problems) }) : null,
+        f.data ? el('span', { class: 'fsize', text: bytes(f.data.length) }) : null,
+      ),
+      f.path === 'main.nst'
+        ? null
+        : el(
+            'span',
+            { class: 'factions' },
+            el('button', { class: 'icon tiny', title: `Rename ${f.path}`, 'aria-label': `Rename ${f.path}`, text: '✎', onclick: () => renameFile(f.path) }),
+            el('button', { class: 'icon tiny', title: `Delete ${f.path}`, 'aria-label': `Delete ${f.path}`, text: '✕', onclick: () => removeFile(f.path) }),
+          ),
+    );
+    list.append(item);
+  }
+}
+
+function renderTabs() {
+  const tabs = $('tabs');
+  tabs.replaceChildren();
+  for (const path of openTabs) {
+    const tab = el(
+      'div',
+      { class: `tab ${path === current ? 'active' : ''}`, role: 'tab', 'aria-selected': String(path === current) },
+      el('button', { class: 'tab-name', text: path.split('/').pop()!, title: path, onclick: () => openFile(path) }),
+      openTabs.length > 1 ? el('button', { class: 'tab-close', 'aria-label': `Close ${path}`, text: '×', onclick: () => closeTab(path) }) : null,
+    );
+    tabs.append(tab);
+  }
+}
+
+function closeTab(path: string) {
+  const i = openTabs.indexOf(path);
+  openTabs = openTabs.filter((p) => p !== path);
+  if (current === path && openTabs.length) openFile(openTabs[Math.max(0, i - 1)]);
+  else renderTabs();
+}
+
+function openFile(path: string, line?: number, character = 0) {
+  if (!project) return;
+  const f = project.files.find((x) => x.path === path);
+  if (!f) {
+    // A definition inside the standard library: show it read-only.
+    if (path.startsWith('std/') || path.startsWith('<std>')) return;
+    return;
+  }
+  if (!openTabs.includes(path)) openTabs.push(path);
+  current = path;
+  project.open = path;
+  const asset = $('asset');
+  const host = $('editor');
+  if (f.text !== undefined) {
+    asset.hidden = true;
+    host.hidden = false;
+    editor.show(path);
+    if (line !== undefined) editor.goto(line, character);
+  } else {
+    host.hidden = true;
+    asset.hidden = false;
+    showAsset(asset, f);
+  }
+  if (innerWidth <= 800) setPane('code');
+  renderTabs();
+  renderFiles();
+}
+
+function showAsset(root: HTMLElement, f: ProjectFile) {
+  const data = f.data!;
+  root.replaceChildren(el('div', { class: 'asset-head' }, el('strong', { text: f.path }), el('span', { text: ` ${bytes(data.length)}` })));
+  if (f.path.endsWith('.chr') || data.length === 8192 || data.length === 4096) {
+    const tiles = Math.floor(data.length / 16);
+    const rows = Math.ceil(tiles / 16);
+    const canvas = el('canvas', { width: 128, height: rows * 8, class: 'pixel chr' });
+    const c = canvas.getContext('2d')!;
+    const img = c.createImageData(128, rows * 8);
+    const shades = [NES_COLORS[0x0f], NES_COLORS[0x00], NES_COLORS[0x10], NES_COLORS[0x30]];
+    for (let t = 0; t < tiles; t++)
+      for (let y = 0; y < 8; y++)
+        for (let x = 0; x < 8; x++) {
+          const v = ((data[t * 16 + y] >> (7 - x)) & 1) | (((data[t * 16 + y + 8] >> (7 - x)) & 1) << 1);
+          const o = (((t >> 4) * 8 + y) * 128 + (t & 15) * 8 + x) * 4;
+          const s = shades[v];
+          img.data.set([s[0], s[1], s[2], 255], o);
+        }
+    c.putImageData(img, 0, 0);
+    root.append(el('p', { class: 'muted', text: `${tiles} tiles, shown in grey. Reference this file with asset("${f.path}") or as the cartridge's chr.` }), canvas);
+  } else {
+    const lines: string[] = [];
+    for (let i = 0; i < Math.min(data.length, 1024); i += 16) {
+      const row = Array.from(data.subarray(i, i + 16));
+      lines.push(`${hex(i, 4)}  ${row.map((b) => hex(b)).join(' ').padEnd(48)}  ${row.map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('')}`);
+    }
+    if (data.length > 1024) lines.push('…');
+    root.append(el('p', { class: 'muted', text: `Use it with asset("${f.path}") or asset("${f.path}", start..end).` }), el('pre', { class: 'code hexdump', text: lines.join('\n') }));
+  }
+}
+
+async function newFile() {
+  if (!project) return;
+  let name = prompt('Module path, e.g. enemies.nst or world/map.nst', 'module.nst');
+  if (!name) return;
+  name = name.trim().replace(/^\/+/, '');
+  if (!name.endsWith('.nst')) name += '.nst';
+  if (!/^[a-z_][a-z0-9_]*(\/[a-z_][a-z0-9_]*)*\.nst$/.test(name)) {
+    alert('Module paths use lowercase letters, digits and underscores, with / between folders.');
+    return;
+  }
+  if (project.files.some((f) => f.path === name)) return openFile(name);
+  const file = blankModule(name);
+  project.files.push(file);
+  sortFiles();
+  editor.addFile(name, file.text!);
+  scheduleSave();
+  openFile(name);
+}
+
+async function upload(files: FileList) {
+  if (!project) return;
+  for (const file of Array.from(files)) {
+    if (file.size > 1024 * 1024) {
+      alert(`${file.name} is larger than 1 MiB.`);
+      continue;
+    }
+    const isSource = file.name.endsWith('.nst');
+    const path = isSource ? file.name : `assets/${file.name}`;
+    const data = new Uint8Array(await file.arrayBuffer());
+    const existing = project.files.find((f) => f.path === path);
+    const entry: ProjectFile = isSource ? { path, text: new TextDecoder().decode(data) } : { path, data };
+    if (existing) Object.assign(existing, entry);
+    else project.files.push(entry);
+    compiler.postMessage({ kind: 'files', reset: false, files: [{ path, data: entry.text ?? entry.data! }] });
+    if (isSource) {
+      if (existing) editor.setText(path, entry.text!);
+      else editor.addFile(path, entry.text!);
+    }
+  }
+  sortFiles();
+  scheduleSave();
+  renderFiles();
+}
+
+async function removeFile(path: string) {
+  if (!project || !confirm(`Delete ${path}?`)) return;
+  project.files = project.files.filter((f) => f.path !== path);
+  openTabs = openTabs.filter((p) => p !== path);
+  liveProblems.delete(path);
+  scheduleSave();
+  await loadWorkspace(false);
+  openFile(openTabs[0] ?? 'main.nst');
+}
+
+async function renameFile(path: string) {
+  if (!project) return;
+  const next = prompt(`Rename ${path} to`, path)?.trim();
+  if (!next || next === path || project.files.some((f) => f.path === next)) return;
+  if (path.endsWith('.nst') !== next.endsWith('.nst')) {
+    alert('Keep the extension: sources end in .nst.');
+    return;
+  }
+  const f = project.files.find((x) => x.path === path)!;
+  f.path = next;
+  openTabs = openTabs.map((p) => (p === path ? next : p));
+  liveProblems.delete(path);
+  sortFiles();
+  scheduleSave();
+  await loadWorkspace(false);
+  openFile(next);
+}
+
+function sortFiles() {
+  const rank = (p: string) => (p === 'main.nst' ? 0 : p.endsWith('.nst') ? 1 : 2);
+  project?.files.sort((a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path));
+}
+
+/** Send every file to the compiler worker and reopen the language server. */
+async function loadWorkspace(keepTabs: boolean) {
+  if (!project) return;
+  compiler.postMessage({ kind: 'files', reset: true, files: project.files.map((f) => ({ path: f.path, data: f.text ?? f.data! })) });
+  editor.clear();
+  current = '';
+  editor.path = '';
+  await lsp.request('initialize', { capabilities: {}, rootUri: 'file:///project/' });
+  lsp.notify('initialized', {});
+  for (const f of project.files) if (f.text !== undefined) editor.addFile(f.path, f.text);
+  if (!keepTabs) openTabs = openTabs.filter((p) => project!.files.some((f) => f.path === p));
+  renderFiles();
+}
+
+// ------------------------------------------------------------------- build
+
+let report: Report | null = null;
+let rom: Uint8Array | null = null;
+let building = false;
+
+function showStatus(text?: string, kind = '') {
+  if (text !== undefined) {
+    statusEl.textContent = text;
+    statusEl.className = `status ${kind}`;
+  }
+  statusEl.classList.toggle('stale', dirtySinceBuild && !building);
+  statusEl.title = dirtySinceBuild ? 'Edited since the last build. Press Run to rebuild.' : '';
+}
+
+async function build(run = true): Promise<Report | null> {
+  if (!project || building) return report;
+  building = true;
+  buildButton.disabled = true;
+  editor.flush();
+  showStatus('Building…', 'busy');
+  // Sources may have changed; send them before compiling.
+  compiler.postMessage({ kind: 'files', reset: false, files: project.files.filter((f) => f.text !== undefined).map((f) => ({ path: f.path, data: f.text! })) });
+  const optimize = $<HTMLInputElement>('optimize').checked;
+  const result = await call<{ report: Report; rom: ArrayBuffer | null; ms: number; message?: string; kind: string }>({ kind: 'compile', entry: 'main.nst', optimize });
+  building = false;
+  buildButton.disabled = false;
+  dirtySinceBuild = false;
+  if (result.kind === 'error') {
+    showStatus('Compiler crashed', 'error');
+    console.error(result.message);
+    return null;
+  }
+  report = result.report;
+  for (const p of panels) p.build?.(report);
+  updateBadges();
+  if (report.ok && result.rom) {
+    rom = new Uint8Array(result.rom);
+    const warnings = report.diagnostics.filter((d) => d.severity === 'warning').length;
+    showStatus(`${report.board} · ${bytes(report.romBytes ?? rom.length)} · ${Math.round(result.ms)} ms${warnings ? ` · ${warnings} warning${warnings > 1 ? 's' : ''}` : ''}`, 'ok');
+    if (run) await boot();
+  } else {
+    const errors = report.diagnostics.filter((d) => d.severity === 'error').length;
+    showStatus(`${errors || 'Build'} error${errors === 1 ? '' : 's'}`, 'error');
+    showPanel('problems');
+    const first = report.diagnostics.find((d) => d.severity === 'error');
+    if (first && project.files.some((f) => f.path === first.file)) openFile(first.file, first.line, first.column);
+  }
+  return report;
+}
+
+// ---------------------------------------------------------------- emulator
+
+let generation = 0;
+let running = false;
+let inFlight = false;
 let frames = 0;
-let fpsFrames = 0;
-let fpsStart = performance.now();
-let lastFrame = 0;
-let debounce: ReturnType<typeof setTimeout>;
-let diagnostics: Diagnostic[] = [];
-let inspector = 'assembly';
-let passIndex = 6;
-let sound = false;
-let audioContext: AudioContext | null = null;
-let audioNode: AudioWorkletNode | null = null;
-let currentUri = '';
-let originalSource = '';
-let previousDraft: string | null = null;
-let emulationVersion = 0;
-let loadingGame = false;
-const requests = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-const assetRequests = new Map<number, () => void>();
-let compilePending: Promise<Build> | null = null;
-let compileResolver: ((report: Build) => void) | null = null;
-let frameResolver: (() => void) | null = null;
-function escape(s: string): string { return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'); }
-function pos(offset: number): Position { const s=editor.value.slice(0,offset).split('\n');return {line:s.length-1,character:s.at(-1)!.length}; }
-function off(p: Position): number { const lines=editor.value.split('\n');let n=0;for(let i=0;i<Math.min(p.line,lines.length);i++)n+=lines[i].length+1;return n+p.character; }
-function updateCursor(): void { const p=pos(editor.selectionStart);$('cursor').textContent=`Ln ${p.line+1}, Col ${p.character+1}`; }
-function plainHighlight(): void {
-  const text=editor.value;
-  const regex=/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b(fn|var|let|const|if|else|for|in|while|loop|return|break|continue|asm|raw|match|cartridge|true|false)\b|\b(u8|i8|u16|i16|bool|void)\b|\b(0x[\da-fA-F_]+|0b[01_]+|\d[\d_]*)\b|(@\w+)/g;
-  let html='';let end=0;for(const m of text.matchAll(regex)){html+=escape(text.slice(end,m.index));const type=m[1]?'comment':m[2]?'string':m[3]?'keyword':m[4]?'type':m[5]?'number':'attribute';html+=`<span class="tok-${type}">${escape(m[0])}</span>`;end=m.index!+m[0].length;}highlight.innerHTML=html+escape(text.slice(end))+'\n';
-  $('line-numbers').innerHTML=Array.from({length:text.split('\n').length},(_,i)=>`<span>${i+1}</span>`).join('');
-  syncScroll();
-}
-function syncScroll():void { highlight.scrollTop=editor.scrollTop;highlight.scrollLeft=editor.scrollLeft;$('line-numbers').scrollTop=editor.scrollTop; }
-function syncDocument():void{clearTimeout(debounce);if(currentUri)compiler.postMessage({kind:'rpc',body:{jsonrpc:'2.0',method:'textDocument/didChange',params:{textDocument:{uri:currentUri,version:sourceVersion},contentChanges:[{text:editor.value}]}}});}
-function rpc(method:string,params:unknown,notification=false):Promise<unknown>{
-  if(method.startsWith('textDocument/')&&!['textDocument/didOpen','textDocument/didClose','textDocument/didChange'].includes(method))syncDocument();
-  if(notification){compiler.postMessage({kind:'rpc',body:{jsonrpc:'2.0',method,params}});return Promise.resolve(null);}
-  const id=rpcId++;return new Promise((resolve,reject)=>{requests.set(id,{resolve,reject});compiler.postMessage({kind:'rpc',body:{jsonrpc:'2.0',id,method,params}});});
-}
-function documentParams(extra:Record<string,unknown>={}):Record<string,unknown>{return{textDocument:{uri:currentUri},...extra};}
-function changed():void {
-  sourceVersion++;$('dirty').textContent='●';plainHighlight();updateCursor();
-  try{localStorage.setItem(`nested-source-${games[gameIndex].id}`,editor.value);}catch{/* Storage may be disabled. */}
-  clearTimeout(debounce);debounce=setTimeout(()=>{void rpc('textDocument/didChange',{textDocument:{uri:currentUri,version:sourceVersion},contentChanges:[{text:editor.value}]},true);},100);
-}
-function messages(values:Diagnostic[],summary?:string):void {
-  const box=$('messages');box.replaceChildren();
-  if(summary){const line=document.createElement('div');line.className='build-success';line.textContent=summary;box.append(line);}
-  for(const d of values.slice(0,8)){const button=document.createElement('button');button.className='diagnostic';button.textContent=`${d.range.start.line+1}:${d.range.start.character+1}  ${d.message}`;button.onclick=()=>goto(d.range);box.append(button);}
-  if(values.length===0&&!summary)box.innerHTML='<span class="muted">No diagnostics. The language server is ready.</span>';
-}
-function goto(range:Range):void { editor.focus();editor.setSelectionRange(off(range.start),off(range.end));editor.scrollTop=Math.max(0,(range.start.line-8)*21);syncScroll();updateCursor(); }
-function renderInspector():void {
-  if(!build?.ok)return;
-  const view=$('inspector-code');const memory=$('memory-view');view.hidden=inspector==='memory';memory.hidden=inspector!=='memory';$<HTMLSelectElement>('pass-select').hidden=inspector!=='passes';$('instruction-cost').hidden=inspector!=='assembly';
-  if(inspector==='memory'){ $('inspector-title').textContent='CPU RAM · LIVE VALUES';renderMemory(); }
-  else {const selected=inspector==='assembly'?build.passes.at(-1)!:build.passes[passIndex];$('inspector-title').textContent=inspector==='assembly'?'6502 · FINAL MACHINE CODE':'PIPELINE · INSPECT EVERY STAGE';view.innerHTML=selected.text.split('\n').map(line=>{
-    if(inspector==='assembly')return `<div>${escape(line).replace(/^([A-F\d]{4})/, '<span class="asm-address">$1</span>').replace(/(;.*)$/, '<span class="asm-comment">$1</span>').replace(/\b(lda|ldx|ldy|sta|stx|sty|adc|sbc|and|ora|eor|asl|lsr|rol|ror|cmp|cpx|cpy|beq|bne|bcc|bcs|bmi|bpl|jmp|jsr|rts|rti|clc|sec|pha|pla|tax|tay|txa|tya|inc|dec|inx|dex|iny|dey)\b/g,'<span class="asm-op">$1</span>')}</div>`;
-    return `<div>${escape(line)||' '}</div>`;
-  }).join('');}
-  $('code-size').textContent=`${build.codeBytes.toLocaleString()} bytes of fixed code/data`;
-  $('inspect-note').textContent=inspector==='assembly'?'Cycle ranges exclude DMA & interrupts':inspector==='memory'?'Static frames share storage':'Snapshots from this exact build';
-}
-function renderMemory():void {
-  if(!build?.ok)return;const data=build.memory.filter(m=>m.kind!=='static frame (overlaid)');
-  $('memory-view').innerHTML=`<div class="memory-summary"><strong>${build.ramBytes}<small>B</small></strong><span>COMPILER STORAGE<br/><b>${build.frameBytes} B</b> shared function frames</span></div><div class="memory-columns"><span>SYMBOL</span><span>ADDRESS</span><span>VALUE</span></div>`+data.map(m=>`<div class="memory-row"><span title="${escape(m.name)}">${escape(m.name)}</span><code>$${m.address.toString(16).toUpperCase().padStart(4,'0')}</code><b>${m.size<=2?ram[m.address]+(m.size===2?ram[m.address+1]*256:0):`[${m.size}]`}</b></div>`).join('')+`<div class="memory-note">${build.zeroPageBytes} B allocated in zero page.<br/>OAM, runtime scratch, VRAM queue, and the hardware stack have separate reservations.</div>`;
-}
-async function compileSource():Promise<Build>{
-  if(busy&&compilePending)return compilePending;busy=true;$<HTMLSelectElement>('game-select').disabled=true;const button=$<HTMLButtonElement>('build');button.disabled=true;button.innerHTML='<span class="spinner"></span> Building';$('status').textContent='Compiling source to an NES cartridge';
-  clearTimeout(debounce);void rpc('textDocument/didChange',{textDocument:{uri:currentUri,version:sourceVersion},contentChanges:[{text:editor.value}]},true);
-  compilePending=new Promise(resolve=>{compileResolver=resolve;compiler.postMessage({kind:'compile',source:editor.value,optimize:$<HTMLInputElement>('optimize').checked,id:buildId++,version:sourceVersion});});return compilePending;
-}
-compiler.onmessage=(event:MessageEvent)=>{
-  const m=event.data;
-  if(m.kind==='rpc'){for(const message of m.messages as Rpc[]){if(message.id!==undefined){const pending=requests.get(message.id);requests.delete(message.id);if(message.error)pending?.reject(new Error(message.error.message));else pending?.resolve(message.result);}else if(message.method==='textDocument/publishDiagnostics'){const params=message.params as {uri:string;version?:number;diagnostics:Diagnostic[]};if(params.uri===currentUri&&(params.version===undefined||params.version===sourceVersion)){diagnostics=params.diagnostics;$('lsp-led').classList.add('ready');if(!busy&&builtVersion!==sourceVersion)messages(diagnostics);}}}}
-  if(m.kind==='asset'){assetRequests.get(m.id)?.();assetRequests.delete(m.id);}
-  if(m.kind==='compiled'){
-    busy=false;$<HTMLSelectElement>('game-select').disabled=loadingGame;$<HTMLButtonElement>('build').disabled=false;$('build').innerHTML=`${icons.play} Build`;
-    const report=m.report as Build;if(report.ok){build=report;rom=m.rom;builtVersion=m.version;$('dirty').textContent=builtVersion===sourceVersion?'':'●';$('build-time').textContent=`${m.elapsed.toFixed(1)} ms`;
-      const o=report.optimizations;messages([],`✓ Real NES ROM · ${o.constantFolds} folds · ${o.inlined} inlined calls · ${o.machine} machine transforms`);
-      const select=$<HTMLSelectElement>('pass-select');select.replaceChildren(...report.passes.map((p,i)=>{const option=document.createElement('option');option.value=String(i);option.textContent=p.name;return option;}));select.value=String(Math.min(passIndex,report.passes.length-1));
-      $('ram-status').textContent=`RAM ${report.ramBytes} B`;$('zp-status').textContent=`ZERO PAGE ${report.zeroPageBytes} B`;$('rom-status').textContent=`ROM ${(report.romBytes/1024).toFixed(1)} KiB`;
-      $('status').textContent='Build complete · compiled locally in Rust/WASM';renderInspector();cartridgeLoaded=false;frames=0;framePending=false;emulationVersion++;frameResolver?.();frameResolver=null;audioNode?.port.postMessage({reset:true});emulator.postMessage({kind:'load',id:emulationVersion,rom:rom!.slice(0),sampleRate:audioContext?.sampleRate??48000});
-    }else{messages(report.diagnostics??[],report.error?`Build failed: ${report.error}`:undefined);$('status').textContent='Build failed · showing the previous cartridge';}
-    compileResolver?.(report);compileResolver=null;
-  }
-  if(m.kind==='error'){busy=false;$<HTMLSelectElement>('game-select').disabled=loadingGame;$<HTMLButtonElement>('build').disabled=false;$('build').innerHTML=`${icons.play} Build`;messages([],`Compiler worker error: ${m.message}`);for(const pending of requests.values())pending.reject(new Error(m.message));requests.clear();compileResolver?.({ok:false,error:m.message} as Build);compileResolver=null;}
-};
-emulator.onmessage=(event:MessageEvent)=>{
-  const m=event.data;if(m.id!==undefined&&m.id!==emulationVersion)return;
-  if(m.kind==='loaded'){cartridgeLoaded=true;playing=true;lastFrame=performance.now();$('screen-loading').hidden=true;$('run-status').textContent='RUNNING';$('pause').innerHTML=icons.pause;}
-  if(m.kind==='frame'){
-    framePending=false;frames+=m.count;fpsFrames+=playing?m.count:0;ram=new Uint8Array(m.ram);
-    const rgb=new Uint8Array(m.pixels);for(let i=0,j=0;i<rgb.length;i+=3,j+=4){image.data[j]=rgb[i];image.data[j+1]=rgb[i+1];image.data[j+2]=rgb[i+2];image.data[j+3]=255;}ctx.putImageData(image,0,0);
-    if(sound&&audioNode&&playing)audioNode.port.postMessage({samples:new Float32Array(m.audio)},[m.audio]);
-    $('pc').textContent=`PC $${m.pc.toString(16).toUpperCase().padStart(4,'0')}`;if(inspector==='memory')renderMemory();frameResolver?.();frameResolver=null;
-  }
-  if(m.kind==='error'){framePending=false;playing=false;frameResolver?.();frameResolver=null;messages([],`Emulator error: ${m.message}`);$('run-status').textContent='ERROR';}
-};
-function frame(count=1,input=buttons):void { if(cartridgeLoaded&&!framePending){framePending=true;emulator.postMessage({kind:'frame',id:emulationVersion,buttons:input,count});} }
-function gamepad():number {const pad=navigator.getGamepads?.()[0];if(!pad)return 0;let v=0;for(const [i,mask]of [[0,1],[1,2],[8,4],[9,8],[12,16],[13,32],[14,64],[15,128]])if(pad.buttons[i]?.pressed)v|=mask;if(pad.axes[0]<-0.4)v|=64;if(pad.axes[0]>0.4)v|=128;if(pad.axes[1]<-0.4)v|=16;if(pad.axes[1]>0.4)v|=32;return v;}
-function animate(now:number):void {
-  if(playing&&cartridgeLoaded&&!document.hidden&&!framePending){const interval=1000/60.0988;const due=Math.floor((now-lastFrame)/interval);if(due>0){const count=Math.min(due,3);lastFrame=due>3?now:lastFrame+count*interval;frame(count,buttons|gamepad());}}
-  if(now-fpsStart>=1000){$('fps').textContent=playing?`${Math.round(fpsFrames*1000/(now-fpsStart))} fps`:'paused';fpsFrames=0;fpsStart=now;}
-  requestAnimationFrame(animate);
-}
-function setPlaying(value:boolean):void { playing=value;lastFrame=performance.now();$('pause').innerHTML=value?icons.pause:icons.play;$('run-status').textContent=value?'RUNNING':'PAUSED';audioNode?.port.postMessage({reset:true}); }
-async function enableSound():Promise<void>{
-  if(!audioContext){audioContext=new AudioContext({sampleRate:48000});await audioContext.audioWorklet.addModule(new URL('audio-worklet.js',document.baseURI));audioNode=new AudioWorkletNode(audioContext,'nes-audio');audioNode.connect(audioContext.destination);}
-  await audioContext.resume();sound=!sound;$('sound').innerHTML=`♫ <span>${sound?'Sound on':'Sound off'}</span>`;$('sound').classList.toggle('enabled',sound);document.querySelector('.audio-bars')!.classList.toggle('active',sound);if(!sound)audioNode?.port.postMessage({reset:true});
-}
-async function loadGame(index:number):Promise<void>{
-  if(index<0||index>=games.length)throw new Error('Unknown cartridge');
-  if(busy||loadingGame)return;loadingGame=true;$<HTMLSelectElement>('game-select').disabled=true;clearTimeout(debounce);buttons=0;previousDraft=null;$('reset-source').textContent='Reset example';const oldUri=currentUri;gameIndex=index;const g=games[index];$<HTMLSelectElement>('game-select').value=g.id;const url=new URL(location.href);url.searchParams.set('game',g.id);history.replaceState(null,'',url);document.documentElement.style.setProperty('--game-accent',g.color);
+let lastTime = 0;
+let accumulator = 0;
+let saved: ArrayBuffer | null = null;
+let machine: Machine | null = null;
+let stepRequest = 0;
+let crashed = '';
+const pressed = new Set<string>();
+let touchButtons = 0;
+
+const audioContext: AudioContext | null = (() => {
   try {
-  document.querySelectorAll('.game-tab').forEach((tab,i)=>tab.classList.toggle('active',i===index));$('filename').textContent=`${g.id}.nst`;$('game-title').textContent=g.name;$('genre-label').textContent=`0${index+1} / ${g.genre}`;$('game-description').textContent=g.description;$('controls').textContent=g.controls;$('song-name').textContent=g.song;$('mapper-badge').textContent=`${g.mapper} · NES`;
-  if(oldUri)await rpc('textDocument/didClose',{textDocument:{uri:oldUri}},true);
-  currentUri=`file:///games/${g.id}.nst`;let saved:string|null=null;try{saved=localStorage.getItem(`nested-source-${g.id}`);}catch{/* Optional persistence. */}
-  const response=await fetch(new URL(`examples/${g.id}.nst`,document.baseURI));if(!response.ok)throw new Error(`Could not load ${g.id}.nst`);originalSource=await response.text();editor.value=saved??originalSource;sourceVersion++;builtVersion=-1;editor.scrollTop=0;editor.scrollLeft=0;editor.setSelectionRange(0,0);plainHighlight();updateCursor();
-  await rpc('textDocument/didOpen',{textDocument:{uri:currentUri,languageId:'nested',version:sourceVersion,text:editor.value}},true);await compileSource();
-  } finally {loadingGame=false;$<HTMLSelectElement>('game-select').disabled=false;}
+    return new AudioContext({ latencyHint: 'interactive' });
+  } catch {
+    return null;
+  }
+})();
+let audioNode: AudioWorkletNode | null = null;
+let soundOn = store('nested.sound') !== 'off';
+const audioReady = (async () => {
+  if (!audioContext) return;
+  try {
+    await audioContext.audioWorklet.addModule(new URL('audio-worklet.js', document.baseURI).href);
+    audioNode = new AudioWorkletNode(audioContext, 'nes-audio', { outputChannelCount: [2] });
+    audioNode.connect(audioContext.destination);
+  } catch (error) {
+    console.warn('Audio is unavailable', error);
+  }
+})();
+
+function unlockAudio() {
+  if (soundOn && audioContext && audioContext.state !== 'running') void audioContext.resume();
 }
-function download(data:Blob,name:string):void {const a=document.createElement('a');a.href=URL.createObjectURL(data);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
-$('build').onclick=()=>void compileSource();$('pause').onclick=()=>setPlaying(!playing);$('step').onclick=()=>{setPlaying(false);frame();};$('reset').onclick=()=>{emulator.postMessage({kind:'reset',id:emulationVersion});frames=0;audioNode?.port.postMessage({reset:true});};$('sound').onclick=()=>void enableSound().catch(e=>messages([],`Audio could not start: ${e}`));
-$('download-rom').onclick=()=>{if(rom)download(new Blob([rom],{type:'application/octet-stream'}),`${games[gameIndex].id}.nes`);};$('save-source').onclick=()=>download(new Blob([editor.value],{type:'text/plain'}),`${games[gameIndex].id}.nst`);
-$('format').onclick=()=>void rpc('textDocument/formatting',documentParams({options:{tabSize:4,insertSpaces:true}})).then(edits=>{applyEdits(edits as {range:Range;newText:string}[]);});
-$<HTMLSelectElement>('pass-select').onchange=event=>{passIndex=Number((event.target as HTMLSelectElement).value);renderInspector();};
-$<HTMLSelectElement>('game-select').onchange=event=>void loadGame(games.findIndex(g=>g.id===(event.target as HTMLSelectElement).value)).catch(e=>messages([],String(e)));
-document.querySelectorAll<HTMLButtonElement>('[data-inspector]').forEach(tab=>tab.onclick=()=>{inspector=tab.dataset.inspector!;document.querySelectorAll('[data-inspector]').forEach(t=>t.classList.toggle('active',t===tab));renderInspector();});
-editor.oninput=changed;editor.onscroll=syncScroll;editor.onclick=updateCursor;editor.onkeyup=updateCursor;
-canvas.onkeydown=event=>{const key=event.key.toLowerCase();const mask=keyMask(key);if(mask){buttons|=mask;event.preventDefault();}if(key==='escape'){setPlaying(!playing);event.preventDefault();}};
-canvas.onkeyup=event=>{const mask=keyMask(event.key.toLowerCase());if(mask){buttons&=~mask;event.preventDefault();}};canvas.onblur=()=>buttons=0;window.onblur=()=>{buttons=0;document.querySelectorAll('.pressed').forEach(b=>b.classList.remove('pressed'));audioNode?.port.postMessage({reset:true});};document.addEventListener('visibilitychange',()=>{buttons=0;lastFrame=performance.now();audioNode?.port.postMessage({reset:true});});
-function keyMask(key:string):number{return({arrowup:16,arrowdown:32,arrowleft:64,arrowright:128,z:1,x:2,shift:4,enter:8}as Record<string,number>)[key]??0;}
-document.querySelectorAll<HTMLButtonElement>('[data-button]').forEach(button=>{const mask=Number(button.dataset.button);button.onpointerdown=event=>{button.setPointerCapture(event.pointerId);buttons|=mask;button.classList.add('pressed');event.preventDefault();};const release=()=>{buttons&=~mask;button.classList.remove('pressed');};button.onlostpointercapture=release;button.onpointerup=release;button.onpointercancel=release;});
-let completionItems:{label:string;detail?:string}[]=[];let completionIndex=0;
-function showCompletions():void {const popup=$('completion');popup.hidden=false;popup.innerHTML=completionItems.map((item,i)=>`<button class="${i===completionIndex?'selected':''}" data-index="${i}"><strong>${escape(item.label)}</strong><small>${escape(item.detail??'')}</small></button>`).join('');popup.querySelectorAll<HTMLButtonElement>('button').forEach(button=>button.onmousedown=event=>{event.preventDefault();acceptCompletion(Number(button.dataset.index));});}
-function acceptCompletion(index=completionIndex):void{const value=completionItems[index];if(!value)return;const end=editor.selectionStart;const prefix=editor.value.slice(0,end).match(/[a-zA-Z_][\w]*$/)?.[0]??'';editor.setRangeText(value.label,end-prefix.length,end,'end');$('completion').hidden=true;changed();}
-async function complete():Promise<void>{const result=await rpc('textDocument/completion',documentParams({position:pos(editor.selectionStart)}))as{items:{label:string;detail?:string}[]};const prefix=editor.value.slice(0,editor.selectionStart).match(/[a-zA-Z_][\w]*$/)?.[0]??'';completionItems=result.items.filter(item=>item.label.startsWith(prefix)).slice(0,9);completionIndex=0;showCompletions();}
-function applyEdits(edits:{range:Range;newText:string}[]):void {if(!edits?.length)return;const values=edits.map(e=>({start:off(e.range.start),end:off(e.range.end),text:e.newText})).sort((a,b)=>b.start-a.start);const selection=editor.selectionStart;let text=editor.value;for(const e of values)text=text.slice(0,e.start)+e.text+text.slice(e.end);editor.value=text;editor.setSelectionRange(Math.min(selection,text.length),Math.min(selection,text.length));changed();}
-editor.onkeydown=event=>{
-  if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();void compileSource();}
-  if((event.ctrlKey||event.metaKey)&&event.code==='Space'){event.preventDefault();void complete();}
-  if((event.ctrlKey||event.metaKey)&&event.key==='s'){event.preventDefault();$('save-source').click();}
-  if(event.shiftKey&&event.altKey&&event.key.toLowerCase()==='f'){event.preventDefault();$('format').click();}
-  if(event.key==='F12'){event.preventDefault();void rpc('textDocument/definition',documentParams({position:pos(editor.selectionStart)})).then(v=>{if(v)goto((v as {range:Range}).range);});}
-  if(event.key==='F2'){event.preventDefault();void rpc('textDocument/prepareRename',documentParams({position:pos(editor.selectionStart)})).then(v=>{if(v){$<HTMLInputElement>('rename-input').value=(v as {placeholder:string}).placeholder;$<HTMLDialogElement>('rename-dialog').showModal();}});}
-  if(!$('completion').hidden){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();completionIndex=(completionIndex+(event.key==='ArrowDown'?1:completionItems.length-1))%completionItems.length;showCompletions();}if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();acceptCompletion();}if(event.key==='Escape')$('completion').hidden=true;}
-  else if(event.key==='Enter'){event.preventDefault();const prefix=editor.value.slice(0,editor.selectionStart).split('\n').at(-1)!;const indent=prefix.match(/^\s*/)?.[0]??'';editor.setRangeText('\n'+indent+(prefix.trimEnd().endsWith('{')?'    ':''),editor.selectionStart,editor.selectionEnd,'end');changed();}
-  else if(event.key==='Tab'){event.preventDefault();editor.setRangeText('    ',editor.selectionStart,editor.selectionEnd,'end');changed();}
+
+async function boot() {
+  if (!rom) return;
+  await audioReady;
+  generation++;
+  crashed = '';
+  saved = null;
+  $<HTMLButtonElement>('load-state').disabled = true;
+  const copy = rom.slice().buffer;
+  emulator.postMessage({ kind: 'load', generation, rom: copy, sampleRate: audioContext?.sampleRate ?? 48000 }, [copy]);
+  audioNode?.port.postMessage({ reset: true });
+  frames = 0;
+  setRunning(true);
+}
+
+function setRunning(on: boolean) {
+  running = on;
+  accumulator = 0;
+  lastTime = performance.now();
+  $('pause').innerHTML = on ? ICONS.pause : ICONS.play;
+  $('pause').title = on ? 'Pause (Space when the screen has focus)' : 'Resume (Space when the screen has focus)';
+  $('pause').setAttribute('aria-label', on ? 'Pause' : 'Resume');
+  updateOverlay();
+}
+
+function updateOverlay() {
+  overlay.replaceChildren();
+  overlay.className = 'overlay';
+  if (crashed) {
+    overlay.classList.add('show', 'error');
+    overlay.append(el('strong', { text: 'The console stopped' }), el('span', { text: crashed }));
+  } else if (!rom) {
+    overlay.classList.add('show');
+    overlay.append(el('span', { text: report && !report.ok ? 'Fix the errors and press Run.' : 'Press Run to build the cartridge.' }));
+  } else if (!running) {
+    overlay.classList.add('show', 'paused');
+    overlay.append(el('strong', { text: 'Paused' }), el('span', { text: `Frame ${frames}` }));
+  }
+}
+
+function gamepadButtons(): number {
+  let b = 0;
+  for (const pad of navigator.getGamepads?.() ?? []) {
+    if (!pad) continue;
+    const on = (i: number) => pad.buttons[i]?.pressed;
+    if (on(0)) b |= BUTTON.A;
+    if (on(1) || on(2)) b |= BUTTON.B;
+    if (on(8)) b |= BUTTON.SELECT;
+    if (on(9)) b |= BUTTON.START;
+    if (on(12) || pad.axes[1] < -0.5) b |= BUTTON.UP;
+    if (on(13) || pad.axes[1] > 0.5) b |= BUTTON.DOWN;
+    if (on(14) || pad.axes[0] < -0.5) b |= BUTTON.LEFT;
+    if (on(15) || pad.axes[0] > 0.5) b |= BUTTON.RIGHT;
+  }
+  return b;
+}
+
+function buttons(): number {
+  let b = touchButtons | gamepadButtons();
+  for (const k of pressed) b |= KEYS[k] ?? 0;
+  // Opposite directions at once confuse many games.
+  if ((b & (BUTTON.LEFT | BUTTON.RIGHT)) === (BUTTON.LEFT | BUTTON.RIGHT)) b &= ~(BUTTON.LEFT | BUTTON.RIGHT);
+  if ((b & (BUTTON.UP | BUTTON.DOWN)) === (BUTTON.UP | BUTTON.DOWN)) b &= ~(BUTTON.UP | BUTTON.DOWN);
+  return b;
+}
+
+function wantsPpu(): boolean {
+  return activePanel?.wantsPpu === true && inspectorVisible();
+}
+
+function requestFrames(count: number, input = buttons()) {
+  inFlight = true;
+  emulator.postMessage({ kind: 'frames', generation, buttons: input, count, ppu: wantsPpu() && (frames % 6 === 0 || !running) });
+}
+
+function tick(now: number) {
+  requestAnimationFrame(tick);
+  if (!rom || inFlight || crashed) return;
+  if (stepRequest > 0) {
+    const n = stepRequest;
+    stepRequest = 0;
+    requestFrames(n, stepButtons);
+    return;
+  }
+  if (!running) return;
+  accumulator += Math.min(100, now - lastTime);
+  lastTime = now;
+  const due = Math.floor(accumulator / FRAME_MS);
+  if (due < 1) return;
+  accumulator -= due * FRAME_MS;
+  requestFrames(Math.min(due, 4));
+}
+requestAnimationFrame(tick);
+
+let stepButtons = 0;
+let stepResolve: (() => void) | null = null;
+
+emulator.onmessage = (event) => {
+  const m = event.data;
+  switch (m.kind) {
+    case 'frame': {
+      if (m.generation !== generation) {
+        inFlight = false;
+        return;
+      }
+      inFlight = false;
+      frames += m.count;
+      const rgb = new Uint8Array(m.pixels);
+      const out = image.data;
+      for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
+        out[j] = rgb[i];
+        out[j + 1] = rgb[i + 1];
+        out[j + 2] = rgb[i + 2];
+        out[j + 3] = 255;
+      }
+      ctx.putImageData(image, 0, 0);
+      if (soundOn && running && audioNode && audioContext?.state === 'running') audioNode.port.postMessage({ samples: new Float32Array(m.audio) });
+      machine = { ram: new Uint8Array(m.ram), pc: m.pc, ppu: m.ppu ? new Uint8Array(m.ppu) : (machine?.ppu ?? null), oam: m.oam ? new Uint8Array(m.oam) : (machine?.oam ?? null), regs: m.regs ?? machine?.regs ?? 0 };
+      if (m.error) {
+        crashed = String(m.error).replace(/^\{"error":"|"\}$/g, '');
+        setRunning(false);
+      }
+      if (inspectorVisible() && activePanel?.frame && (frames % 3 < m.count || !running)) activePanel.frame(machine);
+      if (!running) updateOverlay();
+      stepResolve?.();
+      stepResolve = null;
+      break;
+    }
+    case 'saved':
+      saved = m.state;
+      $<HTMLButtonElement>('load-state').disabled = false;
+      flash('State saved');
+      break;
+    case 'error':
+      inFlight = false;
+      crashed = m.message;
+      setRunning(false);
+      break;
+  }
 };
-$<HTMLDialogElement>('rename-dialog').onclose=()=>{if($<HTMLDialogElement>('rename-dialog').returnValue==='rename')void rpc('textDocument/rename',documentParams({position:pos(editor.selectionStart),newName:$<HTMLInputElement>('rename-input').value})).then(value=>{const changes=(value as{changes?:Record<string,{range:Range;newText:string}[]>})?.changes;applyEdits(changes?.[currentUri]??[]);}).catch(e=>messages([],String(e)));};
-let hoverTimer:ReturnType<typeof setTimeout>;
-editor.onmousemove=event=>{clearTimeout(hoverTimer);const bounds=editor.getBoundingClientRect();const line=Math.floor((event.clientY-bounds.top+editor.scrollTop-16)/21);const measure=document.createElement('canvas').getContext('2d')!;measure.font=getComputedStyle(editor).font;const width=measure.measureText('M').width;const character=Math.max(0,Math.floor((event.clientX-bounds.left+editor.scrollLeft-12)/width));hoverTimer=setTimeout(()=>{void rpc('textDocument/hover',documentParams({position:{line:Math.max(0,line),character}})).then(value=>{const hover=$('hover');if(value){const text=(value as{contents:{value:string}}).contents.value;hover.textContent=text.replace(/```nested\n|```/g,'');hover.hidden=false;}else hover.hidden=true;});},350);};editor.onmouseleave=()=>{clearTimeout(hoverTimer);$('hover').hidden=true;};
-$<HTMLInputElement>('assets').onchange=async event=>{for(const file of Array.from((event.target as HTMLInputElement).files??[])){const id=assetId++;const data=await file.arrayBuffer();await new Promise<void>(resolve=>{assetRequests.set(id,resolve);compiler.postMessage({kind:'asset',id,name:`assets/${file.name}`,data},[data]);});}messages([], 'Custom assets loaded. Build to use them.');};
-async function initialize():Promise<void>{
-  const response=await fetch(new URL('nested.wasm',document.baseURI));if(!response.ok)throw new Error('Build the WASM module with npm run build');const module=await WebAssembly.compile(await response.arrayBuffer());
-  await Promise.all([compiler,emulator].map(worker=>new Promise<void>((resolve,reject)=>{const clean=()=>{clearTimeout(timer);worker.removeEventListener('message',ready);worker.removeEventListener('error',failed);};const failed=(event:ErrorEvent)=>{clean();reject(new Error(event.message||'Worker failed to initialize'));};const ready=(event:MessageEvent)=>{if(event.data.kind==='ready'){clean();resolve();}else if(event.data.kind==='error'){clean();reject(new Error(event.data.message));}};const timer=setTimeout(()=>{clean();reject(new Error('Worker initialization timed out'));},30000);worker.addEventListener('message',ready);worker.addEventListener('error',failed);worker.postMessage({kind:'init',module});})));
-  await rpc('initialize',{processId:null,rootUri:'file:///games',capabilities:{general:{positionEncodings:['utf-16']}}});await rpc('initialized',{},true);
-  const assets=['bloom.chr','bloom.pal','bloom.map','bloom.puzzles.bin','bloom.clues.bin','starstring.chr','starstring.pal','starstring.map','starstring.chart.bin','skythread.chr','skythread.pal','skythread.rooms.bin','skythread.collision.bin','emberkeep.chr','emberkeep.pal','emberkeep.map','chess.chr','chess.pal','chess.map','chess.pst.bin','chess.zobrist.bin','chess.lines.bin','chess.book.bin'];
-  for(let i=0;i<6;i++)assets.push(`skythread-${i}.map`);
-  await Promise.all(assets.map(async name=>{const r=await fetch(new URL(`assets/${name}`,document.baseURI));if(!r.ok)throw new Error(`Missing ${name}`);const data=await r.arrayBuffer();const id=assetId++;return new Promise<void>(resolve=>{assetRequests.set(id,resolve);compiler.postMessage({kind:'asset',name:`assets/${name}`,data,id},[data]);});}));
-  const requested=new URL(location.href).searchParams.get('game');const index=games.findIndex(g=>g.id===requested);await loadGame(index<0?0:index);requestAnimationFrame(animate);
+
+function flash(text: string) {
+  const note = el('div', { class: 'toast', text });
+  $('screen-wrap').append(note);
+  setTimeout(() => note.remove(), 1200);
 }
-// Compact panes stay available at every width; desktop dividers are draggable.
-app.dataset.layout='workbench';app.dataset.pane='editor';
-let paneSizes:number[]|null=null;
-function fitScreen():void{const content=document.querySelector<HTMLElement>('.player-content')!;const shell=document.querySelector<HTMLElement>('.screen-shell')!;const scale=Math.max(1,Math.min(3,Math.floor(Math.min(content.clientWidth-24,(content.clientHeight-160)*256/240)/256)));shell.style.width=`${scale*256+2}px`;}
-new ResizeObserver(fitScreen).observe(document.querySelector('.player-content')!);
-function setLayout(value:string):void{app.dataset.layout=value;paneSizes=null;document.querySelector<HTMLElement>('.workspace')!.style.removeProperty('grid-template-columns');try{localStorage.setItem('nested-layout',value);}catch{}requestAnimationFrame(fitScreen);}
-$<HTMLSelectElement>('layout-select').onchange=event=>setLayout((event.target as HTMLSelectElement).value);
-document.querySelectorAll<HTMLButtonElement>('[data-pane]').forEach(button=>button.onclick=()=>{app.dataset.pane=button.dataset.pane;document.querySelectorAll<HTMLButtonElement>('[data-pane]').forEach(b=>{b.classList.toggle('active',b===button);b.setAttribute('aria-pressed',String(b===button));});requestAnimationFrame(fitScreen);});
-function resizePane(index:number,delta:number):void{const work=document.querySelector<HTMLElement>('.workspace')!;const editorPanel=document.querySelector<HTMLElement>('.editor-panel')!;const playerPanel=document.querySelector<HTMLElement>('.player-panel')!;const width=work.clientWidth-12;if(app.dataset.layout!=='workbench')return;const sizes=paneSizes??[editorPanel.getBoundingClientRect().width,playerPanel.getBoundingClientRect().width];if(index===0)sizes[0]=Math.max(260,Math.min(width-sizes[1]-220,sizes[0]+delta));else sizes[1]=Math.max(276,Math.min(width-sizes[0]-220,sizes[1]+delta));paneSizes=sizes;work.style.gridTemplateColumns=`${sizes[0]}px 6px ${sizes[1]}px 6px minmax(0,1fr)`;}
-document.querySelectorAll<HTMLElement>('[data-divider]').forEach(handle=>{const index=Number(handle.dataset.divider);handle.onpointerdown=event=>{handle.setPointerCapture(event.pointerId);let last=event.clientX;handle.onpointermove=e=>{resizePane(index,e.clientX-last);last=e.clientX;};handle.onpointerup=()=>handle.onpointermove=null;};handle.onkeydown=event=>{if(['ArrowLeft','ArrowRight'].includes(event.key)){event.preventDefault();resizePane(index,event.key==='ArrowLeft'?-24:24);}};});
-window.addEventListener('resize',()=>{paneSizes=null;document.querySelector<HTMLElement>('.workspace')!.style.removeProperty('grid-template-columns');});
-$('reset-source').onclick=()=>{if(previousDraft===null){previousDraft=editor.value;editor.value=originalSource;$('reset-source').textContent='Restore draft';}else{editor.value=previousDraft;previousDraft=null;$('reset-source').textContent='Reset example';}changed();void compileSource();};
-$<HTMLInputElement>('source-file').onchange=async event=>{const input=event.target as HTMLInputElement;const file=input.files?.[0];if(file){if(file.size>2000000){messages([],'Source exceeds 2 MB');return;}previousDraft=editor.value;$('reset-source').textContent='Restore draft';editor.value=await file.text();changed();void compileSource();}input.value='';};
-try{const layout=localStorage.getItem('nested-layout');if(layout&&['workbench','play','code'].includes(layout)){$<HTMLSelectElement>('layout-select').value=layout;setLayout(layout);}}catch{}
-// Inspectable workbench API, also used by the browser integration test.
-Object.assign(window,{__nested:{get build(){return build;},get ram(){return ram;},get frames(){return frames;},get source(){return editor.value;},get ready(){return cartridgeLoaded;},rpc,loadGame,compile:compileSource,pause:()=>setPlaying(false),play:()=>setPlaying(true),setSource:(s:string)=>{editor.value=s;changed();},step:async(input=0,count=1)=>{setPlaying(false);while(framePending)await new Promise(r=>setTimeout(r,5));return new Promise<void>(resolve=>{frameResolver=resolve;frame(count,input);});},get canvas(){return canvas;}}});
-void initialize().catch(error=>{messages([],String(error));$('screen-loading').textContent='The workbench could not start';$('status').textContent='Startup error';});
+
+// ---------------------------------------------------------------- panels
+
+const panels: Panel[] = [
+  new Problems((file, line, column) => openFile(file, line, column)),
+  new Watch((address, value) => emulator.postMessage({ kind: 'poke', address, value })),
+  new Ppu(),
+  new Memory(),
+  new Listing(
+    (file, line) => openFile(file, line),
+    () => report?.lines,
+  ),
+  new Passes(),
+];
+let activePanel: Panel | null = null;
+
+function inspectorVisible(): boolean {
+  return innerWidth > 800 || workspace.dataset.pane === 'inspect';
+}
+
+function updateBadges() {
+  for (const p of panels) {
+    const tab = document.querySelector<HTMLElement>(`[data-panel="${p.id}"] .count`);
+    if (tab) {
+      const b = p.badge?.() ?? '';
+      tab.textContent = b;
+      tab.hidden = !b;
+      tab.classList.toggle('error', !!report?.diagnostics.some((d) => d.severity === 'error'));
+    }
+  }
+}
+
+function showPanel(id: string) {
+  const p = panels.find((x) => x.id === id) ?? panels[0];
+  activePanel = p;
+  store('nested.panel', p.id);
+  document.querySelectorAll<HTMLElement>('[data-panel]').forEach((t) => {
+    t.classList.toggle('active', t.dataset.panel === p.id);
+    t.setAttribute('aria-selected', String(t.dataset.panel === p.id));
+  });
+  $('inspector-body').replaceChildren(p.root);
+  if (machine && p.frame) {
+    if (p.wantsPpu && rom && !inFlight) requestFrames(0);
+    p.frame(machine);
+  }
+}
+
+for (const p of panels) {
+  $('inspector-tabs').append(el('button', { 'data-panel': p.id, role: 'tab', onclick: () => showPanel(p.id) }, p.title, el('span', { class: 'count', hidden: true })));
+}
+showPanel(store('nested.panel') ?? 'problems');
+
+// --------------------------------------------------------------- projects
+
+let examples: ExampleInfo[] = [];
+
+async function openProject(p: Project) {
+  if (project) {
+    clearTimeout(saveTimer);
+    await saveProject(project);
+  }
+  project = p;
+  sortFiles();
+  liveProblems.clear();
+  openTabs = [];
+  rom = null;
+  report = null;
+  generation++;
+  setRunning(false);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, 256, 240);
+  $('project-name').textContent = p.name;
+  $('project-board').textContent = BOARDS.find((b) => b.id === p.mapper)?.name ?? p.mapper;
+  document.title = `${p.name} · NESted`;
+  store('nested.last', p.id);
+  history.replaceState(null, '', p.example ? `#example=${p.example}` : `#project=${p.id}`);
+  document.querySelector<HTMLButtonElement>('[data-action="restore"]')!.hidden = !p.example;
+  await loadWorkspace(false);
+  openFile(p.open && p.files.some((f) => f.path === p.open) ? p.open : 'main.nst');
+  buildButton.disabled = false;
+  await build(true);
+}
+
+async function openExample(id: string, fresh = false) {
+  const info = examples.find((e) => e.id === id);
+  if (!info) return;
+  if (!fresh) {
+    const saved = (await listProjects()).find((p) => p.id === `example-${id}`);
+    if (saved) return openProject(saved);
+  }
+  showStatus('Loading example…', 'busy');
+  await openProject(await loadExample(info));
+}
+
+async function renderDialog() {
+  const cards = $('examples');
+  cards.replaceChildren(
+    ...examples.map((e) =>
+      el(
+        'button',
+        { class: 'card', onclick: () => ($<HTMLDialogElement>('projects').close(), openExample(e.id)) },
+        el('img', { src: `examples/${e.id}/preview.png`, alt: '', loading: 'lazy', onerror: (ev: Event) => ((ev.target as HTMLElement).style.visibility = 'hidden') }),
+        el('span', { class: 'card-title' }, el('strong', { text: e.title }), el('span', { class: 'badge', text: BOARDS.find((b) => b.id === e.mapper)?.name ?? e.mapper })),
+        el('span', { class: 'card-text', text: e.summary }),
+      ),
+    ),
+  );
+  const boards = $('boards');
+  boards.replaceChildren(
+    ...BOARDS.map((b) =>
+      el(
+        'button',
+        {
+          class: 'board',
+          onclick: async () => {
+            const name = ($<HTMLInputElement>('new-name').value.trim() || 'My Game').slice(0, 40);
+            $<HTMLDialogElement>('projects').close();
+            const p = await templateProject(b.id, name);
+            await saveProject(p);
+            await openProject(p);
+          },
+        },
+        el('strong', { text: b.name }),
+        el('span', { text: b.summary }),
+      ),
+    ),
+  );
+  const mine = (await listProjects()).filter((p) => p.id !== project?.id || true);
+  $('mine-section').hidden = !mine.length;
+  $('mine').replaceChildren(
+    ...mine.map((p) =>
+      el(
+        'li',
+        {},
+        el(
+          'button',
+          { class: 'mine-open', onclick: () => ($<HTMLDialogElement>('projects').close(), openProject(p)) },
+          el('strong', { text: p.name }),
+          el('span', { class: 'badge', text: BOARDS.find((b) => b.id === p.mapper)?.name ?? p.mapper }),
+          el('span', { class: 'muted', text: p.example ? 'edited example' : `${p.files.length} file${p.files.length > 1 ? 's' : ''}` }),
+          el('span', { class: 'muted when', text: new Date(p.updated).toLocaleDateString() }),
+        ),
+        el('button', {
+          class: 'icon tiny',
+          'aria-label': `Delete ${p.name}`,
+          title: p.example ? 'Discard your edits' : 'Delete project',
+          text: '✕',
+          onclick: async () => {
+            if (!confirm(p.example ? `Discard your edits to ${p.name}?` : `Delete ${p.name}? This cannot be undone.`)) return;
+            await deleteProject(p.id);
+            renderDialog();
+          },
+        }),
+      ),
+    ),
+  );
+}
+
+async function showProjects() {
+  if (project) await saveProject(project);
+  await renderDialog();
+  $<HTMLDialogElement>('projects').showModal();
+}
+
+// ------------------------------------------------------------------ layout
+
+function setPane(pane: string) {
+  workspace.dataset.pane = pane;
+  document.querySelectorAll<HTMLElement>('.mobile-nav [data-pane]').forEach((b) => b.classList.toggle('active', b.dataset.pane === pane));
+  if (pane === 'inspect' && activePanel) showPanel(activePanel.id);
+}
+document.querySelectorAll<HTMLElement>('.mobile-nav [data-pane]').forEach((b) => b.addEventListener('click', () => setPane(b.dataset.pane!)));
+setPane('code');
+
+{
+  const divider = $('divider');
+  const side = document.querySelector<HTMLElement>('.side')!;
+  const set = (w: number) => {
+    const max = Math.max(340, innerWidth - 520);
+    const width = Math.round(Math.max(320, Math.min(max, w)));
+    side.style.width = `${width}px`;
+    store('nested.side', String(width));
+  };
+  const savedWidth = Number(store('nested.side'));
+  if (savedWidth) set(savedWidth);
+  divider.addEventListener('pointerdown', (e) => {
+    divider.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) => set(innerWidth - ev.clientX);
+    const up = () => {
+      divider.removeEventListener('pointermove', move);
+      divider.removeEventListener('pointerup', up);
+    };
+    divider.addEventListener('pointermove', move);
+    divider.addEventListener('pointerup', up);
+  });
+  divider.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft') set(side.getBoundingClientRect().width + 24);
+    else if (e.key === 'ArrowRight') set(side.getBoundingClientRect().width - 24);
+    else return;
+    e.preventDefault();
+  });
+}
+
+// ------------------------------------------------------------------- input
+
+function screenFocused() {
+  return document.activeElement === screen;
+}
+
+addEventListener('keydown', (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && (e.key === 'Enter' || e.key === 's')) {
+    e.preventDefault();
+    void build(true);
+    return;
+  }
+  if (mod && e.key === 'o') {
+    e.preventDefault();
+    void showProjects();
+    return;
+  }
+  if (e.key === 'F5' && rom) {
+    e.preventDefault();
+    emulator.postMessage({ kind: 'save', slot: 0 });
+    return;
+  }
+  if (e.key === 'F8' && saved) {
+    e.preventDefault();
+    restoreState();
+    return;
+  }
+  if (!screenFocused()) return;
+  unlockAudio();
+  if (e.key === 'Escape') {
+    pressed.clear();
+    editor.view.focus();
+    return;
+  }
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (rom && !crashed) setRunning(!running);
+    return;
+  }
+  if (e.code in KEYS) {
+    e.preventDefault();
+    pressed.add(e.code);
+  }
+});
+addEventListener('keyup', (e) => pressed.delete(e.code));
+addEventListener('blur', () => pressed.clear());
+screen.addEventListener('blur', () => pressed.clear());
+screen.addEventListener('pointerdown', () => {
+  unlockAudio();
+  screen.focus();
+});
+document.addEventListener('pointerdown', unlockAudio, { once: true });
+
+// Touch controls: every finger can press any button it slides over.
+{
+  const pad = $('pad');
+  const touches = new Map<number, number>();
+  const update = () => {
+    touchButtons = 0;
+    for (const b of touches.values()) touchButtons |= b;
+    pad.querySelectorAll<HTMLElement>('[data-button]').forEach((x) => x.classList.toggle('pressed', (touchButtons & Number(x.dataset.button)) !== 0));
+  };
+  const hit = (e: PointerEvent) => {
+    const target = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    return Number(target?.closest<HTMLElement>('[data-button]')?.dataset.button ?? 0);
+  };
+  pad.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    unlockAudio();
+    pad.setPointerCapture(e.pointerId);
+    touches.set(e.pointerId, hit(e));
+    update();
+  });
+  pad.addEventListener('pointermove', (e) => {
+    if (!touches.has(e.pointerId)) return;
+    touches.set(e.pointerId, hit(e));
+    update();
+  });
+  const end = (e: PointerEvent) => {
+    touches.delete(e.pointerId);
+    update();
+  };
+  pad.addEventListener('pointerup', end);
+  pad.addEventListener('pointercancel', end);
+  pad.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+// ----------------------------------------------------------------- buttons
+
+function restoreState() {
+  if (!saved) return;
+  const copy = saved.slice(0);
+  emulator.postMessage({ kind: 'restore', state: copy }, [copy]);
+  crashed = '';
+  updateOverlay();
+  flash('State restored');
+  if (!running) stepFrames(0);
+}
+
+function stepFrames(n: number, input = 0): Promise<void> {
+  return new Promise((resolve) => {
+    stepButtons = input;
+    stepRequest = Math.max(stepRequest, n);
+    stepResolve = resolve;
+    if (n === 0 && !inFlight) {
+      requestFrames(0);
+    }
+  });
+}
+
+buildButton.addEventListener('click', () => {
+  unlockAudio();
+  void build(true);
+});
+$('project-button').addEventListener('click', () => void showProjects());
+$('pause').addEventListener('click', () => {
+  unlockAudio();
+  if (rom && !crashed) setRunning(!running);
+});
+$('step').addEventListener('click', () => {
+  if (!rom || crashed) return;
+  setRunning(false);
+  void stepFrames(1, buttons());
+});
+$('reset').addEventListener('click', () => {
+  unlockAudio();
+  if (!rom) return;
+  void boot();
+});
+$('save-state').addEventListener('click', () => rom && emulator.postMessage({ kind: 'save', slot: 0 }));
+$('load-state').addEventListener('click', restoreState);
+const soundButton = $('sound');
+const renderSound = () => {
+  soundButton.innerHTML = soundOn ? ICONS.sound : ICONS.mute;
+  soundButton.title = soundOn ? 'Sound on (click to mute)' : 'Sound off (click to unmute)';
+  soundButton.setAttribute('aria-pressed', String(soundOn));
+};
+soundButton.addEventListener('click', () => {
+  soundOn = !soundOn;
+  store('nested.sound', soundOn ? 'on' : 'off');
+  if (soundOn) unlockAudio();
+  else audioNode?.port.postMessage({ reset: true });
+  renderSound();
+});
+renderSound();
+$('fullscreen').addEventListener('click', () => {
+  const wrap = $('screen-wrap');
+  if (document.fullscreenElement) void document.exitFullscreen();
+  else void wrap.requestFullscreen?.();
+  screen.focus();
+});
+$('upload').addEventListener('change', (e) => {
+  const input = e.target as HTMLInputElement;
+  if (input.files) void upload(input.files);
+  input.value = '';
+});
+document.querySelector('[data-action="new-file"]')!.addEventListener('click', () => void newFile());
+document.querySelector('[data-action="upload"]')!.addEventListener('click', () => $('upload').click());
+
+// The overflow menu.
+{
+  const more = $('more');
+  const menu = $('menu');
+  const close = () => {
+    menu.hidden = true;
+    more.setAttribute('aria-expanded', 'false');
+  };
+  more.addEventListener('click', (e) => {
+    e.stopPropagation();
+    menu.hidden = !menu.hidden;
+    more.setAttribute('aria-expanded', String(!menu.hidden));
+  });
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target as Node)) close();
+  });
+  menu.addEventListener('click', async (e) => {
+    const action = (e.target as HTMLElement).closest<HTMLElement>('[data-action]')?.dataset.action;
+    if (!action) return;
+    close();
+    switch (action) {
+      case 'download':
+        if (!rom && !(await build(false))?.ok) return;
+        if (rom) download(rom, `${slug(project?.name ?? 'game')}.nes`, 'application/x-nes-rom');
+        break;
+      case 'export':
+        if (project) for (const f of project.files.filter((x) => x.text !== undefined)) download(new TextEncoder().encode(f.text), f.path.replaceAll('/', '_'), 'text/plain');
+        break;
+      case 'format':
+        if (current.endsWith('.nst')) await editor.format();
+        break;
+      case 'restore':
+        if (project?.example && confirm('Replace your edits with the original example?')) {
+          await deleteProject(project.id);
+          const id = project.example;
+          project = null;
+          await openExample(id, true);
+        }
+        break;
+      case 'shortcuts':
+        $<HTMLDialogElement>('shortcuts').showModal();
+        break;
+    }
+  });
+}
+
+function slug(s: string) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'game';
+}
+
+function download(data: Uint8Array, name: string, type: string) {
+  const url = URL.createObjectURL(new Blob([data as BlobPart], { type }));
+  const a = el('a', { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+addEventListener('beforeunload', () => {
+  if (project) void saveProject(project);
+});
+
+// ------------------------------------------------------------------ start
+
+declare global {
+  interface Window {
+    __nested: Record<string, unknown>;
+  }
+}
+
+async function start() {
+  showStatus('Loading compiler…', 'busy');
+  updateOverlay();
+  const response = await fetch('nested.wasm');
+  const module = await WebAssembly.compileStreaming(response).catch(async () => WebAssembly.compile(await (await fetch('nested.wasm')).arrayBuffer()));
+  const ready = (w: Worker) =>
+    new Promise<void>((resolve, reject) => {
+      const listener = (e: MessageEvent) => {
+        if (e.data.kind === 'ready') {
+          w.removeEventListener('message', listener);
+          resolve();
+        } else if (e.data.kind === 'error') reject(new Error(e.data.message));
+      };
+      w.addEventListener('message', listener);
+      w.postMessage({ kind: 'init', module });
+    });
+  await Promise.all([ready(compiler), ready(emulator)]);
+  examples = await loadExamples().catch(() => []);
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const mine = await listProjects();
+  const last = store('nested.last');
+  const wanted = hash.get('project') ?? (hash.get('example') ? null : last);
+  const fromHash = hash.get('example');
+  const existing = mine.find((p) => p.id === wanted);
+  if (fromHash) await openExample(fromHash);
+  else if (existing) await openProject(existing);
+  else if (examples.length) await openExample(examples[0].id);
+  else await openProject(await templateProject('nrom', 'My Game'));
+  if (!last) {
+    // First visit: point at the example picker.
+    $('project-button').classList.add('pulse');
+    setTimeout(() => $('project-button').classList.remove('pulse'), 4000);
+  }
+}
+
+window.__nested = {
+  get ready() {
+    return !!rom && running;
+  },
+  get frames() {
+    return frames;
+  },
+  get report() {
+    return report;
+  },
+  get ram() {
+    return machine?.ram;
+  },
+  get project() {
+    return project;
+  },
+  get crashed() {
+    return crashed;
+  },
+  examples: () => examples,
+  openExample: (id: string) => openExample(id),
+  newProject: async (board: string) => {
+    const p = await templateProject(board, `Test ${board}`);
+    await openProject(p);
+    return report;
+  },
+  build: () => build(true),
+  pause: () => setRunning(false),
+  resume: () => setRunning(true),
+  step: (input: number, n: number) => stepFrames(n, input),
+  source: (path = current) => editor.text(path),
+  setSource: (text: string, path = current) => editor.setText(path, text),
+  open: (path: string) => openFile(path),
+  rpc: (method: string, params: unknown) => {
+    editor.flush();
+    return lsp.request(method, params);
+  },
+  panel: (id: string) => showPanel(id),
+  pane: (id: string) => setPane(id),
+};
+
+start().catch((error) => {
+  console.error(error);
+  showStatus('Failed to start', 'error');
+  overlay.className = 'overlay show error';
+  overlay.replaceChildren(el('strong', { text: 'The playground could not start' }), el('span', { text: String(error) }));
+});

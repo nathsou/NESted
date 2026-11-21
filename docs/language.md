@@ -1,259 +1,353 @@
-# Writing a NESted cartridge
+# The NESted language
 
-Files use `.nst`. Comments are `//` or nested `/* ... */`. Identifiers are ASCII.
-Strings are literal-only assets or text; game text currently supports uppercase
-ASCII glyphs supplied by the game's CHR. Integer literals accept decimal,
-hexadecimal (`0x...`), binary (`0b...`) and underscores.
+NESted is a small, statically allocated language for one machine: the NES.
+A program is a **project**: a directory with `main.nst`, any other modules,
+and the assets they reference. The compiler turns it into a complete iNES ROM.
 
 ```nested
-cartridge "My game" {
-    mapper = mmc3;
-    region = ntsc;
+// main.nst
+cartridge {
+    title = "Hello";
+    mapper = nrom;
     mirroring = vertical;
-    chr = "assets/game.chr";
-    palette = "assets/game.pal";
-    screen = "assets/title.map";
+    chr = "assets/tiles.chr";
 }
-const TRACK: [u16; 4] = [213, 169, 142, 169];
-var ticks: u8 = 0;
-var player_x: u8 = 32;
 
-fn init() { tone(0, TRACK[0], 6); }
-fn update() {
-    ticks += 1;
-    if (buttons() & 128) != 0 { player_x += 1; }
-    sprite(0, player_x, 160, 148, 0);
-}
-```
+use std::video;
+use std::input;
 
-Compile with `nested build game.nst -o game.nes --emit artifacts/game`.
-The asset paths resolve relative to the source file in the CLI. Embedded users
-supply those keys and bytes through `Assets` instead.
+var x: u8 = 120;
 
-## Values and control flow
-
-`u8`, `i8`, `u16`, `i16` and `bool` have fixed widths. All integer arithmetic wraps
-at the operand width. Mixed-width operands require casts. `u8(300)` produces 44;
-`i8(255)` produces -1. `bool(x)` means nonzero. Signed division truncates toward
-zero, and signed remainder has the dividend's sign. Division and remainder
-require a nonzero compile-time divisor. Oversized unsigned shifts produce zero;
-signed right shifts extend the sign, including oversized shifts.
-
-Global `const` values reside in ROM or become immediate constants. Global `var`
-values reside in RAM and require compile-time initializers. Arrays accept
-lists, repetitions (`[0; 64]`) or constant byte assets (`asset("path")`, or
-`asset("path", offset)` to take the array's bytes from an offset, so one file
-can back several tables). Their
-length is fixed. Functions accept and return scalar values. Locals use `let`
-(immutable) or `var` (mutable), with optional inferred types.
-
-`if/else`, `while`, `for i in 0..64`, `loop`, `break`, `continue`, and `return`
-are available. There is no shadowing, and recursion only through
-`@recursive` (below). Function-local names must be unique even across separate
-blocks. Range ends are checked each iteration.
-Ordinary function arguments and compound-assignment indices evaluate once in
-source order. `&&` and `||` short-circuit.
-
-An index must be statically safe from a constant, a loop interval, a mask or a
-guard. Loop mutation, helper calls and wrapping arithmetic invalidate unsafe
-facts. Use `table[raw index]` for a programmer-owned indexing contract. A known
-constant out-of-bounds index is an error even with `raw`.
-
-## Match
-
-A selector is evaluated exactly once. Value arms return one common scalar type;
-block arms perform statements, with arm-local bindings and ordinary `return`,
-`break` and `continue` behavior. Do not mix value and block arms.
-
-```nested
-fn direction(pad: u8) -> u8 {
-    return match pad {
-        16 | 32 => 1,
-        64 | 128 => 2,
-        _ => 0,
-    };
+fn init() {
+    video::palettes([0x0f, 0x11, 0x21, 0x30]);
+    video::text(10, 12, "HELLO, NES!");
 }
 
 fn update() {
-    match buttons() & 3 {
-        1 => { tone(0, 213, 5); }
-        2 => { silence(0); }
-        _ => {}
+    if (input::held() & input::RIGHT) != 0 {
+        x += 1;
     }
+    video::sprite(x, 100, 0x01, 0);
 }
 ```
 
-Patterns are typed compile-time scalar constants, alternatives separated by
-`|`, or inclusive ranges such as `0..=7`. Negative signed limits are valid,
-including `-128` and `-32768`. Patterns must not overlap. Every match must cover
-the selector's entire integer/bool domain or end with `_`. Boolean matches
-can cover `false` and `true` without a wildcard. Guards and pattern bindings
-are not supported. A range arm also supplies a bounds proof for that selector
-inside its block. Side effects retain their usual bounds-invalidation rules.
+```sh
+nested build hello            # → hello.nes
+nested run hello 300 --shot hello.png
+nested fmt hello/*.nst
+```
 
-## Formatting
+The rest of this guide covers the language, then the standard library, then
+the hardware contracts the compiler relies on.
 
-`nested fmt game.nst` formats files with four-space indentation and readable
-blocks, operators and array lists. `nested fmt --check games/*.nst` checks them
-without writing. VS Code and the playground use the same Rust formatter through
-LSP; editor tab/space preferences are respected. Strings retain their spelling,
-comments retain their content, and assembly is indented without rewriting its
-instructions. Unterminated lexical input is left unchanged.
+## Lexical structure
 
-## Inline assembly
+Comments are `//`, `///` (documentation shown on hover) and nested `/* */`.
+`//!` at the top of a file documents the module. Integer literals are decimal,
+hexadecimal `0x2000`, binary `0b1010_0000` or characters `'A'`; underscores
+separate digits. Strings are byte arrays: `"SCORE"` has type `[u8; 5]`, and
+may span lines (each newline is kept).
+
+## Types
+
+| Type | Meaning |
+|---|---|
+| `u8`, `i8`, `u16`, `i16` | Fixed-width integers. Arithmetic wraps at the width. |
+| `bool` | `true` or `false`, one byte. |
+| `[T; N]` | A fixed array. `[T; _]` takes its length from the initializer. |
+| `&[T]` | A read-only slice: a pointer and a 16-bit length. |
+| `struct S { ... }` | Named fields of scalars, arrays or other structs. |
+| `enum E { ... }` | Named values, `u8` by default (`enum E: u16 { ... }`). |
+| `type R = u8 in 0..8` | A *range type*: a `u8` the compiler proves stays in `0..8`. |
+
+There are no pointers, references to mutable data, heap or closures. Every
+variable has a fixed address chosen by the linker.
+
+### Conversions
+
+Widths never change implicitly, except that a value always fits a wider type
+of the same signedness (`u8` → `u16`). Otherwise convert explicitly:
+
+- `u16(x)`, `i8(x)` and friends wrap or sign-extend: `u8(300)` is 44.
+- `R(x)` for a range type must be provable (see *Proofs*); `x as R` is the
+  unchecked form when you know better.
+- `bool(x)` is `x != 0`. `u8(true)` is 1.
+- `lo(w)` and `hi(w)` take a word's bytes.
+
+Literals take the type their context expects; an unsuffixed literal that does
+not fit is an error rather than a silent wrap.
+
+### Structs and enums
 
 ```nested
-fn rotate_with_carry(x: u8) -> u8 {
-    return asm(a = x) {
-        asl a
-        adc #$00
-    };
+enum Kind { Bat, Slime = 4, Ghost }
+struct Enemy { x: u8, y: u8, kind: Kind, hp: u8 }
+
+var enemies: [Enemy; 8] = [Enemy { x: 0, y: 0, kind: Kind::Bat, hp: 3 }; 8];
+
+fn hurt(i: Slot) {
+    enemies[i].hp -= 1;
 }
 ```
 
-Inputs can bind `a`, `x`, and `y`; the expression returns A as `u8`. Local/global
-names and function call names become assembler symbols. Assembly-local labels
-are made unique for each block. All official 6502 instructions and addressing
-modes are supported, as are `.byte`, `.word`, `.res`, and `.align`.
+Structs are values: they can be locals, globals, array elements, parameters
+and results. The compiler stores them **field by field**: an array of structs
+becomes one array per field (structure of arrays), and a `u16` array becomes
+separate low-byte and high-byte tables. `enemies[i].hp` is then a single
+`lda hp,x`. Nothing in the language depends on this layout, so you get the
+fast 6502 form without writing parallel arrays by hand.
 
-Assembly blocks are opaque to optimization. Registers/flags and arbitrary
-memory are conservatively clobbered. Raw assembly is responsible for balanced
-stack use, hardware sequencing and any manually accessed shared memory. Avoid
-hidden indirect calls into language functions: static-frame allocation needs an
-analyzable call graph. The assembler rejects indirect `jmp` through `$xxFF`,
-which triggers the original 6502 page-wrap hardware bug.
-
-## Placement and interrupts
-
-`@zp var x: u8 = 0;` requires zero page. `@ram var x: u8 = 0;` forces ordinary
-RAM. Large arrays use ordinary RAM automatically. Exhausting a region is a
-compile-time error. `@bank(1) const MAP: [u8; 1440] = asset("map.bin");` places
-constant data in a mapper's switchable window; reading it explicitly selects
-that bank. Bank state is observable. Banked code and far calls are not supported.
-
-`@nmi fn vblank() { ... }` and `@irq fn scanline() { ... }` use separate static
-frames from main code and each other. Cross-context helpers require separate
-functions. Interrupt callbacks may use scalar operations, assembly and
-constant-address `peek`/`poke`; ordinary game builtins and software multiply/divide use main scratch and are rejected there.
-Cross-context global storage requires `@shared` on a single byte. Its accesses
-remain observable; this does not make a multi-instruction update atomic.
-
-`@reset fn boot() { ... }` selects custom boot mode. The runtime performs basic
-hardware/RAM initialization and calls that function, then halts if it returns.
-Use assembly when you need your own main loop, interrupt enable policy or PPU
-sequencing. In ordinary mode `init` runs once and `update` prepares each frame.
-An ordinary `@nmi` callback runs when a prepared frame is published.
-
-`@vblank fn f() { ... }` runs at **every** NMI, after the frame publication
-work, even while the main thread is busy in a long computation and publishes
-nothing. It follows the interrupt rules above (separate frames, `@shared`
-bytes, constant-address `peek`/`poke`), and is responsible for restoring the
-scroll registers if it writes the PPU. NESted Chess uses it to animate its
-thinking indicator and to read a "move now" button during a search.
-
-`@export` retains an otherwise unreachable function. `@noinline` prevents
-source-level inlining. `@cold` is an accepted hint.
-
-`@inline` expands a function at statement-level call sites: `f(a);`,
-`let x = f(a);`, `x = f(a);` and `return f(a);`. The function may not `return`
-except as its final statement. Parameters become fresh locals, or are
-substituted directly when the argument is a constant or a variable the body
-cannot change. Small pure single-expression functions are inlined anywhere,
-as before. Statement-level `match` lowers to an if/else chain over a local, so
-calls inside its arms are expanded too.
-
-## Recursion
+### Range types
 
 ```nested
-@recursive(20)
-fn search(depth: u8, alpha: i16, beta: i16) -> i16 { ... search(depth - 1, -beta, -alpha) ... }
+type Slot = u8 in 0..8;        // half-open
+type Lane = u8 in 0..=3;       // inclusive
 ```
 
-A `@recursive(N)` function may call itself. Frames stay static: at each self
-call the compiler copies the caller's **live** frame bytes (locals that a later
-statement can still read, and temporaries in use) onto a save stack, and
-restores them on return. Liveness is computed over the function's statements,
-so state that is only read by the call's own arguments, or redefined by the
-call's result, costs nothing. All recursive functions share one save stack:
-`N` bounds the number of active recursive calls along any call path, and the
-stack holds `N` levels of the largest saved frame. Mutual recursion remains an
-error. The hardware-stack allowance includes `2 * N` bytes of return
-addresses. Keep frames small across the recursive call: NESted Chess's search
-saves 9 bytes per level.
+A range type is its base type plus a promise. Indexing a `[T; 8]` with a
+`Slot` needs no check. Assigning to a `Slot` requires a proof that the value
+is in range; arithmetic on it (`slot += 1`) is accepted when the compiler can
+prove the result stays inside, for example under `if slot < 7`.
 
-## Code generation notes
+### Slices
 
-Byte expressions use memory, immediate and indexed operands directly; 16-bit
-arithmetic is performed byte-wise into memory; signed comparisons use the
-overflow flag; loops test at the bottom. Locals that are never live at the
-same time share frame bytes. An innermost `for` loop whose body cannot touch
-the Y register (no calls, runtime math or 16-bit table elements) keeps its
-counter in Y. A machine pass then threads jumps, tracks register contents
-across straight-line code and forward joins to drop redundant loads, stores
-and `cmp #0`, removes dead stores to temporaries and turns `jsr`+`rts` into
-`jmp`. `arr[raw i - c]` folds the constant into the base address when the
-array is short enough that a wrapped index could never be in bounds.
+A `&[T]` views an array of bytes (`u8`, `i8`, `bool` or a one-byte enum):
+a constant table, a string literal, `asset("file.bin", 16..48)` or a
+global `var` array. Local arrays can't be viewed; keep a global buffer
+instead. An array becomes a slice wherever one is
+expected (an argument, a `let s: &[u8]`, a returned value), so
+`video::text(1, 1, "READY")` passes a constant string. `len(s)` is a `u16`.
 
-`@budget(500)` checks an acyclic worst-case **unstalled instruction-cycle** bound,
-including direct callees and conservative branch costs. Loops must disappear
-through unrolling, otherwise verification fails. It excludes DMA, interrupts,
-DMC stalls and PPU phase. Assembly listings show per-instruction min/max costs.
+## Items
 
-## Runtime builtins
+```nested
+const SPEED: u8 = 3;                       // a compile-time value
+const LEVEL: [u8; _] = asset("level1.bin");// bytes in ROM
+var score: u16 = 0;                        // RAM, initialized at reset
+pub fn add(points: u8) { score += u16(points); }
+```
 
-| Function | Behavior |
+- `const` values are computed at compile time. Arrays and strings live in
+  ROM; scalars become immediates.
+- `var` globals live in RAM and are initialized at power-on.
+- `fn` takes scalars, structs and slices and may return one value (a scalar,
+  a struct, or an array from a compile-time function). Arrays are passed as
+  slices or by index; copying them by value would hide a large cost. Locals are `let` (immutable) or `var` (mutable). Names may not be
+  shadowed inside a function.
+- Items are private to their module unless marked `pub`.
+
+### Compile-time evaluation
+
+Any function without hardware access can run at compile time. A `const`
+initializer may call one, so tables are computed rather than pasted:
+
+```nested
+fn squares() -> [u16; 16] {
+    var t: [u16; 16] = [0; 16];
+    for i in 0..16 {
+        t[i] = u16(i) * u16(i);
+    }
+    return t;
+}
+const SQUARES: [u16; 16] = squares();
+```
+
+The standard library's `math::SIN` table is built this way. `if` with a
+constant condition only checks and compiles the branch taken, and
+`defined(path)` tests whether a name exists, so libraries can adapt to the
+program and the board (`if board::MMC3 { ... }`).
+
+### Assets
+
+`asset("path")` is the bytes of a project file at compile time;
+`asset("path", 16..48)` takes a range of it. Paths are relative to the
+project root. Use them for CHR, nametables, levels and music.
+
+## Modules
+
+`use std::video;` makes `video::text` available. `use enemies;` loads
+`enemies.nst` from the project, `use world::map;` loads `world/map.nst`.
+`use a::b as c;` renames, and `use video::text;` imports a single item.
+`main::` names the root module from anywhere; the runtime calls the hooks
+`main::init`, `main::update`, `main::vblank` and `main::scanline` if they
+exist.
+
+## Statements and expressions
+
+`if/else`, `while`, `loop`, `for i in a..b` (and `a..=b`), `break`,
+`continue` and `return`. `if` and `match` are also expressions (`let d = if left { 0 } else { 1 };`). `&&` and
+`||` short-circuit. Compound assignment (`+=`, `<<=`, ...) evaluates its
+target once.
+
+Comparisons don't chain: `a < b < c` is an error; write `(a < b) == c` if you
+mean it.
+
+```nested
+let points = match kind {
+    Kind::Bat => 10,
+    Kind::Slime | Kind::Ghost => 25,
+};
+let band = match y {
+    0..=63 => 0,
+    64..=127 => 1,
+    _ => 2,
+};
+```
+
+`match` must be exhaustive: the compiler names a missing variant or value.
+Patterns are literals, ranges, enum variants (the `Kind::` prefix may be
+omitted), `|` alternatives and `_`.
+
+Arithmetic wraps. Signed division truncates toward zero and the remainder has
+the dividend's sign. Shifts by the width or more give 0 (or the sign for
+signed `>>`). Multiplication, division and remainder by non-constants call
+small runtime routines; by constants they become shifts and adds.
+
+### Proofs and indexing
+
+Every array index must be **provably in bounds**. The checker tracks integer
+intervals through constants, masks (`i & 15`), modulo, shifts, loop counters,
+`if` guards (`if i < len(t)`), early returns and range types. Assigning to a
+variable, calling a function that may write it, or wrapping arithmetic
+forgets what was known.
+
+When you hold the invariant yourself, write `t[raw i]`: no proof and no
+runtime check. A constant out-of-range index is an error even with `raw`.
+`t[raw x + 3]` folds the offset into the instruction's address.
+
+## Attributes
+
+| Attribute | On | Effect |
+|---|---|---|
+| `@zp` | `var` | Place in zero page (faster, smaller instructions). The linker already promotes the most-used variables. |
+| `@ram` | `var` | Keep out of zero page. |
+| `@at(0x300)` | `var` | Fixed address. |
+| `@io(0x4016)` | `var` | A hardware register: every read and write happens, in order. |
+| `@shared` | `var` | Accessed by both main code and an interrupt; never cached in registers. |
+| `@bank(n)` | `const`, `fn` | Place in switchable PRG bank `n`. Reads and calls switch banks automatically. |
+| `@inline` / `@noinline` | `fn` | Override the inliner (small functions are inlined automatically). |
+| `@nmi`, `@irq`, `@reset` | `fn` | Interrupt handlers. Defining `@reset` replaces the standard runtime. |
+| `@recursive(n)` | `fn` | Allow recursion up to depth `n`, saving locals on a software stack. |
+| `@budget(n)` | `fn` | Verify the function takes at most `n` CPU cycles (see below). |
+| `@export` | `fn` | Keep the function even if nothing calls it (for tools and assembly). |
+
+### Interrupts and contexts
+
+Code reachable from an interrupt handler is compiled separately for that
+context, with its own locals and arithmetic helpers, so an NMI can call the
+same function main code was in the middle of. Globals that both sides use
+must be `@shared` (or read and written with care); the compiler keeps them
+out of registers.
+
+### Recursion
+
+Functions are not reentrant by default: their locals have fixed addresses,
+which lets the linker overlay the frames of functions that are never active
+together. `@recursive(n)` opts in; the compiler saves the live locals on a
+shared stack before each recursive call. The chess engine's search uses this.
+
+### Cycle budgets
+
+`@budget(n)` asks the linker to prove a worst case: the sum of the slowest
+timing of every instruction in the function (each runs at most once when the
+code has no loops) plus the bound of each function it calls. Loops,
+recursion, indirect jumps, banked calls and runtime arithmetic helpers can't
+be bounded this way and are reported. Use it for vblank code that must
+finish before rendering starts. DMA stalls and interrupt latency are not
+included.
+
+### Inline assembly
+
+```nested
+asm {
+    lda {count}
+    clc
+    adc #1
+    sta {count}
+}
+```
+
+`{name}` is the address of a variable or constant in scope. Labels are local
+to the block. Assembly is a barrier: the optimizer assumes it may read and
+write anything.
+
+## The cartridge
+
+The root module declares the hardware:
+
+```nested
+cartridge {
+    title = "Sprout";
+    mapper = mmc3;            // nrom cnrom uxrom axrom bnrom gxrom colordreams mmc1 mmc3
+    mirroring = vertical;     // horizontal vertical single four
+    chr = "assets/tiles.chr"; // or a list of files, or `ram`
+    prg = 128;                // KiB; default: as much as the code needs
+    battery = false;
+    queue = 96;               // bytes of background updates per frame
+    sprites = true;           // false frees the 256-byte sprite page
+    stack = 64;               // bytes reserved for the hardware stack
+}
+```
+
+| Board | PRG banking | CHR | Notes |
+|---|---|---|---|
+| `nrom` | none (32 KiB) | 8 KiB ROM | |
+| `cnrom` | none | 8 KiB banks (`mapper::chr_bank`) | |
+| `uxrom` | 16 KiB + fixed 16 KiB | RAM | |
+| `axrom` | 32 KiB | RAM | single-screen mirroring |
+| `bnrom` | 32 KiB | RAM | |
+| `gxrom` | 32 KiB | 8 KiB banks | |
+| `colordreams` | 32 KiB | 8 KiB banks | |
+| `mmc1` | 16 KiB + fixed 16 KiB | 4 KiB banks | switchable mirroring |
+| `mmc3` | 8 KiB + fixed | 1 and 2 KiB banks | scanline IRQ |
+
+On 32 KiB boards, the code shared by every bank (the runtime, interrupt
+handlers, bank trampolines) is replicated into each bank. On boards with
+CHR RAM, upload patterns in `init` with `video::upload_chr`.
+
+`use std::board;` gives compile-time facts about the chosen board, such as
+`board::MMC3` and `board::QUEUE`.
+
+## The standard library
+
+`std::runtime` is linked unless you define `@reset`. It initializes the
+console, calls `main::init()` once with rendering off, then every frame
+reads the controllers, calls `main::update()` and publishes the frame in the
+next vertical blank. `main::vblank()` runs in every NMI (even when `update`
+ran long), and `main::scanline()` handles the MMC3 IRQ.
+
+| Module | Provides |
 |---|---|
-| `buttons() -> u8`, `pressed() -> u8` | Held and rising-edge input: A=1, B=2, Select=4, Start=8, Up=16, Down=32, Left=64, Right=128. |
-| `tile(x,y,tile)` | Writes a nametable tile. Coordinates clip to 32×30. Queued during rendering; direct while rendering is disabled. |
-| `text(x,y,"TEXT")` | Literal ASCII tile indices; at most 255 bytes. |
-| `sprite(slot,x,y,tile,attributes)` | Writes one of 64 shadow OAM entries. Tile IDs refer to the game's pattern table. |
-| `hide_sprites()` | Hides all shadow OAM entries. |
-| `palette(index,color)` | Direct while rendering is disabled, queued during rendering. |
-| `render(bool)` | Disabling clears pending video writes and NMI. Enabling waits for the next vblank, copies OAM and restores scroll/rendering/NMI. |
-| `screen("asset.map")` | Copies a 1024-byte nametable while rendering is disabled. |
-| `screen_bank(bank,offset:u16)` | Copies a nametable from banked PRG data, leaving that bank selected. |
-| `tone(channel,period:u16,volume)` | Pulse channels 0/1, triangle channel 2. Timer periods and volume are hardware values. |
-| `noise(period,volume)` | Noise instrument on channel 3. |
-| `silence(channel)` | Silences an APU channel. |
-| `rand() -> u8` | Deterministic 16-bit LFSR; not a source of external entropy. |
-| `peek(address:u16) -> u8`, `poke(address:u16,value)` | Volatile CPU bus access, including hardware side effects. |
-| `bank(bank)` | Selects a PRG bank. NROM rejects this operation. |
-| `bank_peek(bank,offset:u16) -> u8` | Selects and reads a banked byte. |
-| `vram(address:u16,value)` | Writes any PPU address (attribute bytes, for example). Queued like `tile`. |
+| `std::video` | `sprite`, `metasprite`, `flicker`; background `tile`, `metatile`, `text`, `number`, `fill`, `put`, `write`, `attribute`; `palette`, `palettes`; `scroll`; `load_nametable`, `load_rle`, `clear`, `upload_chr`; `show`, `off`, `on`, `pattern_tables`, `tall_sprites` |
+| `std::input` | `held`, `pressed`, `released` (and `held2`, `pressed2`) with the `A B SELECT START UP DOWN LEFT RIGHT` masks |
+| `std::audio` | A music and sound-effect driver: `play(p1, p2, tri, noise)`, `sfx(channel, stream)`, `stop`; direct `tone`, `noise`, `silence`. Streams are bytes: notes `C1`–`B7` with lengths, `REST`, `INSTRUMENT`, `LOOP`, `END`. |
+| `std::math` | `rand`, `below`, `stir`, `min`, `max`, `abs`, `diff`, `sin`, `cos` and the compile-time `SIN` table |
+| `std::mapper` | `chr_bank`, `mirroring`, `irq_after`, `irq_ack`, `irq_off` (no-ops on boards without the feature) |
+| `std::nes` | The hardware registers (`PPUCTRL`, `PPUMASK`, `OAMDMA`, `JOY1`, ...) as `@io` variables |
 
-The queue holds **40 tile/palette writes per prepared frame** by default;
-`queue = 16;` in the cartridge block shrinks it and returns the rest of the
-area to the allocator. Overflow drops
-writes and increments RAM `$037F`; the workbench's memory/debug API and game tests
-can inspect it. The shipped games are tested for zero overflow. Copy whole
-screens with rendering disabled rather than submitting them as a frame queue.
-OAM DMA and a full standard queue fit NTSC vblank with DMC disabled; an extra
-user callback consumes additional time and is the programmer's timing contract.
+Hover any name in the playground or VS Code for its documentation; the
+library is ordinary NESted (`crates/compiler/src/std/`).
 
-## Memory and boards
+### Frames and the video queue
 
-| CPU address | Reservation |
-|---|---|
-| `$0000–$001F` | Runtime scratch/input/publication state |
-| `$0020–$00FF` | Compiler zero-page globals and static frames |
-| `$0100–$01FF` | Hardware stack |
-| `$0200–$02FF` | Shadow OAM (general RAM when the program never draws sprites) |
-| `$0300–$0377` | Forty three-byte VRAM queue entries |
-| `$037E`, `$037F` | Hardware frame counter; dropped queue write count |
-| `$0380–$07FF` | Compiler RAM globals/arrays and static frames |
+Drawing calls in `update` don't touch the PPU. Sprites go to a shadow page
+copied by DMA, and background writes go to a queue of `queue` bytes that the
+NMI copies during the next vertical blank, so the player never sees half a
+frame. If `update` takes longer than a frame, the previous frame stays on
+screen and the game slows down rather than tearing. `video::room()` tells you
+how much queue is left; writes that don't fit are dropped and counted in
+`video::dropped`, which the cartridge tests require to stay 0.
 
-A program that never calls `sprite` or `hide_sprites` gets page 2 as ordinary
-RAM and renders background only. `stack = 100;` reserves that many bytes for
-the hardware stack and makes the rest of page 1 allocatable; the compiler
-rejects the build if its own stack allowance exceeds the reservation. Arrays
-are placed best-fit across the free regions.
+While rendering is off (`init`, or between `video::off()` and
+`video::on()`) background writes go straight to the PPU with no limit.
 
-NROM uses a 32-KiB fixed PRG image and 8-KiB CHR ROM. MMC1 and UxROM have a fixed
-last 16-KiB PRG window plus 16-KiB data banks. UxROM uploads the declared 8-KiB CHR
-asset into CHR RAM at boot and uses bus-conflict-safe bank writes. MMC3 keeps the
-last two 8-KiB PRG windows fixed and selects data at `$8000`. MMC1/MMC3 currently
-use one fixed 8-KiB CHR-ROM set. Supported PRG capacities are checked at link time.
-Battery-backed saves, CHR animation banking, mapper variants and PAL are deferred.
+## Tools
 
-See the four game sources for complete programs. See [design.md](design.md) for
-why these constraints were selected and what a future feature must improve.
+- `nested build <project> [-o out.nes] [--emit dir] [--no-opt]` writes the
+  ROM; `--emit` also writes every compiler pass (MIR, optimized MIR, 6502,
+  layout and the annotated listing).
+- `nested check <project>` reports diagnostics only.
+- `nested run <project|rom> [frames] [--input a@60,start@90] [--hold right] [--shot out.png]`
+  runs headlessly.
+- `nested fmt [--check] files...` formats code.
+- `nested lsp` is the language server for editors.

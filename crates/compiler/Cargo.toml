@@ -7,3 +7,6 @@ license.workspace = true
 description = "Embeddable dependency-free NES compiler, assembler, linker and language server"
 repository = "https://github.com/nathsou/NESted"
 readme = "README.md"
+
+[dev-dependencies]
+nested-runtime.workspace = true

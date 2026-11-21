@@ -1,0 +1,26 @@
+//! Memory-mapped hardware registers of the NES.
+
+/// PPU control: NMI enable (bit 7), sprite size, pattern tables, nametable.
+@io(0x2000) pub var PPUCTRL: u8;
+/// PPU mask: color emphasis, sprite/background enable and clipping.
+@io(0x2001) pub var PPUMASK: u8;
+/// PPU status: vblank (bit 7), sprite 0 hit (bit 6), overflow (bit 5).
+/// Reading it resets the address latch.
+@io(0x2002) pub var PPUSTATUS: u8;
+@io(0x2003) pub var OAMADDR: u8;
+@io(0x2004) pub var OAMDATA: u8;
+@io(0x2005) pub var PPUSCROLL: u8;
+@io(0x2006) pub var PPUADDR: u8;
+@io(0x2007) pub var PPUDATA: u8;
+/// Writing a page number copies that page of RAM to sprite memory.
+@io(0x4014) pub var OAMDMA: u8;
+/// APU registers $4000-$4013.
+@io(0x4000) pub var APU: [u8; 20];
+@io(0x4015) pub var APUSTATUS: u8;
+@io(0x4016) pub var JOY1: u8;
+@io(0x4017) pub var JOY2: u8;
+
+/// PPU address of nametable 0; the others follow every $400 bytes.
+pub const NAMETABLE: u16 = 0x2000;
+/// PPU address of the palettes (background $3F00, sprites $3F10).
+pub const PALETTE: u16 = 0x3F00;

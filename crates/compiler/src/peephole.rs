@@ -1,754 +1,691 @@
-//! Machine-level optimization over generated 6502 assembly text.
-//!
-//! * Jump threading: jumps and branches to `jmp`/`rts` go straight through.
-//! * Register tracking within straight-line code: loads of a value a register
-//!   already holds are dropped (when the flags they set are not needed), as are
-//!   stores of a value memory already holds, and `cmp #0` after an instruction
-//!   whose flags already describe A.
-//! * Dead stores: overwritten stores and stores to never-read temporaries.
-//! * Dead loads: a load whose register and flags the next instruction
-//!   replaces without reading them.
-//! * `jsr f` + `rts` becomes `jmp f`.
-//!
-//! Hardware addresses (`$xxxx` operands), shared bytes inside `;@barrier`
-//! regions and inline assembly are never touched.
+//! Machine-level optimization of one function's structured 6502 code:
+//! register-content tracking, flag liveness, dead temporary stores, jump
+//! threading and tail calls.
+use crate::asm::{Arg, Ins, Line, Op, Opnd, Sym};
+use crate::mir::{InstId, Mir, VarId};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug)]
-enum Line {
-    Instr { op: String, arg: String },
-    Label(String),
-    Other,
-    Barrier(bool),
+#[derive(Clone, Debug, PartialEq)]
+enum Val {
+    Imm(i64),
+    Mem(Opnd),
 }
 
-fn parse(line: &str) -> Line {
-    let t = line.trim();
-    if t == ";@barrier begin" {
-        return Line::Barrier(true);
-    }
-    if t == ";@barrier end" {
-        return Line::Barrier(false);
-    }
-    if t.is_empty() || t.starts_with(';') || t.starts_with('.') || t.contains('=') {
-        return Line::Other;
-    }
-    if let Some(name) = t.strip_suffix(':') {
-        if !name.contains(char::is_whitespace) {
-            return Line::Label(name.to_owned());
-        }
-    }
-    let code = t.split(';').next().unwrap_or("").trim();
-    let mut parts = code.splitn(2, char::is_whitespace);
-    let op = parts.next().unwrap_or("").to_ascii_lowercase();
-    if op.len() != 3 || !op.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Line::Other;
-    }
-    let arg = canonical(parts.next().unwrap_or("").trim());
-    Line::Instr { op, arg }
-}
-
-/// `label+0+2` and `label+2` name the same byte.
-fn canonical(arg: &str) -> String {
-    if !arg.starts_with("__") || arg.contains(',') {
-        return arg.to_owned();
-    }
-    let mut parts = arg.split('+');
-    let base = parts.next().unwrap_or("");
-    let mut offset = 0i64;
-    for part in parts {
-        match part.trim().parse::<i64>() {
-            Ok(n) => offset += n,
-            Err(_) => return arg.to_owned(),
-        }
-    }
-    if offset == 0 {
-        base.to_owned()
-    } else {
-        format!("{base}+{offset}")
-    }
-}
-
-fn is_branch(op: &str) -> bool {
-    matches!(
-        op,
-        "bcc" | "bcs" | "beq" | "bne" | "bmi" | "bpl" | "bvc" | "bvs"
-    )
-}
-
-/// Compiler-owned memory whose value only changes through visible stores.
-fn trackable(arg: &str) -> bool {
-    arg.starts_with("__") && !arg.contains(',') && !arg.contains('(')
-}
-
-fn base(arg: &str) -> &str {
-    let end = arg.find(['+', ',', ' ']).unwrap_or(arg.len());
-    &arg[..end]
-}
-
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct Regs {
-    a: BTreeSet<String>,
-    x: BTreeSet<String>,
-    y: BTreeSet<String>,
-    /// Which register N/Z currently describe.
-    nz: Option<char>,
+    a: Option<Val>,
+    x: Option<Val>,
+    y: Option<Val>,
 }
 
 impl Regs {
-    fn reg(&mut self, r: char) -> &mut BTreeSet<String> {
-        match r {
-            'a' => &mut self.a,
-            'x' => &mut self.x,
-            _ => &mut self.y,
-        }
-    }
-    fn forget_memory(&mut self, pred: impl Fn(&str) -> bool) {
-        for set in [&mut self.a, &mut self.x, &mut self.y] {
-            set.retain(|v| v.starts_with('#') || !pred(v));
+    fn forget_mem(&mut self, pred: impl Fn(&Opnd) -> bool) {
+        for r in [&mut self.a, &mut self.x, &mut self.y] {
+            if let Some(Val::Mem(m)) = r {
+                if pred(m) {
+                    *r = None;
+                }
+            }
         }
     }
 }
 
-struct Program {
-    lines: Vec<String>,
-    parsed: Vec<Line>,
-    labels: BTreeMap<String, usize>,
+fn reads_nz(op: Op) -> bool {
+    matches!(op, Op::Beq | Op::Bne | Op::Bmi | Op::Bpl | Op::Php)
 }
 
-impl Program {
-    fn new(lines: Vec<String>) -> Self {
-        let parsed: Vec<Line> = lines.iter().map(|l| parse(l)).collect();
-        let mut labels = BTreeMap::new();
-        for (i, p) in parsed.iter().enumerate() {
-            if let Line::Label(n) = p {
-                labels.insert(n.clone(), i);
-            }
-        }
-        Self {
-            lines,
-            parsed,
-            labels,
-        }
-    }
-    /// For each label: the indices of the plain jumps/branches that target it,
-    /// and whether anything else (calls, data, assembly blocks) refers to it.
-    fn references(&self) -> (BTreeMap<String, Vec<usize>>, BTreeSet<String>) {
-        let mut jumps: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        let mut other = BTreeSet::new();
-        let mut opaque = false;
-        for (i, line) in self.parsed.iter().enumerate() {
-            match line {
-                Line::Barrier(b) => opaque = *b,
-                Line::Label(_) => {}
-                Line::Instr { op, arg }
-                    if !opaque
-                        && (op == "jmp" || is_branch(op))
-                        && self.labels.contains_key(arg) =>
-                {
-                    jumps.entry(arg.clone()).or_default().push(i);
-                }
-                _ => {
-                    for word in
-                        self.lines[i].split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    {
-                        if self.labels.contains_key(word) {
-                            other.insert(word.to_owned());
-                        }
-                    }
-                }
-            }
-        }
-        (jumps, other)
-    }
-    /// The first instruction at or after `i`, skipping labels and comments.
-    fn next_instr(&self, mut i: usize) -> Option<usize> {
-        while i < self.parsed.len() {
-            match &self.parsed[i] {
-                Line::Instr { .. } => return Some(i),
-                Line::Label(_) | Line::Other => i += 1,
-                Line::Barrier(_) => return None,
-            }
-        }
-        None
-    }
-    /// Does any path from `i` read the given flags before they are rewritten?
-    /// `carry`: track C; otherwise N/Z.
-    fn reads_flag(
-        &self,
-        i: usize,
-        carry: bool,
-        budget: &mut usize,
-        seen: &mut BTreeSet<usize>,
-    ) -> bool {
-        let mut i = i;
-        loop {
-            if *budget == 0 {
-                return true;
-            }
-            *budget -= 1;
-            if !seen.insert(i) {
-                return false;
-            }
-            let Some(j) = self.next_instr(i) else {
-                return true;
-            };
-            let Line::Instr { op, arg } = &self.parsed[j] else {
-                return true;
-            };
-            let op = op.as_str();
-            let (reads, writes) = if carry {
-                (
-                    matches!(op, "bcc" | "bcs" | "adc" | "sbc" | "rol" | "ror" | "php"),
-                    matches!(
-                        op,
-                        "clc" | "sec" | "cmp" | "cpx" | "cpy" | "asl" | "lsr" | "plp"
-                    ),
-                )
-            } else {
-                (
-                    matches!(op, "beq" | "bne" | "bmi" | "bpl" | "php"),
-                    matches!(
-                        op,
-                        "lda"
-                            | "ldx"
-                            | "ldy"
-                            | "and"
-                            | "ora"
-                            | "eor"
-                            | "adc"
-                            | "sbc"
-                            | "cmp"
-                            | "cpx"
-                            | "cpy"
-                            | "bit"
-                            | "inc"
-                            | "dec"
-                            | "inx"
-                            | "iny"
-                            | "dex"
-                            | "dey"
-                            | "tax"
-                            | "tay"
-                            | "txa"
-                            | "tya"
-                            | "tsx"
-                            | "pla"
-                            | "asl"
-                            | "lsr"
-                            | "rol"
-                            | "ror"
-                            | "plp"
-                    ),
-                )
-            };
-            if reads {
-                return true;
-            }
-            if writes {
-                return false;
-            }
-            match op {
-                "rts" | "rti" | "jsr" => return false,
-                "jmp" => {
-                    let Some(&t) = self.labels.get(arg.as_str()) else {
-                        return true;
-                    };
-                    i = t;
-                }
-                _ if is_branch(op) => {
-                    let Some(&t) = self.labels.get(arg.as_str()) else {
-                        return true;
-                    };
-                    if self.reads_flag(t, carry, budget, seen) {
-                        return true;
-                    }
-                    i = j + 1;
-                }
-                _ => i = j + 1,
-            }
-        }
-    }
-    fn flag_read(&self, i: usize, carry: bool) -> bool {
-        self.reads_flag(i, carry, &mut 48, &mut BTreeSet::new())
+fn writes_nz(ins: &Ins) -> bool {
+    use Op::*;
+    matches!(
+        ins.op,
+        Lda | Ldx
+            | Ldy
+            | Adc
+            | Sbc
+            | And
+            | Ora
+            | Eor
+            | Cmp
+            | Cpx
+            | Cpy
+            | Bit
+            | Inc
+            | Dec
+            | Inx
+            | Iny
+            | Dex
+            | Dey
+            | Asl
+            | Lsr
+            | Rol
+            | Ror
+            | Tax
+            | Tay
+            | Txa
+            | Tya
+            | Tsx
+            | Pla
+            | Plp
+    )
+}
+
+/// Instruction sets N/Z from the value now in A.
+fn nz_from_a(ins: &Ins) -> bool {
+    use Op::*;
+    match ins.op {
+        Lda | Adc | Sbc | And | Ora | Eor | Txa | Tya | Pla => true,
+        Asl | Lsr | Rol | Ror => ins.arg == Arg::Acc,
+        _ => false,
     }
 }
 
-/// Follows a label to the final target of a `jmp` chain; `rts` if it returns.
-fn thread(p: &Program, label: &str) -> Option<String> {
-    let mut target = label.to_owned();
-    for _ in 0..8 {
-        let &i = p.labels.get(&target)?;
-        let j = p.next_instr(i)?;
-        match &p.parsed[j] {
-            Line::Instr { op, arg } if op == "jmp" && !arg.starts_with('(') => {
-                if *arg == target {
-                    return None;
-                }
-                target = arg.clone();
-            }
-            Line::Instr { op, .. } if op == "rts" => return Some("rts".into()),
-            _ => break,
-        }
-    }
-    (target != label).then_some(target)
+fn same_place(a: &Opnd, b: &Opnd) -> bool {
+    a == b
 }
 
-pub fn optimize(source: &str) -> (String, usize) {
-    let mut lines: Vec<String> = source.lines().map(str::to_owned).collect();
-    let mut changes = 0;
+fn may_alias(store: &Arg, m: &Opnd) -> bool {
+    match store {
+        Arg::Mem(o) => {
+            same_place(o, m)
+                || (matches!(o.sym, Sym::Num) && matches!(m.sym, Sym::Num) && o.off == m.off)
+        }
+        Arg::MemX(o) | Arg::MemY(o) => {
+            o.sym == m.sym || matches!((&o.sym, &m.sym), (Sym::Num, Sym::Num))
+        }
+        Arg::IndX(_) | Arg::IndY(_) | Arg::Ind(_) => true,
+        _ => false,
+    }
+}
+
+pub fn optimize(lines: &mut Vec<Line>, mir: &Mir, inst: InstId) {
     for _ in 0..6 {
-        let before = changes;
-        lines = jumps(lines, &mut changes);
-        lines = registers(lines, &mut changes);
-        lines = dead_stores(lines, &mut changes);
-        lines = dead_loads(lines, &mut changes);
-        if changes == before {
+        let before = lines.len();
+        let mut changed = false;
+        changed |= jumps(lines);
+        let volatile = |o: &Opnd| match o.sym {
+            Sym::Num => o.off >= 0x2000,
+            Sym::Obj(id, _) => mir.objs[id.0 as usize].volatile(),
+            _ => false,
+        };
+        changed |= registers(lines, &volatile);
+        changed |= dead_stores(lines, mir, inst);
+        changed |= tails(lines);
+        changed |= zero_compares(lines);
+        if !changed && lines.len() == before {
             break;
         }
     }
-    (lines.join("\n") + "\n", changes)
 }
 
-fn jumps(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
-    let p = Program::new(lines);
-    let mut out = p.lines.clone();
-    let mut opaque = false;
-    for (i, line) in p.parsed.iter().enumerate() {
-        match line {
-            Line::Barrier(b) => opaque = *b,
-            Line::Instr { op, arg } if !opaque => {
-                if op == "jmp" || is_branch(op) {
-                    if let Some(t) = thread(&p, arg) {
-                        if t == "rts" {
-                            if op == "jmp" {
-                                out[i] = "  rts".into();
-                                *changes += 1;
+/// Flag liveness: for each instruction, whether its N/Z result is read.
+fn nz_needed(lines: &[Line]) -> Vec<bool> {
+    let mut at_label: BTreeMap<String, bool> = BTreeMap::new();
+    let target = |ins: &Ins| match ins.arg.opnd() {
+        Some(Opnd {
+            sym: Sym::Label(n), ..
+        }) => Some(n.clone()),
+        _ => None,
+    };
+    let mut need = vec![true; lines.len()];
+    for _round in 0..8 {
+        let mut changed = false;
+        let mut live = false;
+        for i in (0..lines.len()).rev() {
+            match &lines[i] {
+                Line::Ins(ins) => {
+                    if matches!(ins.op, Op::Rts | Op::Rti | Op::Jsr) {
+                        live = false;
+                        need[i] = false;
+                        continue;
+                    }
+                    if ins.op == Op::Jmp {
+                        live = match (&ins.arg, target(ins)) {
+                            (Arg::Mem(_), Some(t)) => {
+                                at_label.get(&t).copied().unwrap_or(!t.starts_with("__f"))
                             }
-                        } else {
-                            out[i] = format!("  {op} {t}");
-                            *changes += 1;
+                            _ => true,
+                        };
+                        need[i] = live;
+                        continue;
+                    }
+                    need[i] = live;
+                    if writes_nz(ins) {
+                        live = false;
+                    }
+                    if reads_nz(ins.op) {
+                        live = true;
+                    }
+                    if ins.op.is_branch() {
+                        if let Some(t) = target(ins) {
+                            live |= at_label.get(&t).copied().unwrap_or(!t.starts_with("__f"));
                         }
                     }
                 }
-                if op == "jsr" {
-                    if let Some(j) = p.next_instr(i + 1) {
-                        // Only when nothing jumps between them.
-                        let direct = (i + 1..j).all(|k| !matches!(p.parsed[k], Line::Label(_)));
-                        if direct && matches!(&p.parsed[j], Line::Instr { op, .. } if op == "rts") {
-                            out[i] = format!("  jmp {arg}");
-                            *changes += 1;
+                Line::Label(n) => {
+                    if at_label.get(n) != Some(&live) {
+                        let old = at_label.get(n).copied().unwrap_or(false);
+                        at_label.insert(n.clone(), live || old);
+                        if live && !old {
+                            changed = true;
                         }
                     }
                 }
+                Line::Barrier => live = true,
+                _ => {}
             }
-            _ => {}
+        }
+        if !changed {
+            break;
         }
     }
-    // `bxx L1; [unreferenced labels]; jmp L2; [labels incl. L1]`
-    // becomes `b!xx L2`.
-    let p = Program::new(out);
-    let (refs, other) = p.references();
-    let referenced = |l: &str| refs.contains_key(l) || other.contains(l);
-    let mut out = p.lines.clone();
-    let mut skip = vec![false; out.len()];
-    let mut opaque = false;
-    for (i, line) in p.parsed.iter().enumerate() {
-        match line {
-            Line::Barrier(b) => opaque = *b,
-            Line::Instr { op, arg } if !opaque && is_branch(op) && !skip[i] => {
-                let mut j = i + 1;
-                let mut clean = true;
-                while j < p.parsed.len() {
-                    match &p.parsed[j] {
-                        Line::Label(l) if !referenced(l) => j += 1,
-                        Line::Other
-                            if p.lines[j].trim().is_empty()
-                                || p.lines[j].trim().starts_with(';') =>
-                        {
-                            j += 1
-                        }
-                        _ => break,
-                    }
-                }
-                let Some(Line::Instr {
-                    op: jop,
-                    arg: target,
-                }) = p.parsed.get(j)
-                else {
-                    continue;
-                };
-                if jop != "jmp" || target.starts_with('(') || skip[j] {
-                    continue;
-                }
-                let mut k = j + 1;
-                let mut found = false;
-                while k < p.parsed.len() {
-                    match &p.parsed[k] {
-                        Line::Label(l) => {
-                            if l == arg {
-                                found = true;
-                            }
-                            k += 1;
-                        }
-                        Line::Other
-                            if p.lines[k].trim().is_empty()
-                                || p.lines[k].trim().starts_with(';') =>
-                        {
-                            k += 1
-                        }
-                        _ => break,
-                    }
-                }
-                if !found {
-                    clean = false;
-                }
-                if clean {
-                    let inverse = match op.as_str() {
-                        "beq" => "bne",
-                        "bne" => "beq",
-                        "bcc" => "bcs",
-                        "bcs" => "bcc",
-                        "bmi" => "bpl",
-                        "bpl" => "bmi",
-                        "bvc" => "bvs",
-                        _ => "bvc",
-                    };
-                    out[i] = format!("  {inverse} {target}");
-                    skip[j] = true;
-                    *changes += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    let out: Vec<String> = out
-        .into_iter()
-        .zip(skip)
-        .filter_map(|(l, s)| (!s).then_some(l))
-        .collect();
-    // A jump to a label that follows it, with only labels in between.
-    let p = Program::new(out);
-    let mut keep = vec![true; p.lines.len()];
-    let mut opaque = false;
-    for (i, line) in p.parsed.iter().enumerate() {
-        match line {
-            Line::Barrier(b) => opaque = *b,
-            Line::Instr { op, arg } if !opaque && op == "jmp" => {
-                let mut k = i + 1;
-                while k < p.parsed.len() {
-                    match &p.parsed[k] {
-                        Line::Label(l) if l == arg => {
-                            keep[i] = false;
-                            *changes += 1;
-                            break;
-                        }
-                        Line::Label(_) | Line::Other => k += 1,
-                        _ => break,
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    p.lines
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(l, k)| k.then_some(l))
-        .collect()
+    need
 }
 
-fn meet(a: Option<Regs>, b: Option<Regs>) -> Option<Regs> {
-    match (a, b) {
-        (None, x) | (x, None) => x,
-        (Some(a), Some(b)) => Some(Regs {
-            a: a.a.intersection(&b.a).cloned().collect(),
-            x: a.x.intersection(&b.x).cloned().collect(),
-            y: a.y.intersection(&b.y).cloned().collect(),
-            nz: if a.nz == b.nz { a.nz } else { None },
-        }),
-    }
-}
-
-fn registers(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
-    let p = Program::new(lines);
-    let (refs, other) = p.references();
-    // Labels entered by a later (backward) jump or by anything we cannot
-    // see start with no knowledge; forward joins meet their predecessors.
-    let mut unknown_entry = other.clone();
-    for (label, sources) in &refs {
-        let at = p.labels[label];
-        if sources.iter().any(|&j| j >= at) {
-            unknown_entry.insert(label.clone());
-        }
-    }
-    let mut pending: BTreeMap<String, Option<Regs>> = BTreeMap::new();
-    let mut keep = vec![true; p.lines.len()];
-    let mut out_text: Vec<Option<String>> = vec![None; p.lines.len()];
-    // None: unreachable by fall-through.
-    let mut cur: Option<Regs> = Some(Regs::default());
-    let mut opaque = false;
-    for (i, line) in p.parsed.iter().enumerate() {
-        match line {
-            Line::Barrier(b) => {
-                opaque = *b;
-                cur = Some(Regs::default());
+fn registers(lines: &mut Vec<Line>, volatile: &dyn Fn(&Opnd) -> bool) -> bool {
+    let need = nz_needed(lines);
+    let mut regs = Regs::default();
+    let mut remove = vec![false; lines.len()];
+    for i in 0..lines.len() {
+        let line = lines[i].clone();
+        match &line {
+            Line::Label(_) | Line::Barrier | Line::Bytes(_) | Line::Words(_) | Line::Fill(_) => {
+                regs = Regs::default();
                 continue;
             }
-            Line::Label(l) => {
-                cur = if unknown_entry.contains(l) {
-                    Some(Regs::default())
-                } else {
-                    match meet(cur.take(), pending.remove(l).flatten()) {
-                        Some(r) => Some(r),
-                        None => Some(Regs::default()),
+            Line::Src(..) => continue,
+            Line::Ins(ins) => {
+                let val = |arg: &Arg| -> Option<Val> {
+                    match arg {
+                        Arg::Imm(o) => o.number().map(Val::Imm),
+                        Arg::Mem(o) => Some(Val::Mem(o.clone())),
+                        _ => None,
                     }
                 };
-                continue;
-            }
-            Line::Other => continue,
-            Line::Instr { .. } if opaque => continue,
-            Line::Instr { op, arg } => {
-                let Some(r) = cur.as_mut() else {
-                    continue;
-                };
-                let op = op.as_str();
-                let value = if arg.starts_with('#') || trackable(arg) {
-                    Some(arg.clone())
-                } else {
-                    None
-                };
-                match op {
-                    "lda" | "ldx" | "ldy" => {
-                        let reg = op.chars().nth(2).unwrap();
-                        // A value just stored from A: transfer instead of load.
-                        if reg != 'a'
-                            && trackable(arg)
-                            && r.a.contains(arg)
-                            && !r.reg(reg).contains(arg)
-                        {
-                            out_text[i] = Some(format!("  ta{reg}"));
-                            *changes += 1;
-                            let a = r.a.clone();
-                            *r.reg(reg) = a;
-                            r.nz = Some(reg);
+                use Op::*;
+                match ins.op {
+                    Lda | Ldx | Ldy => {
+                        let v = val(&ins.arg);
+                        let reg = match ins.op {
+                            Lda => &mut regs.a,
+                            Ldx => &mut regs.x,
+                            _ => &mut regs.y,
+                        };
+                        // Volatile hardware reads always happen.
+                        let volatile = matches!(&ins.arg, Arg::Mem(o) if volatile(o));
+                        if v.is_some() && *reg == v && !need[i] && !volatile {
+                            remove[i] = true;
                             continue;
                         }
-                        if let Some(v) = &value {
-                            let holds = r.reg(reg).contains(v);
-                            if holds && (r.nz == Some(reg) || !p.flag_read(i + 1, false)) {
-                                // Flags keep describing whatever they did.
-                                keep[i] = false;
-                                *changes += 1;
+                        *reg = if volatile { None } else { v };
+                        // A transfer can satisfy the load: lda #k while X == #k.
+                    }
+                    Sta | Stx | Sty => {
+                        let src = match ins.op {
+                            Sta => regs.a.clone(),
+                            Stx => regs.x.clone(),
+                            _ => regs.y.clone(),
+                        };
+                        // Storing a value back where it came from.
+                        if let (Arg::Mem(m), Some(Val::Mem(r))) = (&ins.arg, &src) {
+                            if m == r && !volatile(m) {
+                                remove[i] = true;
                                 continue;
                             }
                         }
-                        let set = r.reg(reg);
-                        set.clear();
-                        if let Some(v) = value {
-                            set.insert(v);
-                        }
-                        r.nz = Some(reg);
-                    }
-                    "sta" | "stx" | "sty" => {
-                        let reg = op.chars().nth(2).unwrap();
-                        if trackable(arg) {
-                            if r.reg(reg).contains(arg) {
-                                keep[i] = false;
-                                *changes += 1;
-                                continue;
+                        let arg = ins.arg.clone();
+                        regs.forget_mem(|m| may_alias(&arg, m));
+                        if let Arg::Mem(m) = &ins.arg {
+                            if !volatile(m) {
+                                let reg = match ins.op {
+                                    Sta => &mut regs.a,
+                                    Stx => &mut regs.x,
+                                    _ => &mut regs.y,
+                                };
+                                if reg.is_none() {
+                                    *reg = Some(Val::Mem(m.clone()));
+                                }
                             }
-                            let a = arg.clone();
-                            r.forget_memory(|v| v == a);
-                            r.reg(reg).insert(arg.clone());
-                        } else if arg.contains('(') {
-                            r.forget_memory(|_| true);
+                        }
+                    }
+                    Tax => {
+                        if regs.x.is_some() && regs.x == regs.a && !need[i] {
+                            remove[i] = true;
+                            continue;
+                        }
+                        regs.x = regs.a.clone();
+                    }
+                    Tay => {
+                        if regs.y.is_some() && regs.y == regs.a && !need[i] {
+                            remove[i] = true;
+                            continue;
+                        }
+                        regs.y = regs.a.clone();
+                    }
+                    Txa => {
+                        if regs.a.is_some() && regs.a == regs.x && !need[i] {
+                            remove[i] = true;
+                            continue;
+                        }
+                        regs.a = regs.x.clone();
+                    }
+                    Tya => {
+                        if regs.a.is_some() && regs.a == regs.y && !need[i] {
+                            remove[i] = true;
+                            continue;
+                        }
+                        regs.a = regs.y.clone();
+                    }
+                    Inx | Dex => {
+                        regs.x = match regs.x {
+                            Some(Val::Imm(k)) => {
+                                Some(Val::Imm((k + if ins.op == Inx { 1 } else { -1 }) & 0xff))
+                            }
+                            _ => None,
+                        }
+                    }
+                    Iny | Dey => {
+                        regs.y = match regs.y {
+                            Some(Val::Imm(k)) => {
+                                Some(Val::Imm((k + if ins.op == Iny { 1 } else { -1 }) & 0xff))
+                            }
+                            _ => None,
+                        }
+                    }
+                    Inc | Dec | Asl | Lsr | Rol | Ror => {
+                        if ins.arg == Arg::Acc {
+                            regs.a = None;
                         } else {
-                            let b = base(arg).to_owned();
-                            r.forget_memory(|v| base(v) == b);
+                            let arg = ins.arg.clone();
+                            regs.forget_mem(|m| may_alias(&arg, m));
                         }
                     }
-                    "cmp" if arg == "#0" && r.nz == Some('a') && !p.flag_read(i + 1, true) => {
-                        keep[i] = false;
-                        *changes += 1;
-                    }
-                    "cmp" | "cpx" | "cpy" | "bit" => r.nz = None,
-                    "tax" | "tay" => {
-                        let reg = op.chars().nth(2).unwrap();
-                        let a = r.a.clone();
-                        *r.reg(reg) = a;
-                        r.nz = Some(reg);
-                    }
-                    "txa" | "tya" => {
-                        let reg = op.chars().nth(1).unwrap();
-                        let v = r.reg(reg).clone();
-                        r.a = v;
-                        r.nz = Some('a');
-                    }
-                    "inx" | "dex" | "iny" | "dey" => {
-                        let reg = op.chars().nth(2).unwrap();
-                        r.reg(reg).clear();
-                        r.nz = Some(reg);
-                    }
-                    "inc" | "dec" | "asl" | "lsr" | "rol" | "ror" => {
-                        if arg.is_empty() || arg == "a" {
-                            r.a.clear();
-                            r.nz = Some('a');
-                        } else {
-                            let b = base(arg).to_owned();
-                            r.forget_memory(|v| base(v) == b);
-                            r.nz = None;
+                    Cmp | Cpx | Cpy | Bit | Clc | Sec | Cld | Cli | Clv | Sed | Sei | Nop | Php
+                    | Pha => {
+                        // `cmp #0` right after A was set by a flag-setting op.
+                        if ins.op == Cmp && ins.arg == Arg::Imm(Opnd::num(0)) {
+                            let prev = (0..i).rev().find(|j| {
+                                matches!(lines[*j], Line::Ins(_))
+                                    || matches!(lines[*j], Line::Label(_) | Line::Barrier)
+                            });
+                            if let Some(j) = prev {
+                                if let Line::Ins(p) = &lines[j] {
+                                    if nz_from_a(p) && !remove[j] {
+                                        // The carry differs (cmp #0 sets C); only N/Z readers follow?
+                                        let next_c = lines[i + 1..].iter().find_map(|l| match l {
+                                            Line::Ins(n) => Some(n.op),
+                                            Line::Label(_) | Line::Barrier => Some(Op::Jmp),
+                                            _ => None,
+                                        });
+                                        if matches!(next_c, Some(Beq | Bne | Bmi | Bpl)) {
+                                            remove[i] = true;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                    "adc" | "sbc" | "and" | "ora" | "eor" | "pla" => {
-                        r.a.clear();
-                        r.nz = Some('a');
-                    }
-                    "clc" | "sec" | "clv" | "cld" | "sed" | "cli" | "sei" | "nop" | "pha"
-                    | "php" => {}
-                    "plp" => r.nz = None,
-                    _ if is_branch(op) => {
-                        if p.labels.contains_key(arg) {
-                            let state = cur.clone();
-                            let entry = pending.entry(arg.clone()).or_insert(None);
-                            *entry = match entry.take() {
-                                None => state,
-                                Some(e) => meet(Some(e), state),
-                            };
+                    Adc | Sbc | And | Ora | Eor | Pla => regs.a = None,
+                    Plp | Rti | Rts | Brk => regs = Regs::default(),
+                    Jsr => regs = Regs::default(),
+                    Jmp => regs = Regs::default(),
+                    Txs | Tsx => {
+                        if ins.op == Tsx {
+                            regs.x = None
                         }
                     }
-                    "jmp" => {
-                        if p.labels.contains_key(arg) {
-                            let state = cur.take();
-                            let entry = pending.entry(arg.clone()).or_insert(None);
-                            *entry = match entry.take() {
-                                None => state,
-                                Some(e) => meet(Some(e), state),
-                            };
-                        }
-                        cur = None;
-                    }
-                    "rts" | "rti" | "brk" => cur = None,
-                    _ => {
-                        // jsr, txs, tsx: unknown state.
-                        cur = Some(Regs::default());
-                    }
+                    Bcc | Bcs | Beq | Bmi | Bne | Bpl | Bvc | Bvs => {}
                 }
             }
         }
     }
-    p.lines
-        .into_iter()
-        .zip(keep)
-        .zip(out_text)
-        .filter_map(|((l, k), t)| k.then(|| t.unwrap_or(l)))
-        .collect()
+    let changed = remove.iter().any(|r| *r);
+    let mut i = 0;
+    lines.retain(|_| {
+        i += 1;
+        !remove[i - 1]
+    });
+    changed
 }
 
-/// Removes stores whose value is overwritten before any read on every path
-/// within straight-line code, and stores to compiler temporaries or locals
-/// that nothing ever reads.
-fn dead_stores(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
-    let p = Program::new(lines);
-    // Memory read anywhere (any operand spelling that is not a plain store).
-    let mut read: BTreeSet<String> = BTreeSet::new();
-    for (i, line) in p.parsed.iter().enumerate() {
-        match line {
-            Line::Instr { op, arg } => {
-                if !matches!(op.as_str(), "sta" | "stx" | "sty") || !trackable(arg) {
-                    if arg.contains(',') || arg.contains('(') {
-                        // Indexed access may touch any byte of the base.
-                        read.insert(base(arg).trim_start_matches('(').to_owned());
+/// Stores to this function's temporaries that are never read.
+fn dead_stores(lines: &mut Vec<Line>, mir: &Mir, inst: InstId) -> bool {
+    let me = &mir.insts[inst.0 as usize];
+    let params: BTreeSet<u32> = me.params.iter().map(|v| v.0).collect();
+    // Multi-value results are read by callers.
+    let shared_rets: BTreeSet<u32> = if me.rets.len() > 1 {
+        me.rets.iter().map(|v| v.0).collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut read: BTreeMap<(u32, i64), usize> = BTreeMap::new();
+    let mut written_only: BTreeSet<u32> = BTreeSet::new();
+    let mut any_asm = false;
+    for l in lines.iter() {
+        match l {
+            Line::Barrier => any_asm = true,
+            Line::Ins(ins) => {
+                if let Some(Opnd {
+                    sym: Sym::Var(i, v),
+                    off,
+                    ..
+                }) = ins.arg.opnd()
+                {
+                    if *i != inst {
+                        continue;
                     }
-                    read.insert(arg.clone());
-                }
-            }
-            Line::Other => {
-                // Data and equates may reference labels; inline assembly
-                // inside barriers is parsed as instructions above.
-                for word in p.lines[i].split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-                    if word.starts_with("__") {
-                        read.insert(word.to_owned());
+                    let store = matches!(ins.op, Op::Sta | Op::Stx | Op::Sty)
+                        && matches!(ins.arg, Arg::Mem(_));
+                    if store {
+                        written_only.insert(v.0);
+                    } else {
+                        *read.entry((v.0, *off)).or_default() += 1;
+                        if matches!(ins.arg, Arg::IndY(_) | Arg::IndX(_)) {
+                            *read.entry((v.0, off + 1)).or_default() += 1;
+                        }
                     }
                 }
             }
             _ => {}
         }
     }
-    let mut keep = vec![true; p.lines.len()];
-    let mut opaque = false;
-    for (i, line) in p.parsed.iter().enumerate() {
-        match line {
-            Line::Barrier(b) => opaque = *b,
-            Line::Instr { op, arg }
-                if !opaque
-                    && matches!(op.as_str(), "sta" | "stx" | "sty")
-                    && trackable(arg)
-                    && (arg.starts_with("__t_") || arg.starts_with("__l_"))
-                    && !read.contains(arg)
-                    && !read.contains(base(arg)) =>
-            {
-                keep[i] = false;
-                *changes += 1;
+    let _ = any_asm;
+    let n_vars = me.vars.len() as u32;
+    let mut changed = false;
+    lines.retain(|l| {
+        if let Line::Ins(ins) = l {
+            if matches!(ins.op, Op::Sta | Op::Stx | Op::Sty) {
+                if let Arg::Mem(Opnd {
+                    sym: Sym::Var(i, v),
+                    off,
+                    ..
+                }) = &ins.arg
+                {
+                    let temp = v.0 >= n_vars
+                        || me.vars[v.0 as usize].temp
+                        || (me.rets.len() == 1 && me.rets[0] == VarId(v.0));
+                    let user_named = v.0 < n_vars && !me.vars[v.0 as usize].temp;
+                    let _ = user_named;
+                    if *i == inst
+                        && temp
+                        && !params.contains(&v.0)
+                        && !shared_rets.contains(&v.0)
+                        && !read.contains_key(&(v.0, *off))
+                        && !me.vars.get(v.0 as usize).is_some_and(|x| x.pointer)
+                    {
+                        changed = true;
+                        return false;
+                    }
+                }
             }
-            _ => {}
         }
-    }
-    p.lines
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(l, k)| k.then_some(l))
-        .collect()
+        true
+    });
+    changed
 }
 
-/// Removes `lda`/`ldx`/`ldy` of side-effect-free operands (immediates and
-/// compiler-owned memory, possibly indexed) when the next instruction, on
-/// the same straight-line path, reloads that register without reading it.
-fn dead_loads(lines: Vec<String>, changes: &mut usize) -> Vec<String> {
-    let p = Program::new(lines);
-    let mut keep = vec![true; p.lines.len()];
-    let mut opaque = false;
-    for (i, line) in p.parsed.iter().enumerate() {
-        let Line::Instr { op, arg } = line else {
-            if let Line::Barrier(b) = line {
-                opaque = *b;
+/// Jump threading, unreachable code, jumps to the next line.
+fn jumps(lines: &mut Vec<Line>) -> bool {
+    let mut changed = false;
+    // Label → index of the first instruction after it.
+    let index = |lines: &[Line]| {
+        let mut m: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, l) in lines.iter().enumerate() {
+            if let Line::Label(n) = l {
+                m.insert(n.clone(), i);
             }
-            continue;
-        };
-        if opaque || !matches!(op.as_str(), "lda" | "ldx" | "ldy") {
-            continue;
         }
-        if !(arg.starts_with('#') || arg.trim_start_matches('(').starts_with("__")) {
-            continue;
+        m
+    };
+    let first_ins = |lines: &[Line], mut i: usize| -> Option<Ins> {
+        while i < lines.len() {
+            match &lines[i] {
+                Line::Ins(ins) => return Some(ins.clone()),
+                Line::Label(_) | Line::Src(..) => i += 1,
+                _ => return None,
+            }
         }
-        let reg = op.chars().nth(2).unwrap();
-        // The very next line must be the replacing instruction: a label in
-        // between could be entered with the first load's value.
-        let Some(Line::Instr {
-            op: next,
-            arg: next_arg,
-        }) = p.parsed.get(i + 1)
+        None
+    };
+    let labels = index(lines);
+    for i in 0..lines.len() {
+        let Line::Ins(ins) = &lines[i] else { continue };
+        let Some(Opnd {
+            sym: Sym::Label(target),
+            ..
+        }) = ins.arg.opnd()
         else {
             continue;
         };
-        let replaces = match reg {
-            'a' => matches!(next.as_str(), "lda" | "pla" | "txa" | "tya"),
-            'x' => matches!(next.as_str(), "ldx" | "tax" | "tsx"),
-            _ => matches!(next.as_str(), "ldy" | "tay"),
-        };
-        let reads_self = match reg {
-            'x' => next_arg.contains(",x"),
-            'y' => next_arg.contains(",y"),
-            _ => false,
-        };
-        if replaces && !reads_self {
-            keep[i] = false;
-            *changes += 1;
+        if !(ins.op.is_branch() || ins.op == Op::Jmp) || !matches!(ins.arg, Arg::Mem(_)) {
+            continue;
+        }
+        let mut t = target.clone();
+        let mut hops = 0;
+        while let Some(&at) = labels.get(&t) {
+            match first_ins(lines, at) {
+                Some(Ins {
+                    op: Op::Jmp,
+                    arg:
+                        Arg::Mem(Opnd {
+                            sym: Sym::Label(n), ..
+                        }),
+                }) if hops < 8 && n != t => {
+                    t = n;
+                    hops += 1;
+                }
+                Some(Ins { op: Op::Rts, .. }) if ins.op == Op::Jmp => {
+                    lines[i] = Line::Ins(Ins::imp(Op::Rts));
+                    changed = true;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        if let Line::Ins(ins) = &mut lines[i] {
+            if let Some(o) = ins.arg.opnd_mut() {
+                if let Sym::Label(n) = &o.sym {
+                    if *n != t {
+                        o.sym = Sym::Label(t);
+                        changed = true;
+                    }
+                }
+            }
         }
     }
-    p.lines
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(l, k)| k.then_some(l))
-        .collect()
+    // Branch over jump: `bxx L1; jmp L2; L1:` → `b!xx L2; L1:`.
+    let mut i = 0;
+    while i + 2 < lines.len() {
+        if let (Line::Ins(b), Line::Ins(j), Line::Label(l1)) =
+            (&lines[i], &lines[i + 1], &lines[i + 2])
+        {
+            if b.op.is_branch() && j.op == Op::Jmp && matches!(j.arg, Arg::Mem(_)) {
+                if let Some(Opnd {
+                    sym: Sym::Label(t), ..
+                }) = b.arg.opnd()
+                {
+                    if t == l1 {
+                        let inv = Ins::new(b.op.inverse(), j.arg.clone());
+                        lines[i] = Line::Ins(inv);
+                        lines.remove(i + 1);
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    // Jumps to the immediately following label; code after unconditional transfers.
+    let mut out: Vec<Line> = Vec::new();
+    let mut dead = false;
+    for (i, l) in lines.iter().enumerate() {
+        match l {
+            Line::Label(_) | Line::Barrier | Line::Bytes(_) | Line::Words(_) | Line::Fill(_) => {
+                dead = false;
+                out.push(l.clone());
+            }
+            Line::Ins(ins) if dead => {
+                let _ = ins;
+                changed = true;
+            }
+            Line::Ins(ins) => {
+                if (ins.op == Op::Jmp || ins.op.is_branch()) && matches!(ins.arg, Arg::Mem(_)) {
+                    if let Some(Opnd {
+                        sym: Sym::Label(t), ..
+                    }) = ins.arg.opnd()
+                    {
+                        let mut k = i + 1;
+                        let mut falls = false;
+                        while k < lines.len() {
+                            match &lines[k] {
+                                Line::Label(n) if n == t => {
+                                    falls = true;
+                                    break;
+                                }
+                                Line::Label(_) | Line::Src(..) => k += 1,
+                                _ => break,
+                            }
+                        }
+                        if falls {
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+                out.push(l.clone());
+                if matches!(ins.op, Op::Jmp | Op::Rts | Op::Rti) {
+                    dead = true;
+                }
+            }
+            _ => out.push(l.clone()),
+        }
+    }
+    // Labels that nothing references (keep function entry labels).
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    for l in &out {
+        match l {
+            Line::Ins(ins) => {
+                if let Some(Opnd {
+                    sym: Sym::Label(n), ..
+                }) = ins.arg.opnd()
+                {
+                    used.insert(n.clone());
+                }
+            }
+            Line::Bytes(v) | Line::Words(v) => {
+                for o in v {
+                    if let Sym::Label(n) = &o.sym {
+                        used.insert(n.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let before = out.len();
+    let mut in_asm = false;
+    out.retain(|l| match l {
+        Line::Barrier => {
+            in_asm = !in_asm;
+            true
+        }
+        Line::Label(n) => {
+            in_asm
+                || used.contains(n)
+                || !n.contains("_b") && !n.contains("_l")
+                || !n.starts_with("__f")
+        }
+        _ => true,
+    });
+    if out.len() != before {
+        changed = true;
+    }
+    *lines = out;
+    changed
+}
+
+/// `jsr f; rts` → `jmp f`.
+fn tails(lines: &mut [Line]) -> bool {
+    let mut changed = false;
+    for i in 0..lines.len().saturating_sub(1) {
+        if let (Line::Ins(a), Line::Ins(b)) = (&lines[i], &lines[i + 1]) {
+            if a.op == Op::Jsr && b.op == Op::Rts {
+                let target = a.arg.clone();
+                lines[i] = Line::Ins(Ins::new(Op::Jmp, target));
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// `lda x; [sta ...]; cmp #0; beq/bne` → drop the `cmp`: the load already set
+/// N and Z from A. Only `cmp` also sets the carry, so the carry must be
+/// overwritten before it is read on both paths after the branch.
+fn zero_compares(lines: &mut Vec<Line>) -> bool {
+    fn carry_dead(lines: &[Line], mut p: usize) -> bool {
+        for _ in 0..16 {
+            match lines.get(p) {
+                Some(Line::Label(_)) => {}
+                Some(Line::Ins(i)) => {
+                    use Op::*;
+                    match i.op {
+                        Clc | Sec | Cmp | Cpx | Cpy | Asl | Lsr => return true,
+                        Adc | Sbc | Rol | Ror | Bcc | Bcs | Php | Plp | Jsr | Rts | Rti | Jmp
+                        | Brk | Beq | Bne | Bmi | Bpl | Bvc | Bvs => return false,
+                        _ => {}
+                    }
+                }
+                _ => return false,
+            }
+            p += 1;
+        }
+        false
+    }
+    let label_at = |lines: &[Line], name: &str| {
+        lines
+            .iter()
+            .position(|l| matches!(l, Line::Label(n) if n == name))
+    };
+    let mut changed = false;
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let is_cmp0 = matches!(&lines[i], Line::Ins(ins) if ins.op == Op::Cmp && matches!(&ins.arg, Arg::Imm(o) if o.sym == Sym::Num && o.off == 0));
+        let branch = match &lines[i + 1] {
+            Line::Ins(b) if matches!(b.op, Op::Beq | Op::Bne) => {
+                b.arg.opnd().and_then(|o| match &o.sym {
+                    Sym::Label(n) => Some(n.clone()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        if is_cmp0 {
+            if let Some(target) = branch {
+                // The last flag-setting instruction before the compare.
+                let mut k = i;
+                let mut from_a = false;
+                while k > 0 {
+                    k -= 1;
+                    match &lines[k] {
+                        Line::Ins(p) if matches!(p.op, Op::Sta | Op::Stx | Op::Sty) => continue,
+                        Line::Ins(p) => from_a = nz_from_a(p),
+                        _ => {}
+                    }
+                    break;
+                }
+                if from_a
+                    && carry_dead(lines, i + 2)
+                    && label_at(lines, &target).is_some_and(|t| carry_dead(lines, t + 1))
+                {
+                    lines.remove(i);
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    changed
 }

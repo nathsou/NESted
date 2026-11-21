@@ -1,0 +1,829 @@
+// GLIDE: slide across a frozen lake, collect every star, reach the exit.
+//
+// Ice keeps you moving until something stops you: rock, a snowdrift, an
+// ice block, or the edge of the room. Push blocks to make new stopping
+// points, sink them into holes to make bridges, and undo any mistake.
+// 25 levels on a CNROM board; four CHR banks animate water, stars and
+// the exit portal.
+cartridge {
+    title = "Glide";
+    mapper = cnrom;
+    mirroring = vertical;
+    chr = "assets/glide.chr";
+}
+
+use std::video;
+use std::input;
+use std::audio;
+use std::mapper;
+use std::runtime;
+use levels;
+use sound;
+
+/// A cell of the 16 x 13 playfield.
+type Cell = u8 in 0..208;
+type Level = u8 in 0..25;
+
+enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+enum Mode {
+    Title,
+    Play,
+    Slide,
+    Push,
+    Fall,
+    Clear,
+}
+
+enum Event {
+    Stop,
+    Push,
+    Fall,
+    Win,
+}
+
+// Background metatiles (art.py).
+const T_ICE: u8 = 0x60;
+const T_SNOW: u8 = 0x64;
+const T_ROCK: u8 = 0x68;
+const T_HOLE: u8 = 0x6c;
+const T_BLOCK: u8 = 0x70;
+const T_STAR: u8 = 0x74;
+const T_EXIT: u8 = 0x78;
+const T_OPEN: u8 = 0x7c;
+const T_REFROZEN: u8 = 0x80;
+const T_LOGO: u8 = 0x84;
+
+// Sprites.
+const S_DOWN: u8 = 0x00;
+const S_UP: u8 = 0x04;
+const S_LEFT: u8 = 0x08;
+const S_RIGHT: u8 = 0x0c;
+const S_SMALL: u8 = 0x10;
+const S_BLOCK: u8 = 0x14;
+const S_SPARK: u8 = 0x18;
+const S_PUFF: u8 = 0x19;
+const S_ARROW: u8 = 0x1a;
+
+/// A sunk block: slides like ice.
+const REFROZEN: u8 = 8;
+
+const PALETTES: [u8; 32] = [
+    0x0c, 0x21, 0x31, 0x30,
+    0x0c, 0x00, 0x10, 0x30,
+    0x0c, 0x01, 0x11, 0x21,
+    0x0c, 0x31, 0x28, 0x30,
+    0x0c, 0x0f, 0x30, 0x27,
+    0x0c, 0x11, 0x31, 0x30,
+    0x0c, 0x28, 0x38, 0x30,
+    0x0c, 0x30, 0x31, 0x21,
+];
+
+// ------------------------------------------------------------------ state
+
+/// Each cell: floor code in bits 0-3, a star in bit 4, a block in bit 5.
+var cells: [u8; 208];
+const STAR_BIT: u8 = 0x10;
+const BLOCK_BIT: u8 = 0x20;
+
+var mode: Mode = Mode::Title;
+var level: Level = 0;
+/// Best move count per level (0 = not cleared yet).
+var best: [u16; 25];
+var player: Cell = 0;
+var exit: Cell = 0;
+var facing: Dir = Dir::Down;
+var px: u8 = 0;
+var py: u8 = 0;
+var stars_left: u8 = 0;
+var stars_total: u8 = 0;
+var moves: u16 = 0;
+var timer: u8 = 0;
+var repeat: u8 = 0;
+
+// The move being animated.
+var path: [Cell; 16];
+var path_len: u8 = 0;
+var path_at: u8 = 0;
+var event: Event = Event::Stop;
+var push_from: Cell = 0;
+var push_to: Cell = 0;
+var bx: u8 = 0;
+var by: u8 = 0;
+
+// Undo: a log of cells as they were, with a mark per move.
+const LOG: u8 = 192;
+type LogSize = u8 in 0..=192;
+var log_cell: [Cell; 192];
+var log_value: [u8; 192];
+var log_top: LogSize = 0;
+const MARKS: u8 = 48;
+type MarkCount = u8 in 0..=48;
+var mark_log: [u8; 48];
+var mark_player: [Cell; 48];
+var marks: MarkCount = 0;
+
+// Cells waiting to be redrawn, a few per frame.
+var dirty: [Cell; 64];
+var dirty_in: u8 = 0;
+var dirty_out: u8 = 0;
+
+struct Particle {
+    x: u8,
+    y: u8,
+    dx: i8,
+    dy: i8,
+    life: u8,
+    tile: u8,
+    attr: u8,
+}
+
+var particles: [Particle; 8];
+var next_particle: u8 = 0;
+
+// ---------------------------------------------------------------- helpers
+
+fn delta(d: Dir) -> u8 {
+    return match d {
+        Dir::Up => 240,
+        Dir::Down => 16,
+        Dir::Left => 255,
+        Dir::Right => 1,
+    };
+}
+
+fn step(c: Cell, d: Dir) -> Cell { let n = c + delta(d);
+if n >= 208 {
+    return c;
+}
+return n;
+ } fn floor_of(c: Cell) -> u8 {
+    return cells[c] & 15;
+}
+
+fn has_star(c: Cell) -> bool {
+    return (cells[c] & STAR_BIT) != 0;
+}
+
+fn has_block(c: Cell) -> bool {
+    return (cells[c] & BLOCK_BIT) != 0;
+}
+
+fn cell_x(c: Cell) -> u8 {
+    return (c & 15) << 4;
+}
+
+fn cell_y(c: Cell) -> u8 {
+    return 32 + ((c >> 4) << 4);
+}
+
+fn sprite16(x: u8, y: u8, t: u8, attr: u8) {
+    video::sprite(x, y, t, attr);
+    video::sprite(x + 8, y, t + 1, attr);
+    video::sprite(x, y + 8, t + 2, attr);
+    video::sprite(x + 8, y + 8, t + 3, attr);
+}
+
+fn spawn(x: u8, y: u8, dx: i8, dy: i8, tile: u8, attr: u8) {
+    let i = next_particle & 7;
+    next_particle += 1;
+    particles[i] = Particle { x, y, dx, dy, life: 20, tile, attr };
+}
+
+fn burst(c: Cell, tile: u8, attr: u8) {
+    let x = cell_x(c) + 4;
+    let y = cell_y(c) + 4;
+    spawn(x, y, -2, -2, tile, attr);
+    spawn(x, y, 2, -2, tile, attr);
+    spawn(x, y, -2, 1, tile, attr);
+    spawn(x, y, 2, 1, tile, attr);
+}
+
+fn draw_particles() {
+    for i in 0..8 {
+        let p = particles[i];
+        if p.life > 0 {
+            particles[i].life = p.life - 1;
+            particles[i].x = p.x + u8(p.dx);
+            particles[i].y = p.y + u8(p.dy);
+            if (p.life & 1) == 0 || p.life > 8 {
+                video::sprite(p.x, p.y, p.tile, p.attr);
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ cells
+
+/// Queue a cell to be redrawn.
+fn mark(c: Cell) {
+    dirty[dirty_in & 63] = c;
+    dirty_in += 1;
+}
+
+fn draw(c: Cell) {
+    var t = T_ICE;
+    var palette: u8 = 0;
+    if has_block(c) {
+        t = T_BLOCK;
+    } else if has_star(c) {
+        t = T_STAR;
+        palette = 3;
+    } else {
+        match floor_of(c) {
+            levels::SNOW => { t = T_SNOW; }
+            levels::ROCK => {
+                t = T_ROCK;
+                palette = 1;
+            }
+            levels::HOLE => {
+                t = T_HOLE;
+                palette = 2;
+            }
+            levels::EXIT => {
+                t = if stars_left == 0 { T_OPEN } else { T_EXIT };
+                palette = 3;
+            }
+            REFROZEN => {
+                t = T_REFROZEN;
+                palette = 2;
+            }
+            _ => {}
+        }
+    }
+    let x = (c & 15) << 1;
+    let y = 4 + ((c >> 4) << 1);
+    video::metatile(x, y, t);
+    video::attribute(x, y, palette);
+}
+
+/// Redraw queued cells while the frame's update queue has room.
+fn flush() {
+    var budget: u8 = 8;
+    while dirty_out != dirty_in && budget > 0 && video::room() >= 16 {
+        draw(dirty[dirty_out & 63]);
+        dirty_out += 1;
+        budget -= 1;
+    }
+}
+
+/// Record a cell before changing it, for undo.
+fn remember(c: Cell) {
+    if log_top >= LOG {
+        return;
+    }
+    log_cell[log_top] = c;
+    log_value[log_top] = cells[c];
+    log_top += 1;
+}
+
+fn begin_move() {
+    // Forget the oldest history rather than lose part of a move.
+    if marks >= MARKS || log_top > LOG - 24 {
+        marks = 0;
+        log_top = 0;
+    }
+    mark_log[marks] = log_top;
+    mark_player[marks] = player;
+    marks += 1;
+    moves += 1;
+}
+
+fn undo() {
+    if marks == 0 {
+        return;
+    }
+    marks -= 1;
+    let m = marks;
+    let start = mark_log[m];
+    while log_top > start && log_top > 0 {
+        log_top -= 1;
+        let c = log_cell[log_top];
+        cells[c] = log_value[log_top];
+        mark(c);
+    }
+    player = mark_player[m];
+    px = cell_x(player);
+    py = cell_y(player);
+    if moves > 0 {
+        moves -= 1;
+    }
+    count_stars();
+    mark(exit);
+    hud_counts();
+    audio::sfx(1, sound::UNDO);
+}
+
+fn count_stars() {
+    var n: u8 = 0;
+    for i in 0..208 {
+        if has_star(i) {
+            n += 1;
+        }
+    }
+    stars_left = n;
+}
+
+// -------------------------------------------------------------------- HUD
+
+fn hud() {
+    video::text(2, 1, "LEVEL");
+    video::number(8, 1, u16(level) + 1, 2, '0');
+    let base = u16(level) * 16;
+    for i in 0..16 {
+        video::tile(12 + i, 1, levels::NAMES[base + u16(i)]);
+    }
+    video::tile(2, 2, '*');
+    video::text(6, 2, "/");
+    video::number(7, 2, u16(stars_total), 2, '0');
+    video::text(11, 2, "MOVES");
+    video::text(21, 2, "PAR");
+    video::number(25, 2, u16(levels::PAR[level]), 2, '0');
+    hud_counts();
+}
+
+fn hud_counts() {
+    video::number(4, 2, u16(stars_total - stars_left), 2, '0');
+    video::number(17, 2, moves, 3, '0');
+}
+
+// ------------------------------------------------------------------ level
+
+fn load(n: Level) {
+    video::off();
+    level = n;
+    let base = u16(n) * 208;
+    stars_left = 0;
+    moves = 0;
+    log_top = 0;
+    marks = 0;
+    dirty_in = 0;
+    dirty_out = 0;
+    for i in 0..208 {
+        let code = levels::MAPS[base + u16(i)];
+        cells[i] = match code {
+            levels::SNOW => levels::SNOW,
+            levels::ROCK => levels::ROCK,
+            levels::HOLE => levels::HOLE,
+            levels::EXIT => levels::EXIT,
+            levels::STAR => levels::ICE | STAR_BIT,
+            levels::BLOCK => levels::ICE | BLOCK_BIT,
+            _ => levels::ICE,
+        };
+        if code == levels::START {
+            player = i;
+        }
+        if code == levels::EXIT {
+            exit = i;
+        }
+        if code == levels::STAR {
+            stars_left += 1;
+        }
+    }
+    stars_total = stars_left;
+    video::clear(0, ' ');
+    for i in 0..208 {
+        draw(i);
+    }
+    hud();
+    px = cell_x(player);
+    py = cell_y(player);
+    facing = Dir::Down;
+    for i in 0..8 {
+        particles[i].life = 0;
+    }
+    mode = Mode::Play;
+    video::on();
+}
+
+// ------------------------------------------------------------------- moves
+
+/// Work out where a move ends and what happens there.
+fn plan(d: Dir) -> bool {
+    var p = player;
+    var left = stars_left;
+    path_len = 0;
+    event = Event::Stop;
+    loop {
+        let n = step(p, d);
+        let f = floor_of(n);
+        if f == levels::ROCK || (f == levels::EXIT && left > 0) {
+            break;
+        }
+        if has_block(n) {
+            // Push the block: it slides until stopped, or sinks.
+            var c = n;
+            loop {
+                let m = step(c, d);
+                let fm = floor_of(m);
+                if fm == levels::ROCK || fm == levels::EXIT || has_block(m) {
+                    break;
+                }
+                c = m;
+                if fm == levels::HOLE || fm == levels::SNOW {
+                    break;
+                }
+            }
+            if c != n {
+                event = Event::Push;
+                push_from = n;
+                push_to = c;
+            }
+            break;
+        }
+        p = n;
+        path[path_len & 15] = n;
+        path_len += 1;
+        if has_star(n) && left > 0 {
+            left -= 1;
+        }
+        if f == levels::HOLE {
+            event = Event::Fall;
+            break;
+        }
+        if f == levels::EXIT {
+            event = Event::Win;
+            break;
+        }
+        if f == levels::SNOW {
+            break;
+        }
+    }
+    return path_len > 0 || event == Event::Push;
+}
+
+fn try_move(d: Dir) {
+    facing = d;
+    if !plan(d) {
+        audio::sfx(1, sound::BUMP);
+        return;
+    }
+    begin_move();
+    hud_counts();
+    if path_len > 0 {
+        path_at = 0;
+        mode = Mode::Slide;
+        audio::sfx(3, sound::SLIDE);
+    } else {
+        start_push();
+    }
+}
+
+fn collect(c: Cell) {
+    remember(c);
+    cells[c] &= ~STAR_BIT;
+    stars_left -= 1;
+    mark(c);
+    burst(c, S_SPARK, 2);
+    hud_counts();
+    if stars_left == 0 {
+        mark(exit);
+        audio::sfx(1, sound::OPEN);
+    } else {
+        audio::sfx(1, sound::STAR);
+    }
+}
+
+fn slide() {
+    let target = path[path_at & 15];
+    let tx = cell_x(target);
+    let ty = cell_y(target);
+    let speed: u8 = if path_at == 0 && (px & 15) < 8 && (py & 15) < 8 { 4 } else { 4 };
+    if px < tx {
+        px += speed;
+    } else if px > tx {
+        px -= speed;
+    }
+    if py < ty {
+        py += speed;
+    } else if py > ty {
+        py -= speed;
+    }
+    if px != tx || py != ty {
+        return;
+    }
+    player = target;
+    if has_star(target) {
+        collect(target);
+    }
+    path_at += 1;
+    if path_at < path_len {
+        return;
+    }
+    match event {
+        Event::Push => start_push(),
+        Event::Fall => {
+            mode = Mode::Fall;
+            timer = 40;
+            audio::sfx(1, sound::FALL);
+            audio::sfx(3, sound::SPLASH);
+        }
+        Event::Win => clear_level(),
+        Event::Stop => {
+            mode = Mode::Play;
+            if floor_of(player) == levels::SNOW {
+                burst(player, S_PUFF, 3);
+            }
+        }
+    }
+}
+
+fn start_push() {
+    remember(push_from);
+    cells[push_from] &= ~BLOCK_BIT;
+    mark(push_from);
+    bx = cell_x(push_from);
+    by = cell_y(push_from);
+    mode = Mode::Push;
+    audio::sfx(3, sound::PUSH);
+}
+
+fn push() {
+    let tx = cell_x(push_to);
+    let ty = cell_y(push_to);
+    if bx < tx {
+        bx += 4;
+    } else if bx > tx {
+        bx -= 4;
+    }
+    if by < ty {
+        by += 4;
+    } else if by > ty {
+        by -= 4;
+    }
+    if bx != tx || by != ty {
+        sprite16(bx, by, S_BLOCK, 1);
+        return;
+    }
+    remember(push_to);
+    if floor_of(push_to) == levels::HOLE {
+        cells[push_to] = (cells[push_to] & 0xf0) | REFROZEN;
+        burst(push_to, S_PUFF, 3);
+        audio::sfx(3, sound::SPLASH);
+    } else {
+        cells[push_to] |= BLOCK_BIT;
+        if floor_of(push_to) == levels::SNOW {
+            burst(push_to, S_PUFF, 3);
+        }
+    }
+    mark(push_to);
+    mode = Mode::Play;
+}
+
+fn clear_level() {
+    mode = Mode::Clear;
+    timer = 0;
+    if best[level] == 0 || moves < best[level] {
+        best[level] = moves;
+    }
+    audio::stop();
+    audio::sfx(0, sound::CLEAR);
+    for y in 12..18 {
+        video::fill(6, y, 20, ' ');
+    }
+    video::text(10, 13, "LEVEL CLEAR!");
+}
+
+fn play_music() {
+    audio::play(sound::MELODY, sound::CHORDS, sound::BASS, sound::DRUMS);
+}
+
+// ------------------------------------------------------------------ title
+
+fn title() {
+    video::off();
+    mode = Mode::Title;
+    video::clear(0, ' ');
+    // An ice field framed by rock, with a dark panel for the menu.
+    for y in 0..13 {
+        for x in 0..16 {
+            var t = T_ICE;
+            var palette: u8 = 0;
+            if x == 0 || x == 15 || y == 0 || y == 12 {
+                t = T_ROCK;
+                palette = 1;
+            }
+            video::metatile(x * 2, 4 + y * 2, t);
+            video::attribute(x * 2, 4 + y * 2, palette);
+        }
+    }
+    for i in 0..5 {
+        video::metatile(10 + i * 2, 8, T_LOGO + i * 4);
+    }
+    for i in 0..5 {
+        video::attribute(10 + i * 2, 8, 3);
+    }
+    for y in 16..26 {
+        video::fill(4, y, 24, ' ');
+    }
+    for y in 0..5 {
+        for x in 2..14 {
+            video::attribute(x * 2, 16 + y * 2, 1);
+        }
+    }
+    video::text(8, 1, "A FROZEN PUZZLE");
+    video::text(4, 2, "COLLECT STARS, FIND EXIT");
+    video::text(6, 23, "ARROWS SLIDE  B UNDO");
+    title_level();
+    px = 40;
+    py = 104;
+    facing = Dir::Right;
+    video::on();
+}
+
+fn title_level() {
+    video::fill(6, 17, 20, ' ');
+    video::text(7, 17, "<");
+    video::text(10, 17, "LEVEL");
+    video::number(16, 17, u16(level) + 1, 2, '0');
+    video::text(24, 17, ">");
+    let base = u16(level) * 16;
+    for i in 0..16 {
+        video::tile(8 + i, 19, levels::NAMES[base + u16(i)]);
+    }
+    video::fill(8, 21, 16, ' ');
+    if best[level] != 0 {
+        video::text(9, 21, "BEST");
+        video::number(14, 21, best[level], 3, '0');
+        if best[level] <= u16(levels::PAR[level]) {
+            video::text(18, 21, "*PAR");
+        }
+    }
+}
+
+fn title_update() {
+    let p = input::pressed();
+    if (p & input::LEFT) != 0 {
+        level = if level == 0 { 24 } else { level - 1 };
+        title_level();
+        audio::sfx(1, sound::BLIP);
+    }
+    if (p & input::RIGHT) != 0 {
+        level = if level == 24 { 0 } else { level + 1 };
+        title_level();
+        audio::sfx(1, sound::BLIP);
+    }
+    if (p & (input::START | input::A)) != 0 {
+        load(level);
+        return;
+    }
+    // A penguin glides back and forth below the logo.
+    if facing == Dir::Right {
+        px += 2;
+        if px >= 200 {
+            facing = Dir::Left;
+            burst(69, S_PUFF, 3);
+        }
+    } else {
+        px -= 2;
+        if px <= 32 {
+            facing = Dir::Right;
+        }
+    }
+    sprite16(px, py, if facing == Dir::Right { S_RIGHT } else { S_LEFT }, 0);
+    if (runtime::frames & 32) != 0 {
+        video::text(10, 25, "PRESS START");
+    } else {
+        video::fill(10, 25, 11, ' ');
+    }
+}
+
+// ------------------------------------------------------------------- game
+
+fn init() {
+    video::palettes(PALETTES);
+    play_music();
+    title();
+}
+
+fn direction(buttons: u8) -> u8 {
+    if (buttons & input::UP) != 0 {
+        return 1;
+    }
+    if (buttons & input::DOWN) != 0 {
+        return 2;
+    }
+    if (buttons & input::LEFT) != 0 {
+        return 3;
+    }
+    if (buttons & input::RIGHT) != 0 {
+        return 4;
+    }
+    return 0;
+}
+
+fn play_update() {
+    let p = input::pressed();
+    let h = input::held();
+    if (p & input::B) != 0 {
+        undo();
+        return;
+    }
+    if (p & input::SELECT) != 0 {
+        load(level);
+        return;
+    }
+    if (p & input::START) != 0 {
+        title();
+        return;
+    }
+    // Held directions repeat after a short delay.
+    var d = direction(p);
+    if d == 0 && direction(h) != 0 {
+        repeat += 1;
+        if repeat >= 14 {
+            repeat = 10;
+            d = direction(h);
+        }
+    } else if d != 0 {
+        repeat = 0;
+    }
+    match d {
+        1 => try_move(Dir::Up),
+        2 => try_move(Dir::Down),
+        3 => try_move(Dir::Left),
+        4 => try_move(Dir::Right),
+        _ => {}
+    }
+}
+
+fn player_tile() -> u8 {
+    return match facing {
+        Dir::Up => S_UP,
+        Dir::Down => S_DOWN,
+        Dir::Left => S_LEFT,
+        Dir::Right => S_RIGHT,
+    };
+}
+
+fn update() {
+    // Animate water, stars and the exit with the four CHR banks.
+    mapper::chr_bank(0, (runtime::frames >> 3) & 3);
+    match mode {
+        Mode::Title => {
+            title_update();
+            draw_particles();
+            return;
+        }
+        Mode::Play => play_update(),
+        Mode::Slide => {
+            slide();
+            if mode == Mode::Slide {
+                slide();
+            }
+        }
+        Mode::Push => push(),
+        Mode::Fall => {
+            timer -= 1;
+            if timer == 0 {
+                undo();
+                mode = Mode::Play;
+            }
+        }
+        Mode::Clear => {
+            timer += 1;
+            if timer == 30 {
+                video::text(8, 15, "MOVES");
+                video::number(14, 15, moves, 3, '0');
+                if moves <= u16(levels::PAR[level]) {
+                    video::text(18, 15, "PERFECT");
+                } else {
+                    video::text(18, 15, "PAR");
+                    video::number(22, 15, u16(levels::PAR[level]), 2, '0');
+                }
+            }
+            if timer == 60 {
+                video::text(11, 16, "PRESS  A");
+            }
+            if timer >= 60 && (input::pressed() & (input::A | input::START)) != 0 {
+                play_music();
+                if level == 24 {
+                    title();
+                } else {
+                    load(level + 1);
+                }
+                return;
+            }
+        }
+    }
+    if mode == Mode::Title {
+        return;
+    }
+    flush();
+    if mode == Mode::Fall {
+        if (timer & 4) != 0 {
+            sprite16(px, py, S_SMALL, 0);
+        }
+    } else if mode != Mode::Clear || (timer & 8) != 0 {
+        sprite16(px, py, player_tile(), 0);
+    }
+    if mode == Mode::Push {
+        sprite16(bx, by, S_BLOCK, 1);
+    }
+    draw_particles();
+}
